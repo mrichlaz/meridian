@@ -7,7 +7,7 @@ import { config } from "./config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const USER_CONFIG_PATH = path.join(__dirname, "user-config.json");
-const CACHE_PATH = path.join(__dirname, "hivemind-cache.json");
+const CACHE_PATH = path.join(__dirname, "data/hivemind-cache.json");
 const PACKAGE_JSON_PATH = path.join(__dirname, "package.json");
 const HEARTBEAT_INTERVAL_MS = 15 * 60 * 1000;
 
