@@ -197,7 +197,7 @@ function createTypingIndicator() {
     } catch {}
     timer = setTimeout(() => {
       tick().catch(() => null);
-    }, 8000);
+    }, 12000);
   }
 
   tick().catch(() => null);
@@ -267,12 +267,15 @@ export async function createLiveMessage(title, intro = "Starting...") {
   if (!TOKEN || !chatId) return null;
   const typing = createTypingIndicator();
 
+  // Reuse the previous live message if it exists instead of spamming new ones
+  const lastId = createLiveMessage._lastId;
+
   const state = {
     title,
     intro,
     toolLines: [],
     footer: "",
-    messageId: null,
+    messageId: lastId || null,
     flushTimer: null,
     flushPromise: null,
     flushRequested: false,
@@ -293,6 +296,7 @@ export async function createLiveMessage(title, intro = "Starting...") {
     if (!state.messageId) {
       const sent = await sendMessage(text);
       state.messageId = sent?.result?.message_id ?? null;
+      createLiveMessage._lastId = state.messageId;
       return;
     }
     await editMessage(text, state.messageId);
