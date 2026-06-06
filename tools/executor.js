@@ -440,13 +440,29 @@ const toolMap = {
     );
 
     if (!changes || typeof changes !== "object" || Array.isArray(changes)) {
-      const got = Array.isArray(changes) ? "array" : typeof changes;
-      return {
-        success: false,
-        error: `changes must be a JSON object like {"minFeeActiveTvlRatio": 0.02}, got ${got}`,
-        hint: "Example: {\"changes\": {\"minFeeActiveTvlRatio\": 0.02, \"maxTvl\": 200000}}",
-        reason,
-      };
+      // Reasoning models sometimes serialise `changes` as a JSON string — auto-repair
+      if (typeof changes === "string") {
+        try {
+          changes = JSON.parse(changes);
+          if (typeof changes !== "object" || Array.isArray(changes)) throw 0;
+          log("config", "Repaired stringified changes object");
+        } catch {
+          return {
+            success: false,
+            error: `changes must be a JSON object like {"minFeeActiveTvlRatio": 0.02}, got string: "${changes.slice(0, 60)}"`,
+            hint: "Do not wrap the value in quotes. Send {\"changes\": {\"minFeeActiveTvlRatio\": 0.02}}",
+            reason,
+          };
+        }
+      } else {
+        const got = Array.isArray(changes) ? "array" : typeof changes;
+        return {
+          success: false,
+          error: `changes must be a JSON object like {"minFeeActiveTvlRatio": 0.02}, got ${got}`,
+          hint: "Example: {\"changes\": {\"minFeeActiveTvlRatio\": 0.02, \"maxTvl\": 200000}}",
+          reason,
+        };
+      }
     }
 
     const STRATEGY_BIN_KEYS = new Set(["binsBelow", "minBinsBelow", "maxBinsBelow", "defaultBinsBelow"]);
