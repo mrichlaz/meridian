@@ -707,10 +707,9 @@ export async function getTopCandidates({ limit = 10 } = {}) {
         ]);
 
         const mintShort = p.base.mint.slice(0, 8);
-        if (adv.status !== "fulfilled")      log("okx", `advanced-info unavailable for ${p.name} (${mintShort})`);
-        if (price.status !== "fulfilled")    log("okx", `price-info unavailable for ${p.name} (${mintShort})`);
-        if (clusters.status !== "fulfilled") log("okx", `cluster-list unavailable for ${p.name} (${mintShort})`);
-        if (risk.status !== "fulfilled")     log("okx", `risk-check unavailable for ${p.name} (${mintShort})`);
+        if (adv.status !== "fulfilled" && price.status !== "fulfilled" && clusters.status !== "fulfilled" && risk.status !== "fulfilled") {
+          log("okx", `All OKX data unavailable for ${p.name} (${mintShort})`);
+        }
 
         return {
           adv: adv.status === "fulfilled" ? adv.value : null,
