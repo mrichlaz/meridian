@@ -143,19 +143,30 @@ export async function sendHTML(html) {
 
 export async function editMessage(text, messageId) {
   if (!TOKEN || !chatId || !messageId) return null;
-  return postTelegram("editMessageText", {
-    message_id: messageId,
-    text: String(text).slice(0, 4096),
-  });
+  try {
+    return await postTelegram("editMessageText", {
+      message_id: messageId,
+      text: String(text).slice(0, 4096),
+    });
+  } catch (error) {
+    // Telegram rejects "message is not modified" — that's fine, same content
+    if (error?.description?.includes("not modified")) return null;
+    throw error;
+  }
 }
 
 export async function editMessageWithButtons(text, messageId, inlineKeyboard) {
   if (!TOKEN || !chatId || !messageId) return null;
-  return postTelegram("editMessageText", {
-    message_id: messageId,
-    text: String(text).slice(0, 4096),
-    reply_markup: { inline_keyboard: inlineKeyboard },
-  });
+  try {
+    return await postTelegram("editMessageText", {
+      message_id: messageId,
+      text: String(text).slice(0, 4096),
+      reply_markup: { inline_keyboard: inlineKeyboard },
+    });
+  } catch (error) {
+    if (error?.description?.includes("not modified")) return null;
+    throw error;
+  }
 }
 
 export async function answerCallbackQuery(callbackQueryId, text = "") {

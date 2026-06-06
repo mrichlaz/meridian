@@ -392,6 +392,14 @@ Schedule: managementIntervalMin, screeningIntervalMin
 Models: managementModel, screeningModel, generalModel
 Strategy: minBinsBelow, maxBinsBelow, defaultBinsBelow (legacy binsBelow maps to maxBinsBelow)
 
+CRITICAL FORMAT: 'changes' MUST be a JSON object with key:value pairs. NOT a string, NOT an array, NOT nested.
+✓ CORRECT: {"changes": {"minFeeActiveTvlRatio": 0.02, "maxTvl": 200000}}
+✗ WRONG:   {"changes": "minFeeActiveTvlRatio=0.02"}            (string)
+✗ WRONG:   {"changes": [{"key":"minFeeActiveTvlRatio","value":0.02}]}  (array)
+✗ WRONG:   {"changes": "{\"minFeeActiveTvlRatio\": 0.02}"}     (stringified)
+
+Values must be numbers, booleans, or strings — matching the type in the key list above.
+
 Reason is optional but helpful — logged as a lesson when provided.`,
       parameters: {
         type: "object",

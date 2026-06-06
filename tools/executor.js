@@ -440,7 +440,13 @@ const toolMap = {
     );
 
     if (!changes || typeof changes !== "object" || Array.isArray(changes)) {
-      return { success: false, error: "changes must be an object", reason };
+      const got = Array.isArray(changes) ? "array" : typeof changes;
+      return {
+        success: false,
+        error: `changes must be a JSON object like {"minFeeActiveTvlRatio": 0.02}, got ${got}`,
+        hint: "Example: {\"changes\": {\"minFeeActiveTvlRatio\": 0.02, \"maxTvl\": 200000}}",
+        reason,
+      };
     }
 
     const STRATEGY_BIN_KEYS = new Set(["binsBelow", "minBinsBelow", "maxBinsBelow", "defaultBinsBelow"]);
