@@ -124,11 +124,12 @@ async function validateDeployPoolThresholds(args) {
   if (
     minFeeActiveTvlRatio != null &&
     minFeeActiveTvlRatio > 0 &&
-    (feeActiveTvlRatio == null || feeActiveTvlRatio < minFeeActiveTvlRatio)
+    feeActiveTvlRatio != null &&
+    feeActiveTvlRatio < minFeeActiveTvlRatio
   ) {
     return {
       pass: false,
-      reason: `Pool fee/active-TVL ${feeActiveTvlRatio ?? "unknown"}% is below configured minFeeActiveTvlRatio ${minFeeActiveTvlRatio}%.`,
+      reason: `Pool fee/active-TVL ${feeActiveTvlRatio}% is below configured minFeeActiveTvlRatio ${minFeeActiveTvlRatio}%.`,
     };
   }
 
