@@ -593,45 +593,36 @@ export async function getTopCandidates({ limit = 10 } = {}) {
             }
           } catch {}
 
-          // Normalize to same shape as condensed pool
-          pools.push({
-            pool: raw.address,
+          // Normalize to same shape as condensed pool — run through condensePool
+          pools.push(condensePool({
+            pool_address: raw.address,
             name: raw.name,
-            base: {
-              symbol: raw.token_x?.symbol || t.symbol,
-              mint: raw.token_x?.address || t.mint,
-              organic: null,
-              warnings: null,
-            },
-            quote: { symbol: raw.token_y?.symbol, mint: raw.token_y?.address },
+            token_x: { ...raw.token_x, symbol: raw.token_x?.symbol || t.symbol, address: raw.token_x?.address || t.mint },
+            token_y: raw.token_y,
             pool_type: null,
-            bin_step: raw.pool_config?.bin_step || null,
+            dlmm_params: raw.pool_config,
             fee_pct: raw.dynamic_fee_pct || raw.pool_config?.base_fee_pct || null,
             tvl: detailTvl ?? raw.tvl ?? null,
             active_tvl: detailActiveTvl ?? null,
-            fee_window: raw.fees?.[timeframe] ?? null,
-            volume_window: volVolume ?? raw.volume?.[timeframe] ?? null,
-            fee_active_tvl_ratio: detailRatio ?? raw.fee_tvl_ratio?.[timeframe] ?? null,
+            fee: raw.fees?.[timeframe] ?? null,
+            volume: volVolume ?? raw.volume?.[timeframe] ?? null,
+            fee_active_tvl_ratio: detailRatio ?? (raw.fee_tvl_ratio?.[timeframe] != null ? Number(raw.fee_tvl_ratio[timeframe]) : null),
             volatility: vol,
             volatility_timeframe: vTime,
-            holders: detailHolders ?? raw.token_x?.holders ?? 0,
-            mcap: detailMcap ?? raw.token_x?.market_cap ?? null,
-            organic_score: null,
-            token_age_hours: null,
-            dev: null,
-            launchpad: null,
-            active_positions: null,
-            active_pct: null,
-            open_positions: null,
-            discord_signal: false,
-            price: raw.current_price ?? null,
-            price_change_pct: null,
+            base_token_holders: detailHolders ?? raw.token_x?.holders ?? 0,
+            pool_price: raw.current_price ?? null,
+            pool_price_change_pct: null,
             price_trend: null,
             min_price: null,
             max_price: null,
+            discord_signal: false,
+            discord_signal_count: 0,
+            active_positions: null,
+            active_positions_pct: null,
+            open_positions: null,
             bot_traded: true,
             bot_trade_count: t.trade_count,
-          });
+          }));
         } catch {}
       }
     }
@@ -931,6 +922,10 @@ function condensePool(p) {
     fee_change_pct: fix(p.fee_change_pct, 1),
     swap_count: p.swap_count,
     unique_traders: p.unique_traders,
+
+    // Bot tracker signal (carried through from injection)
+    bot_traded: Boolean(p.bot_traded),
+    bot_trade_count: p.bot_trade_count || null,
   };
 }
 

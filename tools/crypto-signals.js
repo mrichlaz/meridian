@@ -40,7 +40,7 @@ export function getCryptoBotTokens({ limit = 10, maxAgeMinutes = null } = {}) {
       WHERE t.symbol IS NOT NULL
         AND t.liquidity_usd IS NOT NULL
         AND t.volume_h24 IS NOT NULL
-        AND t.liquidity_usd > 100000
+        AND t.liquidity_usd > 50000
         AND t.volume_h24 > 500000
         ${cutoff ? "AND e.timestamp >= ?" : ""}
       GROUP BY e.token_mint
