@@ -7,8 +7,9 @@
 
 const RUGCHECK = "https://api.rugcheck.xyz/v1/tokens";
 const BIRDEYE = "https://public-api.birdeye.so/public";
+const BIRDEYE_KEY = process.env.BIRDEYE_API_KEY || "b8caa23f3c10cde82b5d119b2cb1e5c9";
 const BIRDEYE_HEADERS = {
-  "x-api-key": "b8caa23f3c10cde82b5d119b2cb1e5c9",
+  "x-api-key": BIRDEYE_KEY,
   accept: "application/json",
 };
 
