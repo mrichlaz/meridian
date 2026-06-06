@@ -40,9 +40,9 @@ const DEFAULT_CONFIG = {
   minSamples: 10,
   batchSize: 16,
   epochs: 20,
-  learningRate: 0.01,
+  learningRate: 0.001,
   l2: 0.001,
-  validationSplit: 0.2,
+  kFolds: 5,            // Fix #4: k-fold cross-validation
   saveCheckpoints: true,
 };
 
@@ -113,22 +113,22 @@ function computeValidationMetric(model, features, labels) {
   const recall = tp + fn > 0 ? tp / (tp + fn) : 0;
   const f1 = precision + recall > 0 ? 2 * precision * recall / (precision + recall) : 0;
 
-  // Spearman rank correlation between predicted score and actual PnL
-  // (approximate — compare rank order of scores vs labels)
-  const spearman = 0; // placeholder; could be computed from full pnl_pct values
-
   return {
     accuracy: Math.round(accuracy * 10000) / 100,
     precision: Math.round(precision * 100) / 100,
     recall: Math.round(recall * 100) / 100,
     f1: Math.round(f1 * 100) / 100,
     directionAccuracy: Math.round(accuracy * 10000) / 100,
-    spearman,
   };
 }
 
 // ─── Main training ──────────────────────────────────────────────
 
+/**
+ * Train with k-fold cross-validation.
+ * For each fold, trains a fresh model on k-1 folds, evaluates on held-out fold.
+ * Returns averaged metrics across all folds.
+ */
 export async function trainModel({ config: mlConfig } = {}) {
   const cfg = { ...DEFAULT_CONFIG, ...mlConfig };
   if (!cfg.enabled) {
@@ -141,24 +141,62 @@ export async function trainModel({ config: mlConfig } = {}) {
     return { trained: false, reason: "insufficient_data", sampleCount: allSamples.length };
   }
 
-  // Load or create model
-  let model = LogisticRegression.load();
-  if (!model) {
-    log("ml_trainer", "Creating new logistic regression model");
-    model = new LogisticRegression(FEATURE_COUNT);
+  // Determine k (folds): at most kFolds, at least 2, at most sampleCount
+  const k = Math.max(2, Math.min(cfg.kFolds, allSamples.length));
+  const indices = shuffledIndices(allSamples.length);
+  const foldSize = Math.floor(allSamples.length / k);
+
+  const foldMetrics = [];
+  const foldLossHistories = [];
+
+  for (let fold = 0; fold < k; fold++) {
+    // Split into train/val for this fold
+    const valStart = fold * foldSize;
+    const valEnd = fold === k - 1 ? allSamples.length : valStart + foldSize;
+    const valFoldIdx = indices.slice(valStart, valEnd);
+    const trainFoldIdx = [
+      ...indices.slice(0, valStart),
+      ...indices.slice(valEnd),
+    ];
+
+    const trainFeatures = trainFoldIdx.map((i) => allSamples[i].features);
+    const trainLabels = new Float64Array(trainFoldIdx.map((i) => allSamples[i].label));
+    const valFeatures = valFoldIdx.map((i) => allSamples[i].features);
+    const valLabels = new Float64Array(valFoldIdx.map((i) => allSamples[i].label));
+
+    // Fresh model per fold
+    const model = new LogisticRegression(FEATURE_COUNT);
+    const report = model.fit(trainFeatures, trainLabels, {
+      lr: cfg.learningRate,
+      l2: cfg.l2,
+      epochs: cfg.epochs,
+      batchSize: cfg.batchSize,
+      validationSplit: 0, // we evaluate manually
+      patience: 5,
+    });
+
+    const metric = computeValidationMetric(model, valFeatures, valLabels);
+    foldMetrics.push(metric);
+    if (report.lossHistory?.length) foldLossHistories.push(report.lossHistory);
+
+    log("ml_trainer", `Fold ${fold + 1}/${k}: acc=${metric.accuracy}% f1=${metric.f1} (train: ${report.finalAccuracy?.toFixed(1) || "N/A"}%)`);
   }
 
-  // Shuffle and split
-  const indices = shuffledIndices(allSamples.length);
-  const valSize = Math.floor(allSamples.length * cfg.validationSplit);
-  const trainIdx = indices.slice(0, allSamples.length - valSize);
-  const valIdx = valSize > 0 ? indices.slice(-valSize) : [];
+  // Average metrics across folds
+  const avgMetric = {
+    accuracy: avg(foldMetrics, "accuracy"),
+    precision: avg(foldMetrics, "precision"),
+    recall: avg(foldMetrics, "recall"),
+    f1: avg(foldMetrics, "f1"),
+    directionAccuracy: avg(foldMetrics, "directionAccuracy"),
+    foldCount: k,
+  };
 
-  const trainFeatures = trainIdx.map((i) => allSamples[i].features);
-  const trainLabels = new Float64Array(trainIdx.map((i) => allSamples[i].label));
-
-  // Train
-  const report = model.fit(trainFeatures, trainLabels, {
+  // Train final model on all data
+  const allFeatures = allSamples.map((s) => s.features);
+  const allLabels = new Float64Array(allSamples.map((s) => s.label));
+  const finalModel = new LogisticRegression(FEATURE_COUNT);
+  const finalReport = finalModel.fit(allFeatures, allLabels, {
     lr: cfg.learningRate,
     l2: cfg.l2,
     epochs: cfg.epochs,
@@ -167,40 +205,30 @@ export async function trainModel({ config: mlConfig } = {}) {
     patience: 5,
   });
 
-  // Validation
-  let valMetric = null;
-  if (valIdx.length > 0) {
-    const valFeatures = valIdx.map((i) => allSamples[i].features);
-    const valLabels = new Float64Array(valIdx.map((i) => allSamples[i].label));
-    valMetric = computeValidationMetric(model, valFeatures, valLabels);
-    log("ml_trainer", `Validation: acc=${valMetric.accuracy}% f1=${valMetric.f1} precision=${valMetric.precision} recall=${valMetric.recall}`);
-  }
+  // Save final model
+  finalModel.save();
 
-  // Save
-  model.save();
+  log("ml_trainer", `CV: ${k}-fold avg acc=${avgMetric.accuracy}% f1=${avgMetric.f1}. Final trained on all ${allSamples.length} samples.`);
 
   if (cfg.saveCheckpoints) {
-    saveCheckpoint(model, {
+    saveCheckpoint(finalModel, {
       sampleCount: allSamples.length,
-      trainSize: trainFeatures.length,
-      valSize: valIdx.length,
-      validation: valMetric,
+      kFolds: k,
+      cvMetric: avgMetric,
+      foldMetrics,
       timestamp: new Date().toISOString(),
     });
   }
 
-  log("ml_trainer", `Trained on ${trainFeatures.length} samples, final loss: ${report.finalLoss?.toFixed(4) || "N/A"}`);
-
   return {
     trained: true,
-    modelGeneration: model.generation,
+    modelGeneration: finalModel.generation,
     sampleCount: allSamples.length,
-    trainSize: trainFeatures.length,
-    valSize: valIdx.length,
-    epochs: report.epochs,
-    finalLoss: report.finalLoss,
-    finalAccuracy: report.finalAccuracy,
-    validation: valMetric,
+    folds: k,
+    cv: avgMetric,
+    foldMetrics,
+    finalLoss: finalReport.finalLoss,
+    finalAccuracy: finalReport.finalAccuracy,
   };
 }
 
@@ -239,6 +267,12 @@ export function computeBlendLambda(valMetric, config = {}) {
   }
 
   return Math.round(lambda * 100) / 100;
+}
+
+function avg(arr, key) {
+  if (!arr.length) return 0;
+  const sum = arr.reduce((a, b) => a + (b[key] || 0), 0);
+  return Math.round(sum / arr.length * 100) / 100;
 }
 
 // ─── Checkpoint ─────────────────────────────────────────────────

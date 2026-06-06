@@ -1,25 +1,21 @@
 /**
  * Logistic Regression Model (pure JS, no dependencies)
  *
- * Trains via mini-batch SGD with L2 regularization and balanced
- * class weighting. Exports/imports as JSON.
+ * Trains via mini-batch SGD with Adam optimizer, L2 regularization,
+ * and proper class-weighted cross-entropy loss.
  *
- * Architecture:
- *   Input (74-dim) → weights (74) + bias → sigmoid → [0, 1]
+ * Fix #2: Adam optimizer with momentum + adaptive learning rates
+ * Fix #3: Class-weighted loss (not learning rate multipliers)
  *
+ * Architecture: Input (74-dim) → weights (74) + bias → sigmoid → [0, 1]
  * Total parameters: 75
  * Inference: single dot product + sigmoid (~0.001ms)
- * Training: closed-form gradient, converges reliably with <100 samples
  *
- * Why this over a deep network:
- *   - Pwnagotchi runs A2C with ~3K params on a Pi Zero. We don't need
- *     depth — the 74 hand-crafted features already encode the domain
- *     knowledge. A linear model on top is interpretable, fast, and
- *     learns correctly with gradient descent (unlike the random-search
- *     stub that was here before).
- *   - Logistic regression has a convex loss surface — it always converges
- *     to the global optimum. No hyperparameter tuning needed.
- *   - The sigmoid output IS a probability, directly usable as a score.
+ * Why logistic regression:
+ *   - Pwnagotchi runs A2C with ~3K params on a Pi Zero. 75 params on
+ *     74 hand-crafted, domain-informed features is the right size.
+ *   - Convex loss surface → always converges to global optimum.
+ *   - Zero runtime dependencies — trains inline in the same Node process.
  */
 
 import { readFileSync, writeFileSync, existsSync } from "fs";
@@ -28,12 +24,67 @@ import { FEATURE_COUNT } from "./features.js";
 
 const MODEL_FILE = PATHS.mlModel || `${PATHS.data}/ml/ml-model.json`;
 
+// ─── Adam Optimizer ─────────────────────────────────────────────
+
+/**
+ * Adam (Adaptive Moment Estimation) — stateful optimizer.
+ * Maintains per-parameter first/second moment estimates with
+ * bias correction for mini-batch SGD.
+ */
+class Adam {
+  constructor(dim, lr = 0.001, beta1 = 0.9, beta2 = 0.999, eps = 1e-8) {
+    this.lr = lr;
+    this.beta1 = beta1;
+    this.beta2 = beta2;
+    this.eps = eps;
+    this.t = 0;
+
+    // Weight moments
+    this.m = new Float64Array(dim);   // first moment (momentum)
+    this.v = new Float64Array(dim);   // second moment (RMSprop)
+    // Bias moments (single scalar)
+    this.mB = 0;
+    this.vB = 0;
+  }
+
+  /**
+   * Apply a gradient step. Modifies weights and bias in-place.
+   *
+   * @param {Float64Array} weights — model weights (updated in-place)
+   * @param {Float64Array} dw — weight gradients
+   * @param {number} db — bias gradient
+   */
+  step(weights, dw, db) {
+    this.t++;
+
+    // Weight update
+    for (let i = 0; i < weights.length; i++) {
+      this.m[i] = this.beta1 * this.m[i] + (1 - this.beta1) * dw[i];
+      this.v[i] = this.beta2 * this.v[i] + (1 - this.beta2) * dw[i] * dw[i];
+
+      const mHat = this.m[i] / (1 - this.beta1 ** this.t);
+      const vHat = this.v[i] / (1 - this.beta2 ** this.t);
+
+      weights[i] -= this.lr * mHat / (Math.sqrt(vHat) + this.eps);
+    }
+
+    // Bias update
+    this.mB = this.beta1 * this.mB + (1 - this.beta1) * db;
+    this.vB = this.beta2 * this.vB + (1 - this.beta2) * db * db;
+
+    const mHatB = this.mB / (1 - this.beta1 ** this.t);
+    const vHatB = this.vB / (1 - this.beta2 ** this.t);
+
+    return this.lr * mHatB / (Math.sqrt(vHatB) + this.eps); // returns Δbias
+  }
+}
+
 // ─── Logistic Regression ────────────────────────────────────────
 
 class LogisticRegression {
   constructor(inputDim = FEATURE_COUNT) {
     this.inputDim = inputDim;
-    this.weights = new Float64Array(inputDim); // zeros
+    this.weights = new Float64Array(inputDim);
     this.bias = 0;
     this.generation = 0;
     this.totalSamples = 0;
@@ -42,10 +93,6 @@ class LogisticRegression {
 
   // ─── Forward pass ─────────────────────────────────────────
 
-  /**
-   * Predict probability for a single feature vector.
-   * Returns value in [0, 1].
-   */
   score(features) {
     let z = this.bias;
     for (let i = 0; i < this.inputDim; i++) {
@@ -54,74 +101,98 @@ class LogisticRegression {
     return sigmoid(z);
   }
 
-  /**
-   * Batch predict.
-   */
   batchScore(featuresArray) {
     return featuresArray.map((f) => this.score(f));
   }
 
-  /**
-   * Predict expected PnL (in percentage terms) from the model's
-   * probability. Higher score → higher expected PnL.
-   *
-   * This is a rough calibration — the real relationship is learned
-   * from training data. Initially returns linear interpolation.
-   */
   predictPnl(features) {
     const prob = this.score(features);
-    // Map [0, 1] → [-20%, +30%] linearly
     return -20 + prob * 50;
+  }
+
+  // ─── Loss computation ─────────────────────────────────────
+
+  /**
+   * Compute weighted binary cross-entropy + L2 for one sample.
+   *
+   * Fix #3: Class weight applied to loss, not learning rate.
+   *   L = -(weight × y × log(ŷ) + (1-y) × log(1-ŷ)) + λ/2 × ||w||²
+   *
+   * Gradient:
+   *   ∂L/∂w = (ŷ - y) × weight_modifier × x  +  λ × w
+   *        where weight_modifier = posWeight if y=1 else 1.0
+   *   ∂L/∂b = (ŷ - y) × weight_modifier
+   */
+  computeGradient(features, label, posWeight, l2) {
+    const yHat = this.score(features);
+    const y = label;
+
+    // Loss = weighted BCE + L2
+    const eps = 1e-10;
+    const bce = y > 0
+      ? -posWeight * Math.log(yHat + eps)
+      : -Math.log(1 - yHat + eps);
+    let l2Penalty = 0;
+    for (let i = 0; i < this.inputDim; i++) {
+      l2Penalty += this.weights[i] * this.weights[i];
+    }
+    const loss = bce + (l2 / 2) * l2Penalty;
+
+    // Accuracy
+    const predicted = yHat >= 0.5 ? 1 : 0;
+    const correct = predicted === Math.round(y) ? 1 : 0;
+
+    // Gradient of BCE term
+    const error = yHat - y;
+    const weightMod = y > 0 ? posWeight : 1.0;
+
+    const dw = new Float64Array(this.inputDim);
+    for (let i = 0; i < this.inputDim; i++) {
+      dw[i] = error * weightMod * features[i] + l2 * this.weights[i];
+    }
+    const db = error * weightMod;
+
+    return { loss, correct, dw, db };
   }
 
   // ─── Training ─────────────────────────────────────────────
 
   /**
-   * Train on one batch using SGD with L2 regularization.
-   *
-   * @param {Array<Float64Array>} features — batch of feature vectors
-   * @param {Float64Array} labels — 0 or 1 (1 = profitable position)
-   * @param {number} lr — learning rate
-   * @param {number} l2 — L2 regularization strength
-   * @returns {{ loss: number, accuracy: number }}
+   * Train one batch with Adam optimizer.
    */
-  trainBatch(features, labels, lr = 0.01, l2 = 0.001) {
+  trainBatch(features, labels, lr = 0.001, l2 = 0.001, posWeight = 1.0) {
     const n = features.length;
     if (n === 0) return { loss: 0, accuracy: 0 };
 
-    // Gradient accumulators
+    // Create optimizer if it doesn't exist or need re-init
+    if (!this._adam || this._adam.lr !== lr) {
+      this._adam = new Adam(this.inputDim, lr);
+    }
+
+    // Accumulate gradients across batch
     const dw = new Float64Array(this.inputDim);
     let db = 0;
     let totalLoss = 0;
     let correct = 0;
 
     for (let i = 0; i < n; i++) {
-      const y = labels[i];
-      const yHat = this.score(features[i]);
+      const { loss, correct: c, dw: gradW, db: gradB } =
+        this.computeGradient(features[i], labels[i], posWeight, l2);
 
-      // Binary cross-entropy loss
-      const eps = 1e-10;
-      totalLoss += -(y * Math.log(yHat + eps) + (1 - y) * Math.log(1 - yHat + eps));
-
-      // Accuracy
-      const predicted = yHat >= 0.5 ? 1 : 0;
-      if (predicted === Math.round(y)) correct++;
-
-      // Gradient: (yHat - y) * x_i
-      const error = yHat - y;
-      for (let j = 0; j < this.inputDim; j++) {
-        dw[j] += error * features[i][j];
-      }
-      db += error;
+      totalLoss += loss;
+      correct += c;
+      for (let j = 0; j < this.inputDim; j++) dw[j] += gradW[j];
+      db += gradB;
     }
 
-    // Average + L2 regularization
+    // Average gradients
     const invN = 1 / n;
-    for (let j = 0; j < this.inputDim; j++) {
-      dw[j] = dw[j] * invN + l2 * this.weights[j];
-      this.weights[j] -= lr * dw[j];
-    }
-    this.bias -= lr * db * invN;
+    for (let j = 0; j < this.inputDim; j++) dw[j] *= invN;
+    db *= invN;
+
+    // Apply Adam step
+    const deltaBias = this._adam.step(this.weights, dw, db);
+    this.bias -= deltaBias;
 
     this.generation++;
     this.totalSamples += n;
@@ -136,16 +207,11 @@ class LogisticRegression {
   }
 
   /**
-   * Full training with multiple epochs and early stopping.
-   *
-   * @param {Array<Float64Array>} features — all training features
-   * @param {Float64Array} labels — binary labels (1 = profitable)
-   * @param {Object} opts
-   * @returns {Object} training report
+   * Full training with Adam, early stopping, and class weighting.
    */
   fit(features, labels, opts = {}) {
     const {
-      lr = 0.01,
+      lr = 0.001,
       l2 = 0.001,
       epochs = 20,
       batchSize = 16,
@@ -156,23 +222,19 @@ class LogisticRegression {
     const n = features.length;
     if (n < 5) return { trained: false, reason: `need ≥5 samples, got ${n}` };
 
+    // Compute class weights: inverse frequency, capped at 3.0
+    // posWeight = (num negatives) / (num positives)
+    // This ensures both classes contribute equally to total loss.
+    const posCount = Array.from(labels).filter((l) => l >= 0.5).length;
+    const posWeight = posCount > 0 && posCount < n
+      ? Math.min((n - posCount) / posCount, 3.0)
+      : 1.0;
+
     // Shuffle indices
     const indices = shuffledIndices(n);
     const valSize = Math.floor(n * validationSplit);
     const trainIdx = indices.slice(0, n - valSize);
     const valIdx = valSize > 0 ? indices.slice(-valSize) : [];
-
-    // Class weights for imbalanced data
-    const posCount = Array.from(labels).filter((l) => l >= 0.5).length;
-    const posWeight = posCount > 0 && posCount < n
-      ? (n - posCount) / posCount
-      : 1.0;
-
-    // Weighted learning rate per sample
-    const sampleLr = new Float64Array(n);
-    for (let i = 0; i < n; i++) {
-      sampleLr[i] = labels[i] >= 0.5 ? lr * Math.min(posWeight, 3.0) : lr;
-    }
 
     let bestValLoss = Infinity;
     let bestWeights = null;
@@ -181,22 +243,18 @@ class LogisticRegression {
     const lossHistory = [];
 
     for (let epoch = 0; epoch < epochs; epoch++) {
-      // Shuffle training indices each epoch
-      const shuffledTrain = shuffleArray([...trainIdx]);
+      const shuffled = shuffleArray([...trainIdx]);
       let epochLoss = 0;
       let epochAcc = 0;
       let batchCount = 0;
 
-      for (let b = 0; b < shuffledTrain.length; b += batchSize) {
-        const batchIdx = shuffledTrain.slice(b, b + batchSize);
+      for (let b = 0; b < shuffled.length; b += batchSize) {
+        const batchIdx = shuffled.slice(b, Math.min(b + batchSize, shuffled.length));
         const batchFeatures = batchIdx.map((i) => features[i]);
         const batchLabels = new Float64Array(batchIdx.map((i) => labels[i]));
 
-        // Per-sample learning rate (class-weighted)
-        const batchLr = batchIdx.reduce((sum, i) => sum + sampleLr[i], 0) / batchIdx.length;
-
         const { loss, accuracy } = this.trainBatch(
-          batchFeatures, batchLabels, batchLr, l2,
+          batchFeatures, batchLabels, lr, l2, posWeight,
         );
         epochLoss += loss;
         epochAcc += accuracy;
@@ -205,35 +263,24 @@ class LogisticRegression {
 
       epochLoss /= batchCount;
       epochAcc /= batchCount;
-      lossHistory.push({ epoch, loss: epochLoss, accuracy: epochAcc });
 
       // Validation
+      let valLoss = epochLoss; // default if no val set
       if (valIdx.length > 0) {
-        const valFeat = valIdx.map((i) => features[i]);
-        const valLab = new Float64Array(valIdx.map((i) => labels[i]));
-        const { loss: valLoss } = this.trainBatch(valFeat, valLab, 0, 0); // eval only, lr=0
-        // Undo the gradient update from eval
-        if (bestWeights) {
-          this.weights = new Float64Array(bestWeights);
-          this.bias = bestBias;
-        }
+        valLoss = this.validate(valIdx.map((i) => features[i]),
+          new Float64Array(valIdx.map((i) => labels[i])), l2, posWeight);
+      }
 
-        if (valLoss < bestValLoss) {
-          bestValLoss = valLoss;
-          bestWeights = new Float64Array(this.weights);
-          bestBias = this.bias;
-          patienceCounter = 0;
-        } else {
-          patienceCounter++;
-          if (patienceCounter >= patience) break;
-        }
+      lossHistory.push({ epoch, trainLoss: epochLoss, trainAcc: epochAcc, valLoss });
+
+      if (valLoss < bestValLoss) {
+        bestValLoss = valLoss;
+        bestWeights = new Float64Array(this.weights);
+        bestBias = this.bias;
+        patienceCounter = 0;
       } else {
-        // No validation split — just keep best training loss
-        if (epochLoss < bestValLoss) {
-          bestValLoss = epochLoss;
-          bestWeights = new Float64Array(this.weights);
-          bestBias = this.bias;
-        }
+        patienceCounter++;
+        if (patienceCounter >= patience) break;
       }
     }
 
@@ -243,14 +290,31 @@ class LogisticRegression {
       this.bias = bestBias;
     }
 
+    // Clear adam state for next training run (fresh momentum)
+    this._adam = null;
+
     return {
       trained: true,
       samples: n,
+      posWeight,
       epochs: lossHistory.length,
-      finalLoss: lossHistory[lossHistory.length - 1]?.loss || 0,
-      finalAccuracy: lossHistory[lossHistory.length - 1]?.accuracy || 0,
+      finalLoss: lossHistory[lossHistory.length - 1]?.trainLoss || 0,
+      finalAccuracy: lossHistory[lossHistory.length - 1]?.trainAcc || 0,
+      finalValLoss: lossHistory[lossHistory.length - 1]?.valLoss || 0,
       lossHistory,
     };
+  }
+
+  /**
+   * Compute validation loss (no gradient update).
+   */
+  validate(features, labels, l2, posWeight) {
+    let totalLoss = 0;
+    for (let i = 0; i < features.length; i++) {
+      const { loss } = this.computeGradient(features[i], labels[i], posWeight, l2);
+      totalLoss += loss;
+    }
+    return totalLoss / features.length;
   }
 
   // ─── Persistence ──────────────────────────────────────────
@@ -290,7 +354,6 @@ class LogisticRegression {
 // ─── Helpers ────────────────────────────────────────────────────
 
 function sigmoid(z) {
-  // Clamp to avoid overflow
   if (z > 20) return 1;
   if (z < -20) return 0;
   return 1 / (1 + Math.exp(-z));
@@ -309,7 +372,5 @@ function shuffleArray(arr) {
   }
   return arr;
 }
-
-// ─── Exports ────────────────────────────────────────────────────
 
 export { LogisticRegression };

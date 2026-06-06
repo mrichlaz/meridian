@@ -31,7 +31,7 @@ import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memor
 import { startBotTracker } from "./tools/bot-tracker.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
-import { stageSignals } from "./signal-tracker.js";
+import { stageSignals, stageMlFeatures } from "./signal-tracker.js";
 import { getWeightsSummary } from "./signal-weights.js";
 import { bootstrapHiveMind, ensureAgentId, getHiveMindPullMode, isHiveMindEnabled, pullHiveMindLessons, pullHiveMindPresets, registerHiveMindAgent, startHiveMindBackgroundSync } from "./hivemind.js";
 import { appendDecision } from "./decision-log.js";
@@ -540,6 +540,33 @@ export async function runScreeningCycle({ silent = false } = {}) {
     const activeBinResults = await Promise.allSettled(
       passing.map(({ pool }) => getActiveBin({ pool_address: pool.pool }))
     );
+
+    // Stage ML features for all passing candidates (for training data capture)
+    if (config.ml?.enabled) {
+      const { extractFeatures, normalizeVector } = await import("./ml/features.js");
+      for (const { pool } of passing) {
+        try {
+          const rawFeatures = extractFeatures({
+            candidate: pool,
+            poolMemory: null,
+            studyData: null,
+            context: {
+              walletSol: currentBalance.sol,
+              walletTotalUsd: currentBalance.total_usd,
+              activePositions: prePositions.total_positions,
+              maxPositions: config.risk.maxPositions,
+              deployAmountSol: deployAmount,
+            },
+          });
+          if (pool.pool) {
+            stageMlFeatures(pool.pool, {
+              raw: Array.from(rawFeatures),
+              norm: Array.from(normalizeVector(rawFeatures)),
+            });
+          }
+        } catch {}
+      }
+    }
 
     // Build compact candidate blocks
     const candidateBlocks = passing.map(({ pool, sw, n, ti, mem }, i) => {

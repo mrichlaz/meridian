@@ -374,6 +374,15 @@ export function normalizeVector(vec) {
  * (for training — reconstructs the state at deploy time).
  */
 export function extractFromPerformance(perf) {
+  // Fix #1: If ml_snapshot was stored at deploy time, restore the full
+  // 74-dim normalized vector directly. Otherwise fall back to sparse
+  // reconstruction from signal_snapshot (legacy positions).
+  if (perf.ml_snapshot?.norm) {
+    // Full feature vector stored at deploy time — restore exactly
+    return new Float64Array(perf.ml_snapshot.norm);
+  }
+
+  // Legacy path: sparse reconstruction from Darwinian signal snapshot
   const snapshot = perf.signal_snapshot || {};
   const candidate = {
     fee_active_tvl_ratio: snapshot.fee_tvl_ratio || perf.fee_tvl_ratio,
@@ -384,9 +393,14 @@ export function extractFromPerformance(perf) {
     holders: snapshot.holder_count || snapshot.holders,
     mcap: snapshot.mcap,
     bin_step: perf.bin_step,
-    wallet_sol: perf.amount_sol,
   };
-  return normalizeVector(extractFeatures({ candidate }));
+  const context = {
+    walletSol: perf.amount_sol || 0,
+    activePositions: 1,
+    maxPositions: 3,
+    deployAmountSol: perf.amount_sol || 0.5,
+  };
+  return normalizeVector(extractFeatures({ candidate, context }));
 }
 
 // ─── Helpers ────────────────────────────────────────────────────

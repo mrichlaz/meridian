@@ -28,7 +28,7 @@ import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { normalizeMint } from "./wallet.js";
 import { appendDecision } from "../decision-log.js";
 import { agentMeridianJson, getAgentIdForRequests, getAgentMeridianHeaders } from "./agent-meridian.js";
-import { getAndClearStagedSignals } from "../signal-tracker.js";
+import { getAndClearStagedSignals, getAndClearStagedMlFeatures } from "../signal-tracker.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
 // @meteora-ag/dlmm → @coral-xyz/anchor uses CJS directory imports
@@ -687,6 +687,9 @@ export async function deployPosition({
         const signalSnapshot = config.darwin?.enabled
           ? getAndClearStagedSignals(pool_address, baseMint)
           : null;
+        const mlSnapshot = config.ml?.enabled
+          ? getAndClearStagedMlFeatures(pool_address)
+          : null;
         trackPosition({
           position: positionAddress,
           pool: pool_address,
@@ -702,6 +705,7 @@ export async function deployPosition({
           active_bin: activeBin.binId,
           initial_value_usd,
           signal_snapshot: signalSnapshot,
+          ml_snapshot: mlSnapshot,
         });
       }
 
@@ -825,6 +829,9 @@ export async function deployPosition({
     const signalSnapshot = config.darwin?.enabled
       ? getAndClearStagedSignals(pool_address, baseMint)
       : null;
+    const mlSnapshot = config.ml?.enabled
+      ? getAndClearStagedMlFeatures(pool_address)
+      : null;
     trackPosition({
       position: newPosition.publicKey.toString(),
       pool: pool_address,
@@ -840,6 +847,7 @@ export async function deployPosition({
       active_bin: activeBin.binId,
       initial_value_usd,
       signal_snapshot: signalSnapshot,
+      ml_snapshot: mlSnapshot,
     });
 
     appendDecision({
@@ -1678,7 +1686,9 @@ export async function closePosition({ position_address, reason }) {
           minutes_in_range: minutesHeld - minutesOOR,
           minutes_held: minutesHeld,
           close_reason: reason || "agent decision",
+          deployed_at: tracked.deployed_at || null,
           signal_snapshot: signalSnapshot,
+          ml_snapshot: tracked.ml_snapshot || null,
         });
 
         appendDecision({
