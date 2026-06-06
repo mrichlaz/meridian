@@ -21,6 +21,7 @@ let _polling = false;
 let _liveMessageDepth = 0;
 let _warnedMissingChatId = false;
 let _warnedMissingAllowedUsers = false;
+const _dedupe = new Set(); // message_id deduplication
 
 // ─── chatId persistence ──────────────────────────────────────────
 function loadChatId() {
@@ -388,7 +389,15 @@ async function poll(onMessage) {
         const msg = update.message;
         if (!msg?.text) continue;
         if (!isAuthorizedIncomingMessage(msg)) continue;
+        if (_dedupe.has(msg.message_id)) continue;
+        _dedupe.add(msg.message_id);
         await onMessage(msg);
+        // Periodically prune old IDs
+        if (_dedupe.size > 200) {
+          const arr = [..._dedupe];
+          _dedupe.clear();
+          for (const id of arr.slice(-100)) _dedupe.add(id);
+        }
       }
     } catch (e) {
       if (!e.message?.includes("aborted")) {
@@ -416,6 +425,7 @@ const BOT_COMMANDS = [
   { command: "deploy",     description: "Deploy candidate by cached index" },
   { command: "briefing",   description: "Morning briefing" },
   { command: "hive",       description: "HiveMind sync status" },
+  { command: "learn",      description: "Study top LPers and save lessons" },
   { command: "pause",      description: "Stop cron cycles" },
   { command: "resume",     description: "Start cron cycles again" },
   { command: "stop",       description: "Shut down agent" },
