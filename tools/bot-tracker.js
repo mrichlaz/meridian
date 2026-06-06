@@ -49,6 +49,7 @@ class RateLimiter {
 
 // ─── Fetch with retry ───
 async function fetchWithRetry(url, opts, retries = 3) {
+  let lastErr;
   for (let i = 0; i < retries; i++) {
     try {
       const r = await fetch(url, opts);
@@ -57,11 +58,13 @@ async function fetchWithRetry(url, opts, retries = 3) {
         continue;
       }
       return r;
-    } catch {
-      if (i === retries - 1) throw;
+    } catch (e) {
+      lastErr = e;
+      if (i === retries - 1) throw e;
       await new Promise(r => setTimeout(r, (i + 1) * 1000));
     }
   }
+  throw lastErr || new Error("fetch failed");
 }
 
 // ─── DB init ───
