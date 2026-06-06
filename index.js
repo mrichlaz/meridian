@@ -739,7 +739,19 @@ export function startCronJobs() {
     await runManagementCycle();
   });
 
-  const screenTask = cron.schedule(`*/${Math.max(1, config.schedule.screeningIntervalMin)} * * * *`, runScreeningCycle);
+  const screenTask = cron.schedule(`*/${Math.max(1, config.schedule.screeningIntervalMin)} * * * *`, async () => {
+    if (_screeningBusy) {
+      log("cron", "Screening cron skipped — previous cycle still running");
+      return;
+    }
+    try {
+      const report = await runScreeningCycle();
+      if (report) log("cron", `Screening cycle finished, report length: ${report.length}`);
+      else log("cron", "Screening cycle returned no report");
+    } catch (e) {
+      log("cron_error", `Screening cycle failed: ${e.message}`);
+    }
+  });
 
   const healthTask = cron.schedule(`0 * * * *`, async () => {
     if (_managementBusy) return;
