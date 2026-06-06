@@ -553,7 +553,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   // Stamp bot_traded on matching discovered pools too.
   try {
     const { getCryptoBotTokens } = await import("./crypto-signals.js");
-    const botData = getCryptoBotTokens({ limit: 10 });
+    const botData = getCryptoBotTokens({ limit: 20 });
     if (botData.success && botData.tokens.length > 0) {
       const botMintSet = new Set(botData.tokens.map(t => t.mint));
       const botTradeCount = new Map(botData.tokens.map(t => [t.mint, t.trade_count]));
