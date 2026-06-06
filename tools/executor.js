@@ -85,6 +85,32 @@ async function fetchFreshPoolDetail(poolAddress, timeframe = config.screening.ti
   return (data?.data || [])[0] ?? null;
 }
 
+/**
+ * Fallback: fetch pool detail from the DLMM API when Pool Discovery
+ * returns null for fee_active_tvl_ratio (known caching gap).
+ * The DLMM endpoint returns fee_tvl_ratio as a time-bucketed object
+ * {"30m": 0.04, "24h": 0.62} — we extract the matching timeframe bucket.
+ */
+async function fetchDlmmFallback(poolAddress) {
+  const url = `https://dlmm.datapi.meteora.ag/pools/${poolAddress}`;
+  const res = await fetch(url, { headers: { Accept: "application/json" } });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+function extractDlmmTvl(pool) {
+  return numberOrNull(pool?.tvl ?? pool?.active_tvl);
+}
+
+function extractDlmmFeeTvlRatio(pool, timeframe = config.screening.timeframe || "5m") {
+  // DLMM returns fee_tvl_ratio as {"30m": 0.04, "1h": ..., "24h": ...}
+  const buckets = pool?.fee_tvl_ratio;
+  if (!buckets || typeof buckets !== "object") return null;
+  return numberOrNull(buckets[timeframe])
+    ?? numberOrNull(buckets["30m"])  // fallback to 30m
+    ?? numberOrNull(Object.values(buckets)[0]); // last resort
+}
+
 async function validateDeployPoolThresholds(args) {
   let detail;
   try {
@@ -119,8 +145,21 @@ async function validateDeployPoolThresholds(args) {
     };
   }
 
-  const feeActiveTvlRatio = poolDetailFeeActiveTvlRatio(detail);
+  let feeActiveTvlRatio = poolDetailFeeActiveTvlRatio(detail);
   const minFeeActiveTvlRatio = numberOrNull(config.screening.minFeeActiveTvlRatio);
+
+  // Pool Discovery single-pool endpoint sometimes returns null for
+  // fee_active_tvl_ratio (API caching gap). Fall back to the DLMM
+  // endpoint which exposes fee_tvl_ratio as time-bucketed data.
+  if (feeActiveTvlRatio == null) {
+    try {
+      const dlmmPool = await fetchDlmmFallback(args.pool_address);
+      if (dlmmPool) {
+        feeActiveTvlRatio = extractDlmmFeeTvlRatio(dlmmPool);
+      }
+    } catch { /* non-critical — screening already validated this */ }
+  }
+
   if (
     minFeeActiveTvlRatio != null &&
     minFeeActiveTvlRatio > 0 &&
