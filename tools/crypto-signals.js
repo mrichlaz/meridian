@@ -37,7 +37,12 @@ export function getCryptoBotTokens({ limit = 10, maxAgeMinutes = null } = {}) {
         MAX(e.timestamp) as last_trade_ms
       FROM events e
       JOIN tokens t ON t.mint = e.token_mint
-      ${cutoff ? "WHERE e.timestamp >= ?" : ""}
+      WHERE t.symbol IS NOT NULL
+        AND t.liquidity_usd IS NOT NULL
+        AND t.volume_h24 IS NOT NULL
+        AND t.liquidity_usd > 100000
+        AND t.volume_h24 > 500000
+        ${cutoff ? "AND e.timestamp >= ?" : ""}
       GROUP BY e.token_mint
       ORDER BY trade_count DESC
       LIMIT ?
