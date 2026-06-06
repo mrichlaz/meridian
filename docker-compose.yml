@@ -6,9 +6,13 @@ services:
     env_file:
       - .env
     volumes:
+      # Persist user config (deploy amount, risk settings, etc.)
+      - ./user-config.json:/app/user-config.json
+      # Bot-tracker SQLite DB
       - ./data:/app/data
+      # Logs
       - ./logs:/app/logs
-      # Persist runtime state across container restarts
+      # State files (lessons, positions, memory — survives restarts)
       - ./state.json:/app/state.json
       - ./lessons.json:/app/lessons.json
       - ./pool-memory.json:/app/pool-memory.json
@@ -16,7 +20,8 @@ services:
       - ./strategy-library.json:/app/strategy-library.json
       - ./decision-log.json:/app/decision-log.json
       - ./signal-weights.json:/app/signal-weights.json
-      - ./user-config.json:/app/user-config.json
+      - ./smart-wallets.json:/app/smart-wallets.json
+      - ./hivemind-cache.json:/app/hivemind-cache.json
     environment:
       - NODE_ENV=production
     logging:

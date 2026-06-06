@@ -12,9 +12,9 @@ RUN npm ci --omit=dev && npm cache clean --force
 
 COPY . .
 
+RUN chmod +x docker-entrypoint.sh
+
 # Ensure data & logs directories exist at runtime
 RUN mkdir -p data logs
 
-EXPOSE 3000
-
-CMD ["node", "index.js"]
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
