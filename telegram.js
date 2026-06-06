@@ -192,10 +192,12 @@ function createTypingIndicator() {
 
   async function tick() {
     if (stopped) return;
-    await postTelegram("sendChatAction", { action: "typing" });
+    try {
+      await postTelegram("sendChatAction", { action: "typing" });
+    } catch {}
     timer = setTimeout(() => {
       tick().catch(() => null);
-    }, 4000);
+    }, 8000);
   }
 
   tick().catch(() => null);
