@@ -279,11 +279,19 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
       }
       messages.push(msg);
 
+      // If model output is reasoning-only (content: null, reasoning_content present),
+      // use reasoning_content as content so the agent doesn't spin forever.
+      if (!msg.content && msg.reasoning_content) {
+        // Tool calls need a non-null content for API compatibility
+        msg.content = msg.tool_calls?.length ? "Analyzing..." : msg.reasoning_content;
+        if (!msg.tool_calls?.length) log("agent", "Mapped reasoning_content → content for final response");
+      }
+
       // If the model didn't call any tools, it's done
       if (!msg.tool_calls || msg.tool_calls.length === 0) {
-        // Hermes sometimes returns null content — pop the empty message and retry once
+        // Hermes / reasoning models sometimes return null content
         if (!msg.content) {
-          messages.pop(); // remove the empty assistant message
+          messages.pop();
           log("agent", "Empty response, retrying...");
           continue;
         }
