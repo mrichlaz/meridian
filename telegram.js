@@ -217,6 +217,7 @@ function toolLabel(name) {
     get_top_lpers: "get top LPers",
     search_pools: "search pools",
     discover_pools: "discover pools",
+    get_crypto_bot_tokens: "crypto bot tokens",
   };
   return labels[name] || name.replace(/_/g, " ");
 }

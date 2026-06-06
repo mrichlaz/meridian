@@ -28,6 +28,8 @@ import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
+import { startBotTracker } from "./tools/bot-tracker.js";
+import { getCryptoBotTokens } from "./tools/crypto-signals.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
 import { stageSignals } from "./signal-tracker.js";
@@ -47,6 +49,7 @@ if (isMain) {
   ensureAgentId();
   bootstrapHiveMind().catch((error) => log("hivemind_warn", `Bootstrap failed: ${error.message}`));
   startHiveMindBackgroundSync();
+  startBotTracker();
 }
 
 const TP_PCT = config.management.takeProfitPct;
@@ -608,6 +611,19 @@ export async function runScreeningCycle({ silent = false } = {}) {
 
     const weightsSummary = config.darwin?.enabled ? getWeightsSummary() : null;
 
+    // Fetch bot-tracker tokens as additional signal
+    let botTokensBlock = "";
+    try {
+      const botData = getCryptoBotTokens({ limit: 8 });
+      if (botData.success && botData.tokens.length > 0) {
+        botTokensBlock = `
+BOT SIGNALS (crypto tracker wallet ${botData.bot_tracked}):
+${botData.tokens.map(t => `  ${t.symbol.padEnd(16)} ${t.mint.slice(0, 8)}..  trades=${t.trade_count}  ${t.last_trade_ago}`).join("\n")}
+Check if any candidate's base token mint appears above — if so, it's a confirmed bot-traded token (signal boost).
+`;
+      }
+    } catch {}
+
     let deployAttempted = false;
     let deploySucceeded = false;
     const { content } = await agentLoop(`
@@ -617,7 +633,7 @@ Positions: ${prePositions.total_positions}/${config.risk.maxPositions} | SOL: ${
 
 PRE-LOADED CANDIDATES (${passing.length} pools):
 ${candidateBlocks.join("\n\n")}
-
+${botTokensBlock}
 STEPS:
 1. Decide if any candidate is actually worth deploying. One surviving candidate is not automatically good enough.
 2. Pick the best candidate based on narrative quality, smart wallets, and pool metrics.

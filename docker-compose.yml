@@ -1,0 +1,26 @@
+services:
+  meridian:
+    build: .
+    container_name: meridian
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      # Persist runtime state across container restarts
+      - ./state.json:/app/state.json
+      - ./lessons.json:/app/lessons.json
+      - ./pool-memory.json:/app/pool-memory.json
+      - ./token-blacklist.json:/app/token-blacklist.json
+      - ./strategy-library.json:/app/strategy-library.json
+      - ./decision-log.json:/app/decision-log.json
+      - ./signal-weights.json:/app/signal-weights.json
+      - ./user-config.json:/app/user-config.json
+    environment:
+      - NODE_ENV=production
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -137,6 +137,13 @@ Searches pools by name or token symbol.
 Output: { pools: [{pool, name, bin_step, fee_pct, tvl, volume, ...}] }
 \`\`\`
 
+### meridian crypto-bot-tokens [--limit 10] [--max-age 240]
+Returns top tokens traded by the tracked crypto bot wallet (from /crypto bot-tracker).
+Use these as leads for pool searching.
+\`\`\`
+Output: { tokens: [{symbol, name, mint, trade_count, ...}] }
+\`\`\`
+
 ### meridian active-bin --pool <addr>
 Returns the current active bin for a pool.
 \`\`\`
@@ -252,6 +259,7 @@ const { values: flags } = parseArgs({
     "skip-swap":  { type: "boolean" },
     "dry-run":    { type: "boolean" },
     "silent":     { type: "boolean" },
+    "max-age":    { type: "string" },
     limit:        { type: "string" },
   },
   allowPositionals: true,
@@ -410,6 +418,14 @@ switch (subcommand) {
     const { searchPools } = await import("./tools/dlmm.js");
     const limit = flags.limit ? parseInt(flags.limit) : 10;
     out(await searchPools({ query, limit }));
+    break;
+  }
+
+  // ── crypto-bot-tokens ──────────────────────────────────────────
+  case "crypto-bot-tokens": {
+    const { getCryptoBotTokens } = await import("./tools/crypto-signals.js");
+    const limit = flags.limit ? parseInt(flags.limit) : 10;
+    out(getCryptoBotTokens({ limit }));
     break;
   }
 

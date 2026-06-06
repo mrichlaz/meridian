@@ -21,7 +21,8 @@ decision-log.json
 hivemind-cache.json
 signal-weights.json
 
-# Logs
+# Runtime data (bot-tracker DB + logs)
+data/
 logs/
 
 # OS

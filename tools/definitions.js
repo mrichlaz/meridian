@@ -1111,6 +1111,34 @@ Blacklisted tokens are filtered BEFORE the LLM even sees pool candidates.`,
       }
     }
   },
+
+  // ─── Crypto Bot Signals ──────────────────────────────────────────
+
+  {
+    type: "function",
+    function: {
+      name: "get_crypto_bot_tokens",
+      description: `Retrieve top tokens traded by the tracked crypto bot wallet from the /crypto bot-tracker.
+Use this to identify which tokens the bot has been actively trading across DEXes (Jupiter, Raydium, Orca, Meteora, PumpFun).
+The bot wallet (3QUnrcMqCQoiGB73s1A6uDzxziywaNFpTLiZiiZbEUoN) executes bundled swaps — high trade count = strong signal.
+
+Use the returned tokens as leads: call search_pools with each token's symbol or mint to find Meteora DLMM pools for those tokens.
+Only deploy after confirming the pool passes normal screening criteria — this is a signal boost, not an override.`,
+      parameters: {
+        type: "object",
+        properties: {
+          limit: {
+            type: "number",
+            description: "Max tokens to return (default 10, max 25)"
+          },
+          maxAgeMinutes: {
+            type: "number",
+            description: "Only include tokens traded within this many minutes (omit for all time)"
+          }
+        }
+      }
+    }
+  },
 ];
 
 export const tools = toolDefinitions.map((tool) => ({
