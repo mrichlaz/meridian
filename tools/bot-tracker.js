@@ -47,6 +47,23 @@ class RateLimiter {
   }
 }
 
+// ─── Fetch with retry ───
+async function fetchWithRetry(url, opts, retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const r = await fetch(url, opts);
+      if (r.status === 429) {
+        await new Promise(r => setTimeout(r, (i + 1) * 2000));
+        continue;
+      }
+      return r;
+    } catch {
+      if (i === retries - 1) throw;
+      await new Promise(r => setTimeout(r, (i + 1) * 1000));
+    }
+  }
+}
+
 // ─── DB init ───
 function initDB() {
   let db;
@@ -86,7 +103,7 @@ function initDB() {
 
 // ─── Helius RPC call ───
 async function heliusCall(method, params) {
-  const r = await fetch(H_HTTP, {
+  const r = await fetchWithRetry(H_HTTP, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
@@ -107,46 +124,56 @@ function extractMints(tx) {
   return [...s].filter(m => m !== WSOL);
 }
 
-// ─── DexScreener batch fetch ───
+// ─── DexScreener batch fetch (with 429 retry + backoff) ───
 async function fetchDexData(mints) {
   if (!mints.length) return new Map();
   const out = new Map();
   for (let i = 0; i < mints.length; i += BATCH_SIZE) {
     const batch = mints.slice(i, i + BATCH_SIZE).join(",");
-    try {
-      const r = await fetch(`${DEX_API}/${batch}`, { signal: AbortSignal.timeout(15_000) });
-      if (!r.ok) continue;
-      const d = await r.json();
-      if (!d.pairs) continue;
-      const groups = {};
-      for (const p of d.pairs) {
-        if (p.chainId !== "solana") continue;
-        const bt = p.baseToken?.address;
-        if (!bt) continue;
-        if (!groups[bt]) groups[bt] = [];
-        groups[bt].push(p);
-      }
-      for (const [mint, pairs] of Object.entries(groups)) {
-        let best = pairs[0];
-        for (const p of pairs) if ((p.liquidity?.usd || 0) > (best.liquidity?.usd || 0)) best = p;
-        let totalLiq = 0, totalVol = 0;
-        for (const p of pairs) {
-          totalLiq += p.liquidity?.usd || 0;
-          totalVol += p.volume?.h24 || 0;
+    let retries = 3;
+    while (retries > 0) {
+      try {
+        const r = await fetch(`${DEX_API}/${batch}`, { signal: AbortSignal.timeout(15_000) });
+        if (r.status === 429) {
+          retries--;
+          const wait = (4 - retries) * 3000;
+          await new Promise(r => setTimeout(r, wait));
+          continue;
         }
-        out.set(mint, {
-          symbol: best.baseToken?.symbol || null,
-          name: best.baseToken?.name || null,
-          price: best.priceUsd != null ? parseFloat(best.priceUsd) : null,
-          liquidity: totalLiq,
-          fdv: best.fdv ?? null,
-          volume: totalVol,
-          createdAt: best.pairCreatedAt ?? null,
-          dex: DEX_NAMES[best.pairAddress] || best.dexId || null,
-        });
-      }
-    } catch {}
-    if (i + BATCH_SIZE < mints.length) await new Promise(r => setTimeout(r, 2000));
+        if (!r.ok) break;
+        const d = await r.json();
+        if (!d.pairs) break;
+        const groups = {};
+        for (const p of d.pairs) {
+          if (p.chainId !== "solana") continue;
+          const bt = p.baseToken?.address;
+          if (!bt) continue;
+          if (!groups[bt]) groups[bt] = [];
+          groups[bt].push(p);
+        }
+        for (const [mint, pairs] of Object.entries(groups)) {
+          let best = pairs[0];
+          for (const p of pairs) if ((p.liquidity?.usd || 0) > (best.liquidity?.usd || 0)) best = p;
+          let totalLiq = 0, totalVol = 0;
+          for (const p of pairs) {
+            totalLiq += p.liquidity?.usd || 0;
+            totalVol += p.volume?.h24 || 0;
+          }
+          out.set(mint, {
+            symbol: best.baseToken?.symbol || null,
+            name: best.baseToken?.name || null,
+            price: best.priceUsd != null ? parseFloat(best.priceUsd) : null,
+            liquidity: totalLiq,
+            fdv: best.fdv ?? null,
+            volume: totalVol,
+            createdAt: best.pairCreatedAt ?? null,
+            dex: DEX_NAMES[best.pairAddress] || best.dexId || null,
+          });
+        }
+        break;
+      } catch {}
+    }
+    if (i + BATCH_SIZE < mints.length) await new Promise(r => setTimeout(r, 3000));
   }
   return out;
 }
