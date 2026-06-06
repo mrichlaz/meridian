@@ -275,9 +275,10 @@ export function startBotTracker() {
           lastEnrich = Date.now();
         }
 
-        // Prune old events outside 4h window
+        // Prune old events + orphaned tokens outside 4h window
         const cutoff = Date.now() - W;
         db.prepare("DELETE FROM events WHERE timestamp < ?").run(cutoff);
+        db.prepare("DELETE FROM tokens WHERE NOT EXISTS (SELECT 1 FROM events WHERE events.token_mint = tokens.mint)").run();
 
         if (stats.newEvents > 0) {
           log("bot_tracker", `${stats.newEvents} new events, ${db.prepare("SELECT COUNT(*) as c FROM tokens").get().c} tokens tracked`);

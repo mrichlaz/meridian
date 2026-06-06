@@ -547,6 +547,90 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   const { pools } = discovery;
   const filteredOut = Array.isArray(discovery.filtered_examples) ? [...discovery.filtered_examples] : [];
 
+  // ── Bot-tracker candidate injection ──────────────────────────
+  // Fetch top bot-traded tokens, look up their Meteora DLMM pools,
+  // and inject them as candidates. All standard filters apply.
+  // Stamp bot_traded on matching discovered pools too.
+  try {
+    const { getCryptoBotTokens } = await import("./crypto-signals.js");
+    const botData = getCryptoBotTokens({ limit: 10 });
+    if (botData.success && botData.tokens.length > 0) {
+      const botMintSet = new Set(botData.tokens.map(t => t.mint));
+      const botTradeCount = new Map(botData.tokens.map(t => [t.mint, t.trade_count]));
+
+      // Stamp existing discovered pools that match
+      for (const p of pools) {
+        if (p.base?.mint && botMintSet.has(p.base.mint)) {
+          p.bot_traded = true;
+          p.bot_trade_count = botTradeCount.get(p.base.mint);
+        }
+      }
+
+      // Look up each bot token mint on Meteora search API + fetch pool detail
+      const timeframe = config.screening?.timeframe || "30m";
+      for (const t of botData.tokens) {
+        try {
+          const res = await fetch(`https://dlmm.datapi.meteora.ag/pools?query=${t.mint}&limit=1`, { signal: AbortSignal.timeout(8000) });
+          if (!res.ok) continue;
+          const d = await res.json();
+          const raw = d?.data?.[0];
+          if (!raw) continue;
+
+          // Fetch pool detail for volatility/volume data
+          let vol = null, volVolume = null, vTime = null;
+          try {
+            const detail = await fetchPoolDiscoveryDetail({ poolAddress: raw.address, timeframe });
+            if (detail) {
+              vol = detail.volatility != null ? Number(detail.volatility) : null;
+              volVolume = detail.volume != null ? Number(detail.volume) : null;
+              vTime = detail.volatility_timeframe || getVolatilityTimeframe(timeframe);
+            }
+          } catch {}
+
+          // Normalize to same shape as condensed pool
+          pools.push({
+            pool: raw.address,
+            name: raw.name,
+            base: {
+              symbol: raw.token_x?.symbol || t.symbol,
+              mint: raw.token_x?.address || t.mint,
+              organic: null,
+              warnings: null,
+            },
+            quote: { symbol: raw.token_y?.symbol, mint: raw.token_y?.address },
+            pool_type: null,
+            bin_step: raw.pool_config?.bin_step || null,
+            fee_pct: raw.dynamic_fee_pct || raw.pool_config?.base_fee_pct || null,
+            tvl: raw.tvl ?? null,
+            active_tvl: null,
+            fee_window: raw.fees?.[timeframe] ?? null,
+            volume_window: volVolume ?? raw.volume?.[timeframe] ?? null,
+            fee_active_tvl_ratio: raw.fee_tvl_ratio?.[timeframe] ?? null,
+            volatility: vol,
+            volatility_timeframe: vTime,
+            holders: raw.token_x?.holders ?? 0,
+            mcap: raw.token_x?.market_cap ?? null,
+            organic_score: null,
+            token_age_hours: null,
+            dev: null,
+            launchpad: null,
+            active_positions: null,
+            active_pct: null,
+            open_positions: null,
+            discord_signal: false,
+            price: raw.current_price ?? null,
+            price_change_pct: null,
+            price_trend: null,
+            min_price: null,
+            max_price: null,
+            bot_traded: true,
+            bot_trade_count: t.trade_count,
+          });
+        } catch {}
+      }
+    }
+  } catch {} // tracker DB missing or empty — skip silently
+
   // Exclude pools where the wallet already has an open position
   const { getMyPositions } = await import("./dlmm.js");
   const { positions } = await getMyPositions();
