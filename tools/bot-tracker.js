@@ -75,6 +75,7 @@ function initDB() {
     fs.mkdirSync(DATA_DIR, { recursive: true });
     db = new Database(DB_PATH);
     db.pragma("journal_mode = WAL");
+    db.pragma("wal_autocheckpoint = 10000");  // auto-checkpoint more aggressively
     db.exec(`
       CREATE TABLE IF NOT EXISTS events (
         tx_signature TEXT,
@@ -99,8 +100,39 @@ function initDB() {
       CREATE INDEX IF NOT EXISTS e_ts ON events(timestamp);
     `);
   } catch (e) {
-    log("bot_tracker", `Cannot init DB at ${DB_PATH}: ${e.message}`);
-    return null;
+    // If DB is corrupted, delete and recreate
+    log("bot_tracker", `DB error: ${e.message} — recreating...`);
+    try {
+      fs.unlinkSync(DB_PATH);
+      fs.unlinkSync(DB_PATH + '-wal');
+      fs.unlinkSync(DB_PATH + '-shm');
+    } catch {}
+    db = new Database(DB_PATH);
+    db.pragma("journal_mode = WAL");
+    db.pragma("wal_autocheckpoint = 10000");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS events (
+        tx_signature TEXT,
+        token_mint   TEXT NOT NULL,
+        timestamp    INTEGER NOT NULL,
+        PRIMARY KEY (tx_signature, token_mint)
+      );
+      CREATE TABLE IF NOT EXISTS tokens (
+        mint              TEXT PRIMARY KEY,
+        symbol            TEXT,
+        name              TEXT,
+        price_usd         REAL,
+        liquidity_usd     REAL,
+        fdv               REAL,
+        volume_h24        REAL,
+        pair_created_at   INTEGER,
+        dex               TEXT,
+        last_seen         INTEGER NOT NULL,
+        occurrence_count  INTEGER DEFAULT 1
+      );
+      CREATE INDEX IF NOT EXISTS e_tt ON events(token_mint, timestamp);
+      CREATE INDEX IF NOT EXISTS e_ts ON events(timestamp);
+    `);
   }
   return db;
 }

@@ -12,6 +12,6 @@ COPY scripts scripts/
 RUN npm install --loglevel=warn && npm cache clean --force
 
 COPY . .
-RUN mkdir -p data logs
+RUN mkdir -p data logs && chmod +x docker-entrypoint.sh
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
