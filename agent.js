@@ -196,8 +196,10 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
 
       // Retry up to 3 times on transient provider errors (502, 503, 529)
       const FALLBACK_MODEL = "stepfun/step-3.5-flash:free";
+      const EMPTY_RESPONSE_FALLBACK = "nvidia/openai/gpt-oss-120b";
       let response;
       let usedModel = activeModel;
+      let emptyResponseCount = 0;
       // Force a tool call on step 0 for action intents — prevents the model from inventing deploy/close outcomes
       const ACTION_INTENTS = /\b(deploy|open|add liquidity|close|exit|withdraw|claim|swap|block|unblock)\b/i;
       let toolChoice = (step === 0 && (ACTION_INTENTS.test(goal) || mustUseRealTool)) ? "required" : "auto";
@@ -292,7 +294,21 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
         // Hermes / reasoning models sometimes return null content
         if (!msg.content) {
           messages.pop();
-          log("agent", "Empty response, retrying...");
+          emptyResponseCount += 1;
+          log("agent", `Empty response (${emptyResponseCount}/3), retrying...`);
+          
+          // Switch to fallback model after 2 empty responses
+          if (emptyResponseCount >= 2 && usedModel !== EMPTY_RESPONSE_FALLBACK) {
+            usedModel = EMPTY_RESPONSE_FALLBACK;
+            log("agent", `Switching to empty-response fallback model ${EMPTY_RESPONSE_FALLBACK}`);
+          }
+          
+          if (emptyResponseCount >= 3) {
+            return {
+              content: "I couldn't get a valid response from the LLM after multiple retries. Please check your model configuration.",
+              userMessage: goal,
+            };
+          }
           continue;
         }
         if (mustUseRealTool && !sawToolCall) {

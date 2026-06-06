@@ -12,10 +12,12 @@ import { fileURLToPath } from "url";
 import { log } from "./logger.js";
 import { getSharedLessonsForPrompt, pushHiveLesson, pushHivePerformanceEvent } from "./hivemind.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const USER_CONFIG_PATH = path.join(__dirname, "user-config.json");
+import { PATHS } from "./utils/paths.js";
 
-const LESSONS_FILE = "./data/lessons.json";
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const USER_CONFIG_PATH = PATHS.userConfig;
+
+const LESSONS_FILE = PATHS.lessons;
 const MIN_EVOLVE_POSITIONS = 5;   // don't evolve until we have real data
 const MAX_CHANGE_PER_STEP  = 0.20; // never shift a threshold more than 20% at once
 const PERFORMANCE_SIGNAL_FIELDS = [

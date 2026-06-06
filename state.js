@@ -10,8 +10,9 @@
 
 import fs from "fs";
 import { log } from "./logger.js";
+import { PATHS } from "./utils/paths.js";
 
-const STATE_FILE = "./data/state.json";
+const STATE_FILE = PATHS.state;
 
 const MAX_RECENT_EVENTS = 20;
 const MAX_INSTRUCTION_LENGTH = 280;

@@ -11,8 +11,9 @@
 
 import fs from "fs";
 import { log } from "./logger.js";
+import { PATHS } from "./utils/paths.js";
 
-const WEIGHTS_FILE = "./data/signal-weights.json";
+const WEIGHTS_FILE = PATHS.signalWeights;
 
 // ─── Signal Definitions ─────────────────────────────────────────
 

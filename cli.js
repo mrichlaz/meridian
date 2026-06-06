@@ -34,6 +34,8 @@ function die(msg, extra = {}) {
   process.exit(1);
 }
 
+import { PATHS } from "./utils/paths.js";
+
 // ─── SKILL.md generation ──────────────────────────────────────────
 const SKILL_MD = `# meridian — Solana DLMM LP Agent CLI
 
@@ -578,7 +580,7 @@ switch (subcommand) {
     const { config } = await import("./config.js");
     const { evolveThresholds } = await import("./lessons.js");
     const fs2 = await import("fs");
-    const lessonsFile = "./lessons.json";
+    const lessonsFile = PATHS.lessons;
     let perfData = [];
     if (fs2.existsSync(lessonsFile)) {
       try { perfData = JSON.parse(fs2.readFileSync(lessonsFile, "utf8")).performance || []; } catch { /* no data */ }

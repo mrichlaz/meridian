@@ -2,10 +2,11 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { log } from "./logger.js";
+import { PATHS } from "./utils/paths.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, "data");
-const WALLETS_PATH = path.join(DATA_DIR, "smart-wallets.json");
+const WALLETS_PATH = PATHS.smartWallets;
 
 function loadWallets() {
   if (!fs.existsSync(WALLETS_PATH)) return { wallets: [] };

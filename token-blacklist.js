@@ -7,8 +7,9 @@
 
 import fs from "fs";
 import { log } from "./logger.js";
+import { PATHS } from "./utils/paths.js";
 
-const BLACKLIST_FILE = "./data/token-blacklist.json";
+const BLACKLIST_FILE = PATHS.tokenBlacklist;
 
 function load() {
   if (!fs.existsSync(BLACKLIST_FILE)) return {};
