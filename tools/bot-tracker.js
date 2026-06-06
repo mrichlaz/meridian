@@ -14,7 +14,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.resolve(__dirname, "../data");
 const DB_PATH = path.join(DATA_DIR, "bot-tracker.db");
 
-const BOT = "3QUnrcMqCQoiGB73s1A6uDzxziywaNFpTLiZiiZbEUoN";
+const BOTS = (process.env.BOT_WALLETS || "3QUnrcMqCQoiGB73s1A6uDzxziywaNFpTLiZiiZbEUoN,NA247a7YE9S3p9CdKmMyETx8TTwbSdVbVYHHxpnHTUV,joeHSutRWndCtp1EPx5tz5zHyaPBZUZ5JsxDEVB1RPZ,MEViEnscUm6tsQRoGd9h6nLQaQspKj7DB2M5FwM3Xvz")
+  .split(",").map(a => a.trim()).filter(Boolean);
 const H_KEY = process.env.HELIUS_KEY || "767f42d9-06c2-46f8-8031-9869035d6ce4";
 const H_HTTP = `https://mainnet.helius-rpc.com/?api-key=${H_KEY}`;
 const DEX_API = "https://api.dexscreener.com/latest/dex/tokens";
@@ -252,21 +253,34 @@ export function startBotTracker() {
 
   let lastEnrich = 0;
 
-  log("bot_tracker", `Started tracking ${BOT.slice(0, 8)}...`);
+  log("bot_tracker", `Started tracking ${BOTS.length} wallet(s)...`);
 
   (async function loop() {
     while (!_stopped) {
       try {
         const stats = { newEvents: 0, newMints: [], errors: [] };
 
-        // Fetch recent signatures
-        await sigrl.wait();
-        const sigs = await heliusCall("getSignaturesForAddress", [BOT, { limit: SIG_LIMIT }]);
-
-        // Process each new signature
-        for (const s of sigs) {
+        // Poll all tracked wallets
+        for (const wallet of BOTS) {
           if (_stopped) break;
-          await processSignature(db, txrl, s.signature, stats);
+
+          // Fetch recent signatures
+          await sigrl.wait();
+          let sigs;
+          try {
+            sigs = await heliusCall("getSignaturesForAddress", [wallet, { limit: SIG_LIMIT }]);
+          } catch {
+            continue;
+          }
+
+          // Process each new signature
+          for (const s of sigs) {
+            if (_stopped) break;
+            await processSignature(db, txrl, s.signature, stats);
+          }
+
+          // Brief pause between wallets
+          await new Promise(r => setTimeout(r, 500));
         }
 
         // DexScreener enrichment every ENRICH_INTERVAL

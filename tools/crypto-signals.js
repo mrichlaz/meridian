@@ -48,7 +48,6 @@ export function getCryptoBotTokens({ limit = 10, maxAgeMinutes = null } = {}) {
     return {
       success: true,
       source: "bot-tracker (crypto)",
-      bot_tracked: "3QUnrcMqCQoiGB73s1A6uDzxziywaNFpTLiZiiZbEUoN",
       tokens: rows.map(r => ({
         symbol: r.symbol,
         name: r.name,
