@@ -3,13 +3,10 @@ services:
     build: .
     container_name: meridian
     restart: unless-stopped
-    env_file:
-      - .env
     volumes:
-      # Persist everything — config, state, bot-tracker DB, logs
-      - ./data:/app/data
-      - ./logs:/app/logs
-      - ./user-config.json:/app/user-config.json
+      # Persist all runtime state (bot-tracker DB, lessons, memory, etc.)
+      - data:/app/data
+      - logs:/app/logs
     environment:
       - NODE_ENV=production
     logging:
@@ -17,3 +14,7 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  data:
+  logs:
