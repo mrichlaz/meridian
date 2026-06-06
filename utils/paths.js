@@ -15,6 +15,7 @@ ensureDir(DATA_ROOT);
 
 export const PATHS = {
   root: DATA_ROOT,
+  data: DATA_ROOT,
   userConfig: path.join(DATA_ROOT, "user-config.json"),
   state: path.join(DATA_ROOT, "state.json"),
   decisionLog: path.join(DATA_ROOT, "decision-log.json"),
@@ -27,6 +28,9 @@ export const PATHS = {
   strategyLibrary: path.join(DATA_ROOT, "strategy-library.json"),
   deployerBlacklist: path.join(DATA_ROOT, "deployer-blacklist.json"),
   discordSignals: path.join(DATA_ROOT, "discord-signals.json"),
+  // ML / deep learning
+  mlModel: path.join(DATA_ROOT, "ml", "ml-model.json"),
+  mlDir: path.join(DATA_ROOT, "ml"),
 };
 
 export function getPath(name) {

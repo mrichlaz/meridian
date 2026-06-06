@@ -158,6 +158,25 @@ export const config = {
     minSamples:     u.darwinMinSamples  ?? 10,
   },
 
+  // ─── Deep Learning / ML ────────────────
+  ml: {
+    enabled:            u.mlEnabled            ?? true,
+    trainEvery:         u.mlTrainEvery         ?? 5,     // retrain every N closes
+    minSamples:         u.mlMinSamples         ?? 10,    // min positions before training
+    batchSize:          u.mlBatchSize          ?? 16,
+    epochs:             u.mlEpochs             ?? 5,
+    learningRate:       u.mlLearningRate       ?? 0.001,
+    entropyBeta:        u.mlEntropyBeta        ?? 0.02,
+    validationSplit:    u.mlValidationSplit    ?? 0.2,
+    rewardScale:        u.mlRewardScale        ?? 1.0,
+    emotionInfluence:   u.mlEmotionInfluence   ?? 0.3,
+    blendLambdaStart:   u.mlBlendLambdaStart   ?? 0.1,
+    blendLambdaMax:     u.mlBlendLambdaMax     ?? 0.7,
+    blendLambdaGrowth:  u.mlBlendLambdaGrowth  ?? 0.05,
+    saveCheckpoints:    u.mlSaveCheckpoints    ?? true,
+    personality:        u.mlPersonality        ?? "balanced",
+  },
+
   // ─── Common Token Mints ────────────────
   tokens: {
     SOL:  "So11111111111111111111111111111111111111112",

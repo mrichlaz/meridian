@@ -689,6 +689,15 @@ switch (subcommand) {
     break;
   }
 
+  // ── ml ───────────────────────────────────────────────────────────
+  case "ml": {
+    const { handleMlCommand } = await import("./ml/cli.js");
+    const mlArgs = argv.filter(a => !a.startsWith("-")).slice(1);
+    const result = await handleMlCommand(mlArgs, (await import("./config.js")).config);
+    process.stdout.write((typeof result === "string" ? result : JSON.stringify(result, null, 2)) + "\n");
+    break;
+  }
+
   default:
     die(`Unknown command: ${subcommand}. Run 'meridian help' for usage.`);
 }

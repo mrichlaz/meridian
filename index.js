@@ -613,13 +613,20 @@ export async function runScreeningCycle({ silent = false } = {}) {
 
     const weightsSummary = config.darwin?.enabled ? getWeightsSummary() : null;
 
+    // ML emotion & personality context for the screener
+    let mlEmotionContext = "";
+    try {
+      const { getEmotionalPromptContext } = await import("./ml/inference.js");
+      mlEmotionContext = getEmotionalPromptContext();
+    } catch {}
+
     let deployAttempted = false;
     let deploySucceeded = false;
     const { content } = await agentLoop(`
 SCREENING CYCLE
 ${strategyBlock}
 Positions: ${prePositions.total_positions}/${config.risk.maxPositions} | SOL: ${currentBalance.sol.toFixed(3)} | Deploy: ${deployAmount} SOL
-
+${mlEmotionContext ? "\n" + mlEmotionContext + "\n" : ""}
 PRE-LOADED CANDIDATES (${passing.length} pools):
 ${candidateBlocks.join("\n\n")}
 
@@ -719,6 +726,19 @@ IMPORTANT:
     log("cron_error", `Screening cycle failed: ${error.message}`);
     screenReport = `Screening cycle failed: ${error.message}`;
   } finally {
+    // Update ML emotions based on screening outcome
+    try {
+      const { onScreenerCycle } = await import("./ml/emotions.js");
+      onScreenerCycle({
+        deployed: deploySucceeded && deployAttempted,
+        skipReason: screenReport?.includes("NO DEPLOY") ? "llm rejected"
+                  : screenReport?.includes("not worth deploying") ? "all filtered"
+                  : screenReport?.includes("skipped") ? "no candidates"
+                  : deployAttempted && !deploySucceeded ? "deploy failed"
+                  : null,
+      });
+    } catch {}
+
     _screeningBusy = false;
     if (!silent && telegramEnabled()) {
       if (screenReport) {

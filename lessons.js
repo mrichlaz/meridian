@@ -196,7 +196,39 @@ export async function recordPerformance(perf) {
         log("evolve", `Darwin: adjusted ${wResult.changes.length} signal weight(s)`);
       }
     }
+
+    // ML model training
+    if (config.ml?.enabled) {
+      try {
+        const { onModelTrained } = await import("./ml/emotions.js");
+        const { trainModel } = await import("./ml/trainer.js");
+        const trainResult = await trainModel({ config: config.ml });
+        if (trainResult.trained) {
+          onModelTrained(trainResult);
+          log("evolve", `ML: trained on ${trainResult.trainSize} samples, loss=${trainResult.finalLoss?.totalLoss?.toFixed(4) || "N/A"}`);
+        }
+      } catch (mlErr) {
+        log("ml_error", `ML training failed: ${mlErr.message}`);
+      }
+    }
   }
+
+  // Online ML update for every close (not just batch training)
+  if (config.ml?.enabled) {
+    try {
+      const { onlineUpdate } = await import("./ml/trainer.js");
+      const updateResult = await onlineUpdate(entry);
+      if (updateResult.updated) {
+        log("ml", `Online update: gen ${updateResult.generation}`);
+      }
+    } catch {} // online update is best-effort
+  }
+
+  // Update emotions on position close
+  try {
+    const { onPositionClosed } = await import("./ml/emotions.js");
+    onPositionClosed(entry);
+  } catch {}
 
   void pushHivePerformanceEvent({
     ...entry,
