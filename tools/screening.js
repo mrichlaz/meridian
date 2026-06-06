@@ -576,14 +576,20 @@ export async function getTopCandidates({ limit = 10 } = {}) {
           const raw = d?.data?.[0];
           if (!raw) continue;
 
-          // Fetch pool detail for volatility/volume data
+          // Fetch pool detail for full metrics (more accurate than search API)
           let vol = null, volVolume = null, vTime = null;
+          let detailTvl = null, detailActiveTvl = null, detailRatio = null, detailMcap = null, detailHolders = null;
           try {
             const detail = await fetchPoolDiscoveryDetail({ poolAddress: raw.address, timeframe });
             if (detail) {
               vol = detail.volatility != null ? Number(detail.volatility) : null;
               volVolume = detail.volume != null ? Number(detail.volume) : null;
               vTime = detail.volatility_timeframe || getVolatilityTimeframe(timeframe);
+              detailTvl = detail.tvl != null ? Number(detail.tvl) : null;
+              detailActiveTvl = detail.active_tvl != null ? Number(detail.active_tvl) : null;
+              detailRatio = detail.fee_active_tvl_ratio != null ? Number(detail.fee_active_tvl_ratio) : null;
+              detailMcap = detail.token_x?.market_cap != null ? Number(detail.token_x.market_cap) : null;
+              detailHolders = detail.token_x?.holders != null ? Number(detail.token_x.holders) : null;
             }
           } catch {}
 
@@ -601,15 +607,15 @@ export async function getTopCandidates({ limit = 10 } = {}) {
             pool_type: null,
             bin_step: raw.pool_config?.bin_step || null,
             fee_pct: raw.dynamic_fee_pct || raw.pool_config?.base_fee_pct || null,
-            tvl: raw.tvl ?? null,
-            active_tvl: null,
+            tvl: detailTvl ?? raw.tvl ?? null,
+            active_tvl: detailActiveTvl ?? null,
             fee_window: raw.fees?.[timeframe] ?? null,
             volume_window: volVolume ?? raw.volume?.[timeframe] ?? null,
-            fee_active_tvl_ratio: raw.fee_tvl_ratio?.[timeframe] ?? null,
+            fee_active_tvl_ratio: detailRatio ?? raw.fee_tvl_ratio?.[timeframe] ?? null,
             volatility: vol,
             volatility_timeframe: vTime,
-            holders: raw.token_x?.holders ?? 0,
-            mcap: raw.token_x?.market_cap ?? null,
+            holders: detailHolders ?? raw.token_x?.holders ?? 0,
+            mcap: detailMcap ?? raw.token_x?.market_cap ?? null,
             organic_score: null,
             token_age_hours: null,
             dev: null,
