@@ -1400,6 +1400,11 @@ async function drainTelegramQueue() {
 async function telegramHandler(msg) {
   const text = msg?.text?.trim();
   if (!text) return;
+
+  // Dedupe by message_id — some providers return same message in subsequent polls
+  if (msg.message_id && telegramHandler.lastId === msg.message_id) return;
+  telegramHandler.lastId = msg.message_id;
+
   if (msg?.isCallback && text.startsWith("cfg:")) {
     try {
       await applySettingsMenuCallback(msg);
