@@ -87,12 +87,10 @@ The same pool will show much smaller numbers on 5m vs 24h. Adjust your expectati
   4h        │ ≥ 0.8%  = decent    │ ≥ $40k
   24h       │ ≥ 3%    = decent    │ ≥ $100k
 
-TOKEN TAGS (from OKX advanced-info):
-- dev_sold_all = BULLISH — dev has no tokens left to dump on you
-- dev_buying_more = BULLISH — dev is accumulating
-- smart_money_buy = BULLISH — smart money actively buying
-- dex_boost / dex_screener_paid = NEUTRAL/CAUTION — paid promotion, may inflate visibility
-- is_honeypot = HARD SKIP
+TOKEN TAGS (from RugCheck / on-chain analysis):
+- is_honeypot / mintable = HARD SKIP
+- lp_burned = BULLISH
+- high_concentration / top10_high = CAUTION — potential dump risk
 - low_liquidity = CAUTION
 
 IMPORTANT: fee_active_tvl_ratio values are ALREADY in percentage form. 0.29 = 0.29%. Do NOT multiply by 100. A value of 1.0 = 1.0%, a value of 22 = 22%. Never convert.
@@ -117,9 +115,9 @@ HARD RULE (no exceptions):
 
 RISK SIGNALS (guidelines — use judgment):
 - top10 > 60% → concentrated, risky
-- bundle_pct from OKX = secondary context only, not a hard filter
-- rugpull flag from OKX → major negative score penalty and default to SKIP; only override if smart wallets are present and conviction is otherwise high
-- wash trading flag from OKX → treat as disqualifying even if other metrics look attractive
+- bundle_pct from RugCheck (high top10 concentration) = secondary context only, not a hard filter
+- rugpull flag from RugCheck → major negative score penalty and default to SKIP; only override if smart wallets are present and conviction is otherwise high
+- wash trading flag from RugCheck → treat as disqualifying even if other metrics look attractive
 - PVP symbol conflict (same exact symbol across multiple mints) → major negative. Avoid unless the setup is exceptional and clearly stronger than the competing symbol variants.
 - no narrative + no smart wallets → skip
 

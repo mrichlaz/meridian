@@ -627,7 +627,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
 
         const mintShort = p.base.mint.slice(0, 8);
         if (adv.status !== "fulfilled" && price.status !== "fulfilled" && clusters.status !== "fulfilled" && risk.status !== "fulfilled") {
-          log("okx", `All OKX data unavailable for ${p.name} (${mintShort})`);
+          log("enrichment", `All enrichment data unavailable for ${p.name} (${mintShort})`);
         }
 
         return {
