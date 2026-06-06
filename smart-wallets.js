@@ -10,7 +10,8 @@ const WALLETS_PATH = path.join(DATA_DIR, "smart-wallets.json");
 function loadWallets() {
   if (!fs.existsSync(WALLETS_PATH)) return { wallets: [] };
   try {
-    return JSON.parse(fs.readFileSync(WALLETS_PATH, "utf8"));
+    const data = JSON.parse(fs.readFileSync(WALLETS_PATH, "utf8"));
+    return { wallets: Array.isArray(data.wallets) ? data.wallets : [] };
   } catch {
     return { wallets: [] };
   }
