@@ -21,7 +21,6 @@ let _polling = false;
 let _liveMessageDepth = 0;
 let _warnedMissingChatId = false;
 let _warnedMissingAllowedUsers = false;
-const _dedupe = new Set(); // message_id deduplication
 
 // ─── chatId persistence ──────────────────────────────────────────
 function loadChatId() {
@@ -197,7 +196,7 @@ function createTypingIndicator() {
     } catch {}
     timer = setTimeout(() => {
       tick().catch(() => null);
-    }, 12000);
+    }, 4000);
   }
 
   tick().catch(() => null);
@@ -267,15 +266,12 @@ export async function createLiveMessage(title, intro = "Starting...") {
   if (!TOKEN || !chatId) return null;
   const typing = createTypingIndicator();
 
-  // Reuse the previous live message if it exists instead of spamming new ones
-  const lastId = createLiveMessage._lastId;
-
   const state = {
     title,
     intro,
     toolLines: [],
     footer: "",
-    messageId: lastId || null,
+    messageId: null,
     flushTimer: null,
     flushPromise: null,
     flushRequested: false,
@@ -296,7 +292,6 @@ export async function createLiveMessage(title, intro = "Starting...") {
     if (!state.messageId) {
       const sent = await sendMessage(text);
       state.messageId = sent?.result?.message_id ?? null;
-      createLiveMessage._lastId = state.messageId;
       return;
     }
     await editMessage(text, state.messageId);
@@ -395,15 +390,7 @@ async function poll(onMessage) {
         const msg = update.message;
         if (!msg?.text) continue;
         if (!isAuthorizedIncomingMessage(msg)) continue;
-        if (_dedupe.has(msg.message_id)) continue;
-        _dedupe.add(msg.message_id);
         await onMessage(msg);
-        // Periodically prune old IDs
-        if (_dedupe.size > 200) {
-          const arr = [..._dedupe];
-          _dedupe.clear();
-          for (const id of arr.slice(-100)) _dedupe.add(id);
-        }
       }
     } catch (e) {
       if (!e.message?.includes("aborted")) {
