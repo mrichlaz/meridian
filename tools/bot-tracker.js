@@ -9,6 +9,7 @@ import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
 import { log } from "../logger.js";
+import { getConnection } from "../utils/rpc-pool.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.resolve(__dirname, "../data");
@@ -16,9 +17,6 @@ const DB_PATH = path.join(DATA_DIR, "bot-tracker.db");
 
 const BOTS = (process.env.BOT_WALLETS || "3QUnrcMqCQoiGB73s1A6uDzxziywaNFpTLiZiiZbEUoN,NA247a7YE9S3p9CdKmMyETx8TTwbSdVbVYHHxpnHTUV,joeHSutRWndCtp1EPx5tz5zHyaPBZUZ5JsxDEVB1RPZ,MEViEnscUm6tsQRoGd9h6nLQaQspKj7DB2M5FwM3Xvz")
   .split(",").map(a => a.trim()).filter(Boolean);
-const rawKey = process.env.HELIUS_API_KEYS || process.env.HELIUS_API_KEY || process.env.HELIUS_KEY || "";
-const H_KEY = rawKey.split(",")[0].trim();
-const H_HTTP = `https://mainnet.helius-rpc.com/?api-key=${H_KEY}`;
 const DEX_API = "https://api.dexscreener.com/latest/dex/tokens";
 const W = 4 * 3600 * 1000;       // 4h window
 const POLL_INTERVAL = 10_000;     // poll every 10s
@@ -140,7 +138,8 @@ function initDB() {
 
 // ─── Helius RPC call ───
 async function heliusCall(method, params) {
-  const r = await fetchWithRetry(H_HTTP, {
+  const conn = getConnection();
+  const r = await fetchWithRetry(conn.rpcEndpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
