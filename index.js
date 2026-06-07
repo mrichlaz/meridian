@@ -1601,6 +1601,7 @@ async function telegramHandler(msg) {
   }
 
   // ── Settings menu shortcuts ──────────────────────────────
+  if (text === "/settings" || text === "/menu" || text === "/configmenu") {
     await showSettingsMenu().catch((e) => sendMessage(`Settings error: ${e.message}`).catch(() => {}));
     return;
   }
