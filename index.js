@@ -478,7 +478,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     const allCandidates = [];
     // Enrich all candidates in parallel, batched to avoid 429s from external APIs.
     // Smart wallet checks are already internally batched at 3 concurrent per pool.
-    const BATCH_SIZE = 3;
+    const BATCH_SIZE = 5;
     for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
       const batch = candidates.slice(i, i + BATCH_SIZE);
       const batchResults = await Promise.all(
