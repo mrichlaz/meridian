@@ -1391,7 +1391,7 @@ async function applySettingsMenuCallback(msg) {
 }
 
 function formatHelpText() {
-  return "<b>📋 Telegram Commands</b>\n\n" + [
+  return "📋 Telegram Commands\n\n" + [
     "/help — show commands",
     "/status — wallet + positions snapshot",
     "/wallet — wallet, deploy amount, HiveMind status",
