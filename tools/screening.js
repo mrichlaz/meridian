@@ -6,6 +6,7 @@ import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { confirmIndicatorPreset } from "./chart-indicators.js";
 import { getAgentMeridianBase, getAgentMeridianHeaders } from "./agent-meridian.js";
 import { discoverGmgnPools } from "./gmgn.js";
+import { scaleScreeningToTimeframe } from "../screening-scales.js";
 
 const DATAPI_JUP = "https://datapi.jup.ag/v1";
 
@@ -384,6 +385,10 @@ export async function discoverPools({
   page_size = 50,
 } = {}) {
   const s = config.screening;
+  const tf = s.timeframe || "5m";
+  const { minFeeActiveTvlRatio: scaledFee, minVolume: scaledVolume } = scaleScreeningToTimeframe(tf);
+  const effectiveFee = numeric(s.minFeeActiveTvlRatio) ?? scaledFee;
+  const effectiveVolume = numeric(s.minVolume) ?? scaledVolume;
   const filters = [
     "base_token_has_critical_warnings=false",
     "quote_token_has_critical_warnings=false",
@@ -393,12 +398,12 @@ export async function discoverPools({
     `base_token_market_cap>=${s.minMcap}`,
     `base_token_market_cap<=${s.maxMcap}`,
     `base_token_holders>=${s.minHolders}`,
-    `volume>=${s.minVolume}`,
+    `volume>=${effectiveVolume}`,
     `tvl>=${s.minTvl}`,
     s.maxTvl != null ? `tvl<=${s.maxTvl}` : null,
     `dlmm_bin_step>=${s.minBinStep}`,
     `dlmm_bin_step<=${s.maxBinStep}`,
-    `fee_active_tvl_ratio>=${s.minFeeActiveTvlRatio}`,
+    `fee_active_tvl_ratio>=${effectiveFee}`,
     `base_token_organic_score>=${s.minOrganic}`,
     `quote_token_organic_score>=${s.minQuoteOrganic}`,
     s.minTokenAgeHours != null ? `base_token_created_at<=${Date.now() - s.minTokenAgeHours * 3_600_000}` : null,
@@ -471,9 +476,16 @@ export async function discoverPools({
   rawPools = await applyVolatilityTimeframe(rawPools, s.timeframe);
   await enrichDiscordSignalLaunchpads(rawPools);
 
+  const { minFeeActiveTvlRatio: scaledFee2, minVolume: scaledVol } = scaleScreeningToTimeframe(tf);
+  const effectiveS = {
+    ...s,
+    minFeeActiveTvlRatio: numeric(s.minFeeActiveTvlRatio) ?? scaledFee2,
+    minVolume: numeric(s.minVolume) ?? scaledVol,
+  };
+
   const filteredExamples = [];
   const thresholdedRawPools = rawPools.filter((pool) => {
-    const reason = getRawPoolScreeningRejectReason(pool, s);
+    const reason = getRawPoolScreeningRejectReason(pool, effectiveS);
     if (!reason) return true;
     filteredExamples.push({ name: pool.name || pool.pool_address || "unknown pool", reason });
     if (pool.discord_signal) log("screening", `Discord signal filtered: ${pool.name || pool.pool_address} — ${reason}`);
@@ -661,7 +673,10 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   const occupiedMints = new Set(positions.map((p) => p.base_mint).filter(Boolean));
   const minTvl = Number(config.screening.minTvl ?? 0);
   const maxTvl = config.screening.maxTvl == null ? null : Number(config.screening.maxTvl);
-  const minFeeActiveTvlRatio = Number(config.screening.minFeeActiveTvlRatio ?? 0);
+  const tf = config.screening.timeframe || "5m";
+  const { minFeeActiveTvlRatio: scaledFee } = scaleScreeningToTimeframe(tf);
+  const rawMinFee = numeric(config.screening.minFeeActiveTvlRatio);
+  const minFeeActiveTvlRatio = rawMinFee ?? scaledFee;
 
   const eligible = pools
     .filter((p) => {
