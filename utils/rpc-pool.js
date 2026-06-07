@@ -50,13 +50,21 @@ function initPool() {
 }
 
 /**
- * Returns the next Connection in round-robin order.
+ * Returns the next Connection in round-robin order (for reads).
  */
 export function getConnection() {
   const pool = initPool();
   const conn = pool[_idx % pool.length];
   _idx++;
   return conn;
+}
+
+/**
+ * Always returns the first connection (primary key) — for transactions
+ * so Helius doesn't reject txs from secondary API keys.
+ */
+export function getPrimaryConnection() {
+  return initPool()[0];
 }
 
 /**

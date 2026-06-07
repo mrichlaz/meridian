@@ -184,31 +184,37 @@ export function hasActiveLiveMessage() {
   return _liveMessageDepth > 0;
 }
 
+// Global singleton — prevents concurrent sendChatAction 429 spam
+let _typingRefs = 0;
+let _typingInterval = null;
+
+function _startTyping() {
+  if (_typingInterval) return;
+  _typingInterval = setInterval(() => {
+    if (_typingRefs <= 0) {
+      clearInterval(_typingInterval);
+      _typingInterval = null;
+      return;
+    }
+    postTelegram("sendChatAction", { action: "typing" }).catch(() => {});
+  }, 5000);
+}
+
 function createTypingIndicator() {
   if (!TOKEN || !chatId) {
     return { stop() {} };
   }
 
-  let stopped = false;
-  let timer = null;
-
-  async function tick() {
-    if (stopped) return;
-    try {
-      await postTelegram("sendChatAction", { action: "typing" });
-    } catch {}
-    timer = setTimeout(() => {
-      tick().catch(() => null);
-    }, 4000);
-  }
-
-  tick().catch(() => null);
+  _typingRefs++;
+  _startTyping();
 
   return {
     stop() {
-      stopped = true;
-      if (timer) clearTimeout(timer);
-      timer = null;
+      _typingRefs = Math.max(0, _typingRefs - 1);
+      if (_typingRefs <= 0 && _typingInterval) {
+        clearInterval(_typingInterval);
+        _typingInterval = null;
+      }
     },
   };
 }
