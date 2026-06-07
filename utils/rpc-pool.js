@@ -65,7 +65,9 @@ export function getConnection() {
  */
 export function getPrimaryConnection() {
   const pool = initPool();
-  return pool[_idx % pool.length];
+  const conn = pool[_idx % pool.length];
+  _idx++;
+  return conn;
 }
 
 /**
