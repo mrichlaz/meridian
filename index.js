@@ -377,11 +377,10 @@ After executing, write a brief one-line result per position.
     _managementBusy = false;
     if (!silent && telegramEnabled()) {
       if (mgmtReport) {
-        const { text } = formatManagementReport(stripThink(mgmtReport), positionData);
         if (liveMessage) {
-          await liveMessage.finalize(text).catch(() => {});
+          await liveMessage.finalize(mgmtReport.slice(0, 4000)).catch(() => {});
         } else {
-          await sendHTML(text).catch(() => {});
+          await sendMessage(mgmtReport.slice(0, 4000)).catch(() => {});
         }
       }
       for (const p of positions) {

@@ -1207,7 +1207,7 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
     // Detailed range data stays on Meteora PnL API; value/PnL can be overridden by LPAgent below.
     if (!silent) log("positions", "Fetching portfolio via Meteora portfolio API...");
     const portfolioUrl = `https://dlmm.datapi.meteora.ag/portfolio/open?user=${walletAddress}`;
-    const res = await fetch(portfolioUrl);
+    const res = await fetch(portfolioUrl, { signal: AbortSignal.timeout(15_000) });
     if (!res.ok) throw new Error(`Portfolio API ${res.status}: ${await res.text().catch(() => "")}`);
     const portfolio = await res.json();
 
