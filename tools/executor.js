@@ -259,6 +259,7 @@ function normalizeConfigValue(key, value) {
     "timeframe",
     "category",
     "discordSignalMode",
+    "screeningSource",
     "strategy",
     "managementModel",
     "screeningModel",
