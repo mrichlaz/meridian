@@ -476,23 +476,34 @@ export async function runScreeningCycle({ silent = false } = {}) {
     const gmgnAllFiltered = topCandidates?.all_filtered ?? [];
 
     const allCandidates = [];
-    for (const pool of candidates) {
-      const mint = pool.base?.mint;
-      const [smartWallets, narrative, tokenInfo, study] = await Promise.allSettled([
-        checkSmartWalletsOnPool({ pool_address: pool.pool }),
-        mint ? getTokenNarrative({ mint }) : Promise.resolve(null),
-        mint ? getTokenInfo({ query: mint }) : Promise.resolve(null),
-        studyTopLPers({ pool_address: pool.pool, limit: 3 }).catch(() => null),
-      ]);
-      allCandidates.push({
-        pool,
-        sw: smartWallets.status === "fulfilled" ? smartWallets.value : null,
-        n: narrative.status === "fulfilled" ? narrative.value : null,
-        ti: tokenInfo.status === "fulfilled" ? tokenInfo.value?.results?.[0] : null,
-        mem: recallForPool(pool.pool),
-        study: study.status === "fulfilled" ? study.value : null,
-      });
-      await new Promise(r => setTimeout(r, 150)); // avoid 429s
+    // Enrich all candidates in parallel, batched to avoid 429s from external APIs.
+    // Smart wallet checks are already internally batched at 3 concurrent per pool.
+    const BATCH_SIZE = 3;
+    for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
+      const batch = candidates.slice(i, i + BATCH_SIZE);
+      const batchResults = await Promise.all(
+        batch.map(async (pool) => {
+          const mint = pool.base?.mint;
+          const [smartWallets, narrative, tokenInfo, study] = await Promise.allSettled([
+            checkSmartWalletsOnPool({ pool_address: pool.pool }),
+            mint ? getTokenNarrative({ mint }) : Promise.resolve(null),
+            mint ? getTokenInfo({ query: mint }) : Promise.resolve(null),
+            studyTopLPers({ pool_address: pool.pool, limit: 3 }).catch(() => null),
+          ]);
+          return {
+            pool,
+            sw: smartWallets.status === "fulfilled" ? smartWallets.value : null,
+            n: narrative.status === "fulfilled" ? narrative.value : null,
+            ti: tokenInfo.status === "fulfilled" ? tokenInfo.value?.results?.[0] : null,
+            mem: recallForPool(pool.pool),
+            study: study.status === "fulfilled" ? study.value : null,
+          };
+        })
+      );
+      allCandidates.push(...batchResults);
+      if (i + BATCH_SIZE < candidates.length) {
+        await new Promise(r => setTimeout(r, 200)); // brief pause between batches
+      }
     }
 
     // Hard filters after token recon — block launchpads and excessive Jupiter bot holders
