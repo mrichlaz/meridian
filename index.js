@@ -361,7 +361,7 @@ After executing, write a brief one-line result per position.
       mgmtReport += `\n\n${content}`;
     } else {
       log("cron", "Management: all positions STAY — skipping LLM");
-      await liveMessage?.finalize(null);
+      await liveMessage?.note("No tool actions needed.");
     }
 
     // Trigger screening after management
