@@ -133,6 +133,7 @@ export async function sendMessageWithButtons(text, inlineKeyboard) {
   if (!TOKEN || !chatId) return;
   return postTelegram("sendMessage", {
     text: String(text).slice(0, 4096),
+    parse_mode: "HTML",
     reply_markup: { inline_keyboard: inlineKeyboard },
   });
 }
@@ -162,6 +163,7 @@ export async function editMessageWithButtons(text, messageId, inlineKeyboard) {
     return await postTelegram("editMessageText", {
       message_id: messageId,
       text: String(text).slice(0, 4096),
+      parse_mode: "HTML",
       reply_markup: { inline_keyboard: inlineKeyboard },
     });
   } catch (error) {
@@ -420,6 +422,9 @@ const BOT_COMMANDS = [
   { command: "briefing",   description: "Morning briefing" },
   { command: "hive",       description: "HiveMind sync status" },
   { command: "learn",      description: "Study top LPers and save lessons" },
+  { command: "lessons",    description: "List recent saved lessons" },
+  { command: "thresholds", description: "Screening thresholds + performance stats" },
+  { command: "evolve",     description: "Trigger threshold evolution from data" },
   { command: "pause",      description: "Stop cron cycles" },
   { command: "resume",     description: "Start cron cycles again" },
   { command: "stop",       description: "Shut down agent" },

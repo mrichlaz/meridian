@@ -368,13 +368,11 @@ After executing, write a brief one-line result per position.
     _managementBusy = false;
     if (!silent && telegramEnabled()) {
       if (mgmtReport) {
-        const { sendMessageWithButtons } = await import("./telegram.js");
-        const { text, buttons } = formatManagementReport(stripThink(mgmtReport), positionData);
+        const { text } = formatManagementReport(stripThink(mgmtReport), positionData);
         if (liveMessage) {
           await liveMessage.finalize(text);
-          await sendMessageWithButtons("—", buttons).catch(() => {});
         } else {
-          await sendMessageWithButtons(text, buttons).catch(() => {});
+          await sendHTML(text).catch(() => {});
         }
       }
       for (const p of positions) {
@@ -835,8 +833,6 @@ IMPORTANT:
         });
         if (liveMessage) {
           await liveMessage.finalize(text);
-          // Send buttons as a follow-up message (Telegram can't edit to add buttons)
-          await sendMessageWithButtons("—", buttons).catch(() => {});
         } else {
           await sendMessageWithButtons(text, buttons).catch(() => {});
         }
@@ -1391,9 +1387,7 @@ async function applySettingsMenuCallback(msg) {
 }
 
 function formatHelpText() {
-  return [
-    "Telegram commands",
-    "",
+  return "<b>📋 Telegram Commands</b>\n\n" + [
     "/help — show commands",
     "/status — wallet + positions snapshot",
     "/wallet — wallet, deploy amount, HiveMind status",
@@ -1411,6 +1405,10 @@ function formatHelpText() {
     "/briefing — morning briefing",
     "/hive — HiveMind sync status",
     "/hive pull — manual HiveMind pull now",
+    "/learn — study top LPers and save lessons",
+    "/lessons — list recent saved lessons",
+    "/thresholds — screening thresholds + stats",
+    "/evolve — trigger threshold evolution",
     "/pause — stop cron cycles",
     "/resume — start cron cycles again",
     "/stop — shut down agent",
@@ -1626,17 +1624,17 @@ async function telegramHandler(msg) {
   }
 
   if (text === "/help") {
-    await sendMessage(formatHelpText()).catch(() => {});
+    await sendHTML(formatHelpText()).catch(() => {});
     return;
   }
 
   if (text === "/wallet" || text === "/status") {
     try {
       const [wallet, positions] = await Promise.all([getWalletBalances(), getMyPositions({ force: true })]);
-      const suffix = text === "/status" && positions.total_positions
-        ? `\n\nUse /positions for the numbered list.`
-        : "";
-      await sendMessage(`${formatWalletStatus(wallet, positions)}${suffix}`).catch(() => {});
+      const { getCurrentState } = await import("./ml/emotions.js");
+      const { formatStatusCard } = await import("./utils/telegram-formatter.js");
+      const { text: cardText, buttons: cardBtns } = formatStatusCard({ wallet, positions, ml: getCurrentState(), config });
+      await sendMessageWithButtons(cardText, cardBtns).catch(() => {});
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
@@ -1644,7 +1642,8 @@ async function telegramHandler(msg) {
   }
 
   if (text === "/config") {
-    await sendMessage(formatConfigSnapshot()).catch(() => {});
+    const { ACTION_BUTTONS } = await import("./utils/telegram-formatter.js");
+    await sendMessageWithButtons(formatConfigSnapshot(), ACTION_BUTTONS.status()).catch(() => {});
     return;
   }
 
@@ -1652,14 +1651,14 @@ async function telegramHandler(msg) {
     try {
       const { positions, total_positions } = await getMyPositions({ force: true });
       if (total_positions === 0) { await sendMessage("No open positions."); return; }
-      const cur = config.management.solMode ? "◎" : "$";
-      const lines = positions.map((p, i) => {
-        const pnl = p.pnl_usd >= 0 ? `+${cur}${p.pnl_usd}` : `-${cur}${Math.abs(p.pnl_usd)}`;
-        const age = p.age_minutes != null ? `${p.age_minutes}m` : "?";
-        const oor = !p.in_range ? " ⚠️OOR" : "";
-        return `${i + 1}. ${p.pair} | ${cur}${p.total_value_usd} | PnL: ${pnl} | fees: ${cur}${p.unclaimed_fees_usd} | ${age}${oor}`;
-      });
-      await sendMessage(`📊 Open Positions (${total_positions}):\n\n${lines.join("\n")}\n\n/close <n> to close | /set <n> <note> to set instruction`);
+      const { formatPositionCard } = await import("./utils/telegram-formatter.js");
+      for (const p of positions.slice(0, 5)) {
+        const { text: cardText, buttons: cardBtns } = formatPositionCard(p);
+        await sendMessageWithButtons(cardText, cardBtns).catch(() => {});
+      }
+      if (positions.length > 5) {
+        await sendMessageWithButtons(`... and ${positions.length - 5} more positions. Use /pool <n> for detail.`, ACTION_BUTTONS.screening()).catch(() => {});
+      }
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }
@@ -1670,17 +1669,9 @@ async function telegramHandler(msg) {
       const idx = parseInt(poolMatch[1]) - 1;
       const { positions } = await getMyPositions({ force: true });
       if (idx < 0 || idx >= positions.length) { await sendMessage("Invalid number. Use /positions first."); return; }
-      const pos = positions[idx];
-      await sendMessage([
-        `${idx + 1}. ${pos.pair}`,
-        `Pool: ${pos.pool}`,
-        `Position: ${pos.position}`,
-        `Range: ${pos.lower_bin} → ${pos.upper_bin} | active ${pos.active_bin}`,
-        `PnL: ${pos.pnl_pct ?? "?"}% | fees: ${config.management.solMode ? "◎" : "$"}${pos.unclaimed_fees_usd ?? "?"}`,
-        `Value: ${config.management.solMode ? "◎" : "$"}${pos.total_value_usd ?? "?"}`,
-        `Age: ${pos.age_minutes ?? "?"}m | ${pos.in_range ? "IN RANGE" : `OOR ${pos.minutes_out_of_range ?? 0}m`}`,
-        pos.instruction ? `Note: ${pos.instruction}` : null,
-      ].filter(Boolean).join("\n"));
+      const { formatPositionCard } = await import("./utils/telegram-formatter.js");
+      const { text: cardText, buttons: cardBtns } = formatPositionCard(positions[idx]);
+      await sendMessageWithButtons(cardText, cardBtns).catch(() => {});
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
@@ -1764,7 +1755,9 @@ async function telegramHandler(msg) {
 
   if (text === "/screen") {
     try {
-      await sendMessage(await runDeterministicScreen(5)).catch(() => {});
+      const { ACTION_BUTTONS } = await import("./utils/telegram-formatter.js");
+      const report = await runDeterministicScreen(5);
+      await sendMessageWithButtons(report, ACTION_BUTTONS.screening()).catch(() => {});
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
@@ -1772,7 +1765,8 @@ async function telegramHandler(msg) {
   }
 
   if (text === "/candidates") {
-    await sendMessage(describeLatestCandidates(5)).catch(() => {});
+    const { ACTION_BUTTONS } = await import("./utils/telegram-formatter.js");
+    await sendMessageWithButtons(describeLatestCandidates(5), ACTION_BUTTONS.screening()).catch(() => {});
     return;
   }
 
@@ -1833,19 +1827,116 @@ async function telegramHandler(msg) {
         (pullMode === "auto" || isManualPull) ? pullHiveMindLessons(12) : Promise.resolve(null),
         (pullMode === "auto" || isManualPull) ? pullHiveMindPresets() : Promise.resolve(null),
       ]);
-      await sendMessage([
-        "HiveMind: enabled",
-        `Agent ID: ${agentId}`,
+      await sendHTML([
+        "<b>🧠 HiveMind</b>",
+        `Agent: <code>${agentId}</code>`,
         `URL: ${config.hiveMind.url}`,
-        `Pull mode: ${pullMode}`,
-        `Register: ${registerResult ? "ok" : "warn"}`,
-        `Shared lessons: ${Array.isArray(lessons) ? lessons.length : (pullMode === "manual" ? "manual" : 0)}`,
+        `Pull: ${pullMode}`,
+        `Register: ${registerResult ? "✅ ok" : "⚠️ warn"}`,
+        `Lessons: ${Array.isArray(lessons) ? lessons.length : (pullMode === "manual" ? "manual" : 0)}`,
         `Presets: ${Array.isArray(presets) ? presets.length : (pullMode === "manual" ? "manual" : 0)}`,
         isManualPull ? "Manual pull: completed" : null,
-      ].join("\n")).catch(() => {});
+      ].filter(Boolean).join("\n")).catch(() => {});
     } catch (e) {
       await sendMessage(`HiveMind error: ${e.message}`).catch(() => {});
     }
+    return;
+  }
+
+  if (text === "/thresholds") {
+    try {
+      const s = config.screening;
+      const perf = getPerformanceSummary();
+      let lines = [
+        `<b>Screening Thresholds</b>`,
+        `fee/tvl min: ${s.minFeeActiveTvlRatio}`,
+        `organic min: ${s.minOrganic}`,
+        `holders min: ${s.minHolders}`,
+        `tvl: ${s.minTvl}–${s.maxTvl}`,
+        `volume min: ${s.minVolume}`,
+        `timeframe: ${s.timeframe}`,
+        perf ? `\n<b>Performance</b>\n${perf.total_positions_closed} closed | ${perf.win_rate_pct}% win | avg PnL ${perf.avg_pnl_pct}%` : `\nNo closed positions yet.`,
+      ].join("\n");
+      await sendHTML(lines).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/evolve") {
+    try {
+      const perf = getPerformanceSummary();
+      if (!perf || perf.total_positions_closed < 5) {
+        const needed = 5 - (perf?.total_positions_closed || 0);
+        await sendMessage(`Need ${needed} more closed position(s) to evolve (have ${perf?.total_positions_closed || 0}).`).catch(() => {});
+        return;
+      }
+      const { PATHS } = await import("./utils/paths.js");
+      const lessonsData = JSON.parse((await import("fs")).readFileSync(PATHS.lessons, "utf8"));
+      const result = evolveThresholds(lessonsData.performance, config);
+      if (!result || Object.keys(result.changes).length === 0) {
+        await sendMessage("No threshold changes needed.").catch(() => {});
+      } else {
+        reloadScreeningThresholds();
+        const changes = Object.entries(result.changes)
+          .map(([k, v]) => `<code>${k}</code>: ${v}`)
+          .join("\n");
+        await sendHTML(`<b>Thresholds Evolved</b>\n${changes}\n\nSaved to user-config.json.`).catch(() => {});
+      }
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  if (text.startsWith("/learn")) {
+    try {
+      const parts = text.split(" ");
+      const poolArg = parts[1] || null;
+      let poolsToStudy = [];
+      if (poolArg) {
+        poolsToStudy = [{ pool: poolArg, name: poolArg }];
+      } else {
+        const { candidates } = await getTopCandidates({ limit: 5 });
+        poolsToStudy = candidates.map((c) => ({ pool: c.pool, name: c.name }));
+      }
+      if (!poolsToStudy.length) {
+        await sendMessage("No pools to study. Run /screen first.").catch(() => {});
+        return;
+      }
+      await sendMessage(`Studying top LPers across ${poolsToStudy.length} pools...`).catch(() => {});
+      // This is forwarded to the agent loop below — the LLM handles it
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+      return;
+    }
+    // Fall through to agent loop — don't return
+  }
+
+  if (text === "/lessons") {
+    try {
+      const { listLessons } = await import("./lessons.js");
+      const data = listLessons({ limit: 10 });
+      if (!data.lessons.length) {
+        await sendMessage("No lessons saved yet. Use /learn to generate them.").catch(() => {});
+        return;
+      }
+      const lines = ["<b>📚 Recent Lessons</b>"];
+      for (const l of data.lessons) {
+        const tag = l.outcome === "good" ? "✅" : l.outcome === "bad" ? "🔴" : "📝";
+        lines.push(`${tag} <code>#${l.id}</code> ${l.rule.slice(0, 140)}`);
+      }
+      await sendHTML(lines.join("\n")).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/stop") {
+    await sendMessage("🛑 Shutting down...").catch(() => {});
+    await shutdown("telegram command");
     return;
   }
 
