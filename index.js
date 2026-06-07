@@ -370,7 +370,9 @@ After executing, write a brief one-line result per position.
       if (mgmtReport) {
         const { text } = formatManagementReport(stripThink(mgmtReport), positionData);
         if (liveMessage) {
-          await liveMessage.finalize(text);
+          await liveMessage.note("✅ Reporting...");
+          await liveMessage.finalize(null);
+          await sendHTML(text).catch(() => {});
         } else {
           await sendHTML(text).catch(() => {});
         }
@@ -832,7 +834,9 @@ IMPORTANT:
           poolName: deployPoolName,
         });
         if (liveMessage) {
-          await liveMessage.finalize(text);
+          await liveMessage.note("✅ Reporting...");
+          await liveMessage.finalize(null);
+          await sendMessageWithButtons(text, buttons).catch(() => {});
         } else {
           await sendMessageWithButtons(text, buttons).catch(() => {});
         }
