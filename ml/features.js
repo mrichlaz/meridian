@@ -116,12 +116,18 @@ const FEATURE_SPEC = [
   "ctx_hour_of_day",          // 67: 0-23
   "ctx_day_of_week",          // 68: 0-6
 
+  // ─── ENTRY MARKET: pool state at deploy time ──
+  "entry_mcap_usd",           // 69: mcap at deploy
+  "entry_tvl_usd",            // 70: TVL at deploy
+  "entry_volume_usd",         // 71: 24h volume at deploy
+  "entry_holders",            // 72: holder count at deploy
+
   // ─── ISOLATED: interaction features ───────────
-  "isol_feerate_x_volatility", // 69: fee_tvl_ratio * volatility
-  "isol_feerate_x_organic",    // 70: fee_tvl_ratio * organic_score
-  "isol_volume_per_tvl",       // 71: volume / TVL
-  "isol_tvl_per_position",     // 72: TVL / position count
-  "isol_holder_density",       // 73: holders / mcap log10
+  "isol_feerate_x_volatility", // 73: fee_tvl_ratio * volatility
+  "isol_feerate_x_organic",    // 74: fee_tvl_ratio * organic_score
+  "isol_volume_per_tvl",       // 75: volume / TVL
+  "isol_tvl_per_position",     // 76: TVL / position count
+  "isol_holder_density",       // 77: holders / mcap log10
 ];
 
 const FEATURE_COUNT = FEATURE_SPEC.length;
@@ -188,6 +194,10 @@ const NORM_BOUNDS = Object.fromEntries(
       case "ctx_deploy_amount_sol":    return [name, [0, 50]];
       case "ctx_hour_of_day":          return [name, [0, 23]];
       case "ctx_day_of_week":          return [name, [0, 6]];
+      case "entry_mcap_usd":           return [name, [0, 100000000]];
+      case "entry_tvl_usd":            return [name, [0, 500000]];
+      case "entry_volume_usd":         return [name, [0, 5000000]];
+      case "entry_holders":            return [name, [0, 50000]];
       case "isol_feerate_x_volatility": return [name, [0, 500]];
       case "isol_feerate_x_organic":   return [name, [0, 2500]];
       case "isol_volume_per_tvl":      return [name, [0, 500]];
@@ -329,6 +339,12 @@ export function extractFeatures({
   vec[FEATURE_INDEX.ctx_hour_of_day] = new Date().getUTCHours();
   vec[FEATURE_INDEX.ctx_day_of_week] = new Date().getUTCDay();
 
+  // ─── ENTRY MARKET: pool state at deploy time ──
+  vec[FEATURE_INDEX.entry_mcap_usd] = numeric(c.entry_mcap ?? context.entryMcap, 0);
+  vec[FEATURE_INDEX.entry_tvl_usd] = numeric(c.entry_tvl ?? context.entryTvl, 0);
+  vec[FEATURE_INDEX.entry_volume_usd] = numeric(c.entry_volume ?? context.entryVolume, 0);
+  vec[FEATURE_INDEX.entry_holders] = numeric(c.entry_holders ?? context.entryHolders, 0);
+
   // ─── ISOLATED ──────────────────────────────────
   vec[FEATURE_INDEX.isol_feerate_x_volatility] =
     vec[FEATURE_INDEX.pool_fee_tvl_ratio] * vec[FEATURE_INDEX.pool_volatility];
@@ -374,8 +390,9 @@ export function normalizeVector(vec) {
  * (for training — reconstructs the state at deploy time).
  */
 export function extractFromPerformance(perf) {
-  // Fix #1: If ml_snapshot was stored at deploy time, restore the full
-  // 74-dim normalized vector directly. Otherwise fall back to sparse
+  const DIMS = FEATURE_COUNT;
+  // If ml_snapshot was stored at deploy time, restore the full
+  // normalized vector directly. Otherwise fall back to sparse
   // reconstruction from signal_snapshot (legacy positions).
   if (perf.ml_snapshot?.norm) {
     // Full feature vector stored at deploy time — restore exactly
@@ -393,12 +410,20 @@ export function extractFromPerformance(perf) {
     holders: snapshot.holder_count || snapshot.holders,
     mcap: snapshot.mcap,
     bin_step: perf.bin_step,
+    entry_mcap: perf.entry_mcap,
+    entry_tvl: perf.entry_tvl,
+    entry_volume: perf.entry_volume,
+    entry_holders: perf.entry_holders,
   };
   const context = {
     walletSol: perf.amount_sol || 0,
     activePositions: 1,
     maxPositions: 3,
     deployAmountSol: perf.amount_sol || 0.5,
+    entryMcap: perf.entry_mcap,
+    entryTvl: perf.entry_tvl,
+    entryVolume: perf.entry_volume,
+    entryHolders: perf.entry_holders,
   };
   return normalizeVector(extractFeatures({ candidate, context }));
 }

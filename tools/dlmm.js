@@ -1683,6 +1683,7 @@ export async function closePosition({ position_address, reason }) {
               exit_mcap: parseFloat(ep?.token_x?.market_cap) || null,
               exit_tvl: parseFloat(ep?.tvl ?? ep?.active_tvl) || null,
               exit_volume: parseFloat(ep?.volume) || null,
+              exit_holders: parseFloat(ep?.token_x?.holder_count) || null,
             };
           }
         } catch {}
@@ -1990,6 +1991,7 @@ export async function closePosition({ position_address, reason }) {
             exit_mcap: parseFloat(ep?.token_x?.market_cap) || null,
             exit_tvl: parseFloat(ep?.tvl ?? ep?.active_tvl) || null,
             exit_volume: parseFloat(ep?.volume) || null,
+            exit_holders: parseFloat(ep?.token_x?.holder_count) || null,
           };
         }
       } catch {}
