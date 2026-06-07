@@ -32,6 +32,7 @@ import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memor
 import { startBotTracker } from "./tools/bot-tracker.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
+import { studyTopLPers } from "./tools/study.js";
 import { stageSignals, stageMlFeatures } from "./signal-tracker.js";
 import { getWeightsSummary } from "./signal-weights.js";
 import { bootstrapHiveMind, ensureAgentId, getHiveMindPullMode, isHiveMindEnabled, pullHiveMindLessons, pullHiveMindPresets, registerHiveMindAgent, startHiveMindBackgroundSync } from "./hivemind.js";
@@ -456,10 +457,11 @@ export async function runScreeningCycle({ silent = false } = {}) {
     const allCandidates = [];
     for (const pool of candidates) {
       const mint = pool.base?.mint;
-      const [smartWallets, narrative, tokenInfo] = await Promise.allSettled([
+      const [smartWallets, narrative, tokenInfo, study] = await Promise.allSettled([
         checkSmartWalletsOnPool({ pool_address: pool.pool }),
         mint ? getTokenNarrative({ mint }) : Promise.resolve(null),
         mint ? getTokenInfo({ query: mint }) : Promise.resolve(null),
+        studyTopLPers({ pool_address: pool.pool, limit: 3 }).catch(() => null),
       ]);
       allCandidates.push({
         pool,
@@ -467,6 +469,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
         n: narrative.status === "fulfilled" ? narrative.value : null,
         ti: tokenInfo.status === "fulfilled" ? tokenInfo.value?.results?.[0] : null,
         mem: recallForPool(pool.pool),
+        study: study.status === "fulfilled" ? study.value : null,
       });
       await new Promise(r => setTimeout(r, 150)); // avoid 429s
     }
@@ -564,12 +567,12 @@ export async function runScreeningCycle({ silent = false } = {}) {
     // Stage ML features for all passing candidates (for training data capture)
     if (config.ml?.enabled) {
       const { extractFeatures, normalizeVector } = await import("./ml/features.js");
-      for (const { pool } of passing) {
+      for (const { pool, study, mem } of passing) {
         try {
           const rawFeatures = extractFeatures({
             candidate: pool,
             poolMemory: null,
-            studyData: null,
+            studyData: study?.patterns || null,
             context: {
               walletSol: currentBalance.sol,
               walletTotalUsd: currentBalance.total_usd,
@@ -582,6 +585,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
             stageMlFeatures(pool.pool, {
               raw: Array.from(rawFeatures),
               norm: Array.from(normalizeVector(rawFeatures)),
+              studyData: study ? { patterns: study.patterns } : null,
             });
           }
         } catch {}
