@@ -136,7 +136,6 @@ export function formatScreeningReport(rawText, extras = {}) {
   } = extras;
 
   const isDeploy = /🚀\s*DEPLOYED/i.test(rawText);
-  const isNoDeploy = /⛔\s*NO DEPLOY/i.test(rawText);
 
   let text = "";
 
@@ -149,15 +148,14 @@ export function formatScreeningReport(rawText, extras = {}) {
     text += "\n";
     if (position) text += `Pos: ${code(position)}\n`;
     if (tx) text += `Tx: ${code((tx || "").slice(0, 16))}...\n`;
+    const body = stripHeaderFooter(rawText, true);
+    if (body) text += "\n" + esc(body);
   } else {
-    text += `${isNoDeploy ? "⛔" : "📋"} ${b(isNoDeploy ? "NO DEPLOY" : "SCREENING")}\n`;
+    // LLM output already contains the ⛔ NO DEPLOY header and structured sections.
+    // Just escape for safety — don't add redundant headers.
+    text += esc(rawText);
   }
 
-  // Append the LLM's own formatted body (trim the header/footer we already rendered)
-  const body = stripHeaderFooter(rawText, isDeploy);
-  if (body) text += "\n" + esc(body);
-
-  // Truncate to Telegram's 4096 char limit, allowing room for buttons metadata
   text = text.slice(0, 3900);
 
   const buttons = pool
@@ -173,7 +171,8 @@ export function formatScreeningReport(rawText, extras = {}) {
 export function formatManagementReport(rawText, positions = []) {
   let text = `🔧 ${b("MANAGEMENT")}\n`;
 
-  text += esc(rawText).slice(0, 3500);
+  // Convert markdown **bold** to HTML <b>bold</b> — esc preserves ** then replace
+  text += esc(rawText).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").slice(0, 3500);
 
   const firstPosition = positions[0];
   const buttons = firstPosition?.pool
