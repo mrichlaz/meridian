@@ -115,6 +115,22 @@ export function onPositionClosed(perf) {
     state.confidence = clamp(state.confidence - 0.08, 0.1, 0.9);
   }
 
+  // ─── Market context delta (entry → exit) ────
+  // Richer emotional feedback from market movement during the hold.
+  const entryMcap = perf.entry_mcap;
+  const exitMcap = perf.exit_mcap;
+  if (entryMcap && exitMcap && entryMcap > 0) {
+    const mcapGrowth = ((exitMcap - entryMcap) / entryMcap) * 100;
+    if (mcapGrowth > 50) {
+      // Held through massive mcap growth — satisfaction boost even if PnL mediocre
+      state.satisfaction = clamp(state.satisfaction + 0.06, 0.1, 0.9);
+      state.confidence = clamp(state.confidence + 0.03, 0.1, 0.9);
+    } else if (mcapGrowth < -30) {
+      // Held through a dump — note it but don't penalize (could be the market)
+      state.confidence = clamp(state.confidence - 0.02, 0.1, 0.9);
+    }
+  }
+
   // ─── Risk Appetite ───────────────────────────
   // Winning streaks build risk appetite; losing streaks reduce it.
   if (state.streak.wins >= 2) {

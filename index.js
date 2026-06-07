@@ -614,6 +614,10 @@ export async function runScreeningCycle({ silent = false } = {}) {
               activePositions: prePositions.total_positions,
               maxPositions: config.risk.maxPositions,
               deployAmountSol: deployAmount,
+              entryMcap: pool.mcap ?? pool.token_x?.market_cap,
+              entryTvl: pool.tvl ?? pool.active_tvl,
+              entryVolume: pool.volume_window ?? pool.volume,
+              entryHolders: pool.holders ?? pool.token_x?.holder_count,
             },
           });
           if (pool.pool) {

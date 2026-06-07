@@ -7,13 +7,13 @@
  * Fix #2: Adam optimizer with momentum + adaptive learning rates
  * Fix #3: Class-weighted loss (not learning rate multipliers)
  *
- * Architecture: Input (74-dim) → weights (74) + bias → sigmoid → [0, 1]
- * Total parameters: 75
+ * Architecture: Input (FEATURE_COUNT) → weights + bias → sigmoid → [0, 1]
+ * Feature count auto-derived from FEATURE_SPEC (currently 78 features, 79 params).
  * Inference: single dot product + sigmoid (~0.001ms)
  *
  * Why logistic regression:
- *   - Pwnagotchi runs A2C with ~3K params on a Pi Zero. 75 params on
- *     74 hand-crafted, domain-informed features is the right size.
+ *   - Pwnagotchi runs A2C with ~3K params on a Pi Zero. 79 params on
+ *     hand-crafted, domain-informed features is the right size.
  *   - Convex loss surface → always converges to global optimum.
  *   - Zero runtime dependencies — trains inline in the same Node process.
  */
