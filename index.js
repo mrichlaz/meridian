@@ -476,13 +476,17 @@ export async function runScreeningCycle({ silent = false } = {}) {
     const gmgnAllFiltered = topCandidates?.all_filtered ?? [];
 
     const allCandidates = [];
-    // Enrich all candidates in parallel, batched to avoid 429s from external APIs.
-    // Smart wallet checks are already internally batched at 3 concurrent per pool.
-    const BATCH_SIZE = 5;
+    // Enrich in small staggered batches to avoid RPC 429 floods.
+    // Each pool fires 4 parallel calls (smart wallets, narrative, token info, study).
+    // Smart wallet checks internally batch at 3 concurrent per pool.
+    const BATCH_SIZE = 2;
+    const STAGGER_MS = 200;
     for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
       const batch = candidates.slice(i, i + BATCH_SIZE);
       const batchResults = await Promise.all(
-        batch.map(async (pool) => {
+        batch.map(async (pool, j) => {
+          // Stagger launches within the batch to avoid simultaneous RPC spikes
+          if (j > 0) await new Promise(r => setTimeout(r, STAGGER_MS));
           const mint = pool.base?.mint;
           const [smartWallets, narrative, tokenInfo, study] = await Promise.allSettled([
             checkSmartWalletsOnPool({ pool_address: pool.pool }),
@@ -502,7 +506,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
       );
       allCandidates.push(...batchResults);
       if (i + BATCH_SIZE < candidates.length) {
-        await new Promise(r => setTimeout(r, 200)); // brief pause between batches
+        await new Promise(r => setTimeout(r, 300));
       }
     }
 
