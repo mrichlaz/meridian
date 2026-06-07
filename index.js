@@ -1516,15 +1516,91 @@ async function drainTelegramQueue() {
 async function telegramHandler(msg) {
   const text = msg?.text?.trim();
   if (!text) return;
-  if (msg?.isCallback && text.startsWith("cfg:")) {
-    try {
-      await applySettingsMenuCallback(msg);
-    } catch (e) {
-      await answerCallbackQuery(msg.callbackQueryId, e.message).catch(() => {});
+
+  // ── Callback button handlers ──────────────────────────
+  if (msg?.isCallback) {
+    const data = text;
+    // Settings menu
+    if (data.startsWith("cfg:")) {
+      try { await applySettingsMenuCallback(msg); } catch (e) {
+        await answerCallbackQuery(msg.callbackQueryId, e.message).catch(() => {});
+      }
+      return;
+    }
+    // Forward slash commands from inline buttons
+    if (data.startsWith("cmd:")) {
+      const cmd = data.slice(4);
+      await answerCallbackQuery(msg.callbackQueryId).catch(() => {});
+      if (cmd === "/screen") { await runScreeningCycle().catch(() => {}); return; }
+      if (cmd === "/status" || cmd === "/wallet") {
+        try {
+          const [wallet, positions] = await Promise.all([getWalletBalances(), getMyPositions({ force: true })]);
+          const { formatStatusCard } = await import("./utils/telegram-formatter.js");
+          const { getCurrentState } = await import("./ml/emotions.js");
+          const { text: cardText, buttons: cardBtns } = formatStatusCard({ wallet, positions, ml: getCurrentState(), config });
+          await sendMessageWithButtons(cardText, cardBtns).catch(() => {});
+        } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+        return;
+      }
+      if (cmd === "/positions") {
+        try {
+          const { positions, total_positions } = await getMyPositions({ force: true });
+          if (total_positions === 0) { await sendMessage("No open positions."); return; }
+          for (const p of positions.slice(0, 5)) {
+            const { formatPositionCard } = await import("./utils/telegram-formatter.js");
+            const { text: cardText, buttons: cardBtns } = formatPositionCard(p);
+            await sendMessageWithButtons(cardText, cardBtns).catch(() => {});
+          }
+        } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+        return;
+      }
+      if (cmd === "/candidates") {
+        const lines = describeLatestCandidates(5);
+        await sendMessage(lines).catch(() => {});
+        return;
+      }
+      if (cmd === "/settings") {
+        await showSettingsMenu().catch((e) => sendMessage(`Settings error: ${e.message}`).catch(() => {}));
+        return;
+      }
+      return;
+    }
+    // Position-level actions
+    if (data.startsWith("pnl:")) {
+      try {
+        const posAddr = data.slice(4);
+        const { getPositionPnl } = await import("./tools/dlmm.js");
+        const tracked = getTrackedPosition(posAddr);
+        const pnl = await getPositionPnl({ pool_address: tracked?.pool, position_address: posAddr });
+        await answerCallbackQuery(msg.callbackQueryId, `PnL: ${pnl.pnlPct ?? "?"}%`).catch(() => {});
+      } catch (e) { await answerCallbackQuery(msg.callbackQueryId, e.message).catch(() => {}); }
+      return;
+    }
+    if (data.startsWith("close:")) {
+      try {
+        const posAddr = data.slice(6);
+        await answerCallbackQuery(msg.callbackQueryId, "Closing...").catch(() => {});
+        const result = await closePosition({ position_address: posAddr });
+        await sendMessage(`🔒 Closed: ${result?.pnl_pct != null ? `${result.pnl_pct}%` : "done"}`).catch(() => {});
+      } catch (e) { await sendMessage(`Close failed: ${e.message}`).catch(() => {});
+        await answerCallbackQuery(msg.callbackQueryId, "Failed").catch(() => {}); }
+      return;
+    }
+    if (data.startsWith("claim:")) {
+      try {
+        const posAddr = data.slice(6);
+        await answerCallbackQuery(msg.callbackQueryId, "Claiming...").catch(() => {});
+        const { claimFees } = await import("./tools/dlmm.js");
+        const result = await claimFees({ position_address: posAddr });
+        await sendMessage(`💰 Claimed: ${result?.claimed_amount ?? "done"}`).catch(() => {});
+      } catch (e) { await sendMessage(`Claim failed: ${e.message}`).catch(() => {});
+        await answerCallbackQuery(msg.callbackQueryId, "Failed").catch(() => {}); }
+      return;
     }
     return;
   }
-  if (text === "/settings" || text === "/menu" || text === "/configmenu") {
+
+  // ── Settings menu shortcuts ──────────────────────────────
     await showSettingsMenu().catch((e) => sendMessage(`Settings error: ${e.message}`).catch(() => {}));
     return;
   }
