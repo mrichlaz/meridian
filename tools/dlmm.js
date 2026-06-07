@@ -1649,33 +1649,48 @@ export async function closePosition({ position_address, reason }) {
           minutesOOR = Math.floor((Date.now() - new Date(tracked.out_of_range_since).getTime()) / 60000);
         }
 
-        let pnlUsd = 0;
-        let pnlTrueUsd = 0;
-        let pnlPct = 0;
-        let finalValueUsd = 0;
+        // Use live PnL as primary source — authoritative before close submitted.
+        // Fall back to closed API only if live data is unavailable.
+        let pnlUsd = livePosition?.pnl_usd ?? 0;
+        let pnlTrueUsd = livePosition?.pnl_usd ?? 0;
+        let pnlPct = livePosition?.pnl_pct ?? 0;
+        let finalValueUsd = livePosition?.total_value_usd ?? 0;
         let initialUsd = 0;
-        let feesUsd = tracked.total_fees_claimed_usd || 0;
+        let feesUsd = livePosition?.unclaimed_fees_usd ?? tracked?.total_fees_claimed_usd ?? 0;
+        let gotLivePnl = livePosition != null;
         try {
           const closedUrl = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${wallet.publicKey.toString()}&status=closed&pageSize=50&page=1`;
-          for (let attempt = 0; attempt < 6; attempt++) {
+          for (let attempt = 0; attempt < 3; attempt++) {
             const res = await fetch(closedUrl);
             if (res.ok) {
               const data = await res.json();
               const posEntry = (data.positions || []).find((entry) => entry.positionAddress === position_address);
               if (posEntry) {
-                pnlTrueUsd = safeNum(posEntry.pnlUsd);
-                pnlUsd = config.management.solMode ? getClosedPnlValue(posEntry, true) : pnlTrueUsd;
-                pnlPct = getClosedPnlPct(posEntry, config.management.solMode);
-                finalValueUsd = parseFloat(posEntry.allTimeWithdrawals?.total?.usd || 0);
-                initialUsd = parseFloat(posEntry.allTimeDeposits?.total?.usd || 0);
-                feesUsd = parseFloat(posEntry.allTimeFees?.total?.usd || 0) || feesUsd;
+                const closedPnlUsd = safeNum(posEntry.pnlUsd);
+                const closedPnlPct = getClosedPnlPct(posEntry, config.management.solMode);
+                const closedFinalValue = parseFloat(posEntry.allTimeWithdrawals?.total?.usd || 0);
+                const closedInitialUsd = parseFloat(posEntry.allTimeDeposits?.total?.usd || 0);
+                const closedFeesUsd = parseFloat(posEntry.allTimeFees?.total?.usd || 0);
+                // Only trust closed API when it returns non-trivial data
+                if (closedPnlUsd !== 0 || closedPnlPct !== 0 || closedFinalValue > 0) {
+                  pnlTrueUsd = closedPnlUsd;
+                  pnlUsd = config.management.solMode ? getClosedPnlValue(posEntry, true) : pnlTrueUsd;
+                  pnlPct = closedPnlPct;
+                  finalValueUsd = closedFinalValue;
+                  initialUsd = closedInitialUsd;
+                  feesUsd = closedFeesUsd || feesUsd;
+                  gotLivePnl = false;
+                }
                 break;
               }
             }
-            if (attempt < 5) await new Promise((resolve) => setTimeout(resolve, 5000));
+            if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 5000));
           }
         } catch (e) {
           log("close_warn", `Relay closed PnL fetch failed: ${e.message}`);
+        }
+        if (!gotLivePnl && (pnlUsd === 0 && pnlPct === 0)) {
+          log("close_warn", `Both live and closed PnL unavailable for ${position_address.slice(0, 12)} — reporting zero`);
         }
 
         const closeBaseMint = livePosition?.base_mint || pool.lbPair.tokenXMint.toString();
