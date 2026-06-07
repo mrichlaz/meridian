@@ -8,6 +8,7 @@ import { log } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
 import { getTopCandidates } from "./tools/screening.js";
+import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
@@ -442,9 +443,15 @@ export async function runScreeningCycle({ silent = false } = {}) {
       : `No active strategy — use default bid_ask, bins_above: 0, SOL only.`;
 
     // Fetch top candidates, then recon each sequentially with a small delay to avoid 429s
-    const topCandidates = await getTopCandidates({ limit: 10 }).catch(() => null);
+    const topCandidates = await getTopCandidates({ limit: 10 }).catch((e) => ({ _error: e.message }));
+    if (topCandidates?._error) {
+      screenReport = `Screening failed: ${topCandidates._error}`;
+      return screenReport;
+    }
     const candidates = (topCandidates?.candidates || topCandidates?.pools || []).slice(0, 10);
     const earlyFilteredExamples = topCandidates?.filtered_examples || [];
+    const gmgnStageCounts = topCandidates?.stage_counts ?? null;
+    const gmgnAllFiltered = topCandidates?.all_filtered ?? [];
 
     const allCandidates = [];
     for (const pool of candidates) {
@@ -465,8 +472,10 @@ export async function runScreeningCycle({ silent = false } = {}) {
     }
 
     // Hard filters after token recon — block launchpads and excessive Jupiter bot holders
+    // GMGN candidates skip this layer: platforms/bundlers/bots already filtered upstream
     const filteredOut = [];
     const passing = allCandidates.filter(({ pool, ti }) => {
+      if (pool.gmgn) return true;
       const launchpad = ti?.launchpad ?? null;
       if (launchpad && config.screening.allowedLaunchpads?.length > 0 && !config.screening.allowedLaunchpads.includes(launchpad)) {
         log("screening", `Skipping ${pool.name} — launchpad ${launchpad} not in allow-list`);
@@ -490,26 +499,36 @@ export async function runScreeningCycle({ silent = false } = {}) {
 
     if (passing.length === 0) {
       const combined = filteredOut.length > 0 ? filteredOut : earlyFilteredExamples;
-      const combinedExamples = combined.slice(0, 3)
+      const combinedExamples = combined.slice(0, 5)
         .map((entry) => `- ${entry.name}: ${entry.reason}`)
         .join("\n");
-      screenReport = combinedExamples
-        ? `No candidates available.\nFiltered examples:\n${combinedExamples}`
-        : `No candidates available (all filtered by launchpad / holder-quality rules).`;
+      const funnelBlock = buildGmgnFunnelReport(gmgnStageCounts, gmgnAllFiltered, { fromStage: 2 });
+      const thresholds = `Thresholds: tvl>$${config.screening.minTvl} | vol>$${config.screening.minVolume} | organic>${config.screening.minOrganic}% | holders>${config.screening.minHolders} | fee/tvl>${config.screening.minFeeActiveTvlRatio}%`;
+      screenReport = funnelBlock
+        ? `No candidates available.\n\n${funnelBlock}`
+        : combinedExamples
+          ? `No candidates available.\nFiltered examples:\n${combinedExamples}`
+          : `No candidates available (all filtered).\n${thresholds}`;
       appendDecision({
         type: "no_deploy",
         actor: "SCREENER",
         summary: "No candidates available",
-        reason: combinedExamples || "All candidates filtered before deploy",
+        reason: funnelBlock || combinedExamples || "All candidates filtered before deploy",
         rejected: combined.slice(0, 5).map((entry) => `${entry.name}: ${entry.reason}`),
       });
       return screenReport;
+    }
+
+    if (passing.length <= 1 && gmgnStageCounts) {
+      const funnelBlock = buildGmgnFunnelReport(gmgnStageCounts, gmgnAllFiltered, { fromStage: 2 });
+      if (funnelBlock) log("screening", `GMGN funnel (sparse):\n${funnelBlock}`);
     }
 
     if (passing.length === 1) {
       const skipReason = getLoneCandidateSkipReason(passing[0]);
       if (skipReason) {
         const candidateName = passing[0].pool?.name || "unknown";
+        const funnelBlock = buildGmgnFunnelReport(gmgnStageCounts, gmgnAllFiltered, { fromStage: 2 });
         screenReport = [
           "⛔ NO DEPLOY",
           "",
@@ -523,7 +542,8 @@ export async function runScreeningCycle({ silent = false } = {}) {
           "",
           "REJECTED",
           `- ${candidateName}: ${skipReason}`,
-        ].join("\n");
+          funnelBlock ? `\n${funnelBlock}` : null,
+        ].filter(Boolean).join("\n");
         appendDecision({
           type: "no_deploy",
           actor: "SCREENER",
@@ -603,21 +623,38 @@ export async function runScreeningCycle({ silent = false } = {}) {
         ? `  pvp: HIGH — rival ${pool.pvp_rival_name || pool.pvp_symbol} (${pool.pvp_rival_mint?.slice(0, 8)}...) has pool ${pool.pvp_rival_pool?.slice(0, 8)}..., tvl=$${pool.pvp_rival_tvl}, holders=${pool.pvp_rival_holders}, fees=${pool.pvp_rival_fees}SOL`
         : null;
 
-      const block = [
-        `POOL: ${pool.name} (${pool.pool})`,
-        `  metrics: bin_step=${pool.bin_step}, fee_pct=${pool.fee_pct}%, fee_tvl=${pool.fee_active_tvl_ratio}, vol=$${pool.volume_window}, tvl=$${pool.tvl ?? pool.active_tvl}, volatility_${pool.volatility_timeframe || "30m"}=${pool.volatility}, mcap=$${pool.mcap}, organic=${pool.organic_score}${pool.token_age_hours != null ? `, age=${pool.token_age_hours}h` : ""}`,
-        `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
-        pvpLine,
-        okxParts ? `  okx: ${okxParts}` : okxUnavailable ? `  okx: unavailable` : null,
-        okxTags  ? `  tags: ${okxTags}` : null,
-        botLine,
-        pool.price_vs_ath_pct != null ? `  ath: price_vs_ath=${pool.price_vs_ath_pct}%${pool.top_cluster_trend ? `, top_cluster=${pool.top_cluster_trend}` : ""}` : null,
-        `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
-        activeBin != null ? `  active_bin: ${activeBin}` : null,
-        priceChange != null ? `  1h: price${priceChange >= 0 ? "+" : ""}${priceChange}%, net_buyers=${netBuyers ?? "?"}` : null,
-        n?.narrative ? `  narrative_untrusted: ${sanitizeUntrustedPromptText(n.narrative, 500)}` : `  narrative_untrusted: none`,
-        mem ? `  memory_untrusted: ${sanitizeUntrustedPromptText(mem, 500)}` : null,
-      ].filter(Boolean).join("\n");
+      let block;
+      if (pool.gmgn) {
+        block = [
+          `POOL: ${pool.name} (${pool.pool})`,
+          formatGmgnCandidateForPrompt(pool),
+          pvpLine,
+          `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
+          activeBin != null ? `  active_bin: ${activeBin}` : null,
+          n?.narrative ? `  narrative_untrusted: ${sanitizeUntrustedPromptText(n.narrative, 500)}` : `  narrative_untrusted: none`,
+          mem ? `  memory_untrusted: ${sanitizeUntrustedPromptText(mem, 500)}` : null,
+        ].filter(Boolean).join("\n");
+      } else {
+        const gmgnPriceLine = pool.gmgn_price_action
+          ? `  gmgn_price: rsi2=${pool.gmgn_price_action.rsi2 ?? "?"}, supertrend=${pool.gmgn_price_action.supertrend?.direction || "?"}, price_vs_ath=${pool.gmgn_price_action.priceVsAthPct ?? "?"}%, 1h_change=${pool.gmgn_price_action.priceChangePct ?? "?"}%, max_vol_candle=${pool.gmgn_price_action.maxVolumeShare ?? "?"}%`
+          : null;
+        block = [
+          `POOL: ${pool.name} (${pool.pool})`,
+          `  metrics: bin_step=${pool.bin_step}, fee_pct=${pool.fee_pct}%, fee_tvl=${pool.fee_active_tvl_ratio}, vol=$${pool.volume_window}, tvl=$${pool.tvl ?? pool.active_tvl}, volatility_${pool.volatility_timeframe || "30m"}=${pool.volatility}, mcap=$${pool.mcap}, organic=${pool.organic_score}${pool.token_age_hours != null ? `, age=${pool.token_age_hours}h` : ""}`,
+          `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
+          gmgnPriceLine,
+          pvpLine,
+          okxParts ? `  okx: ${okxParts}` : okxUnavailable ? `  okx: unavailable` : null,
+          okxTags  ? `  tags: ${okxTags}` : null,
+          botLine,
+          pool.price_vs_ath_pct != null ? `  ath: price_vs_ath=${pool.price_vs_ath_pct}%${pool.top_cluster_trend ? `, top_cluster=${pool.top_cluster_trend}` : ""}` : null,
+          `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
+          activeBin != null ? `  active_bin: ${activeBin}` : null,
+          priceChange != null ? `  1h: price${priceChange >= 0 ? "+" : ""}${priceChange}%, net_buyers=${netBuyers ?? "?"}` : null,
+          n?.narrative ? `  narrative_untrusted: ${sanitizeUntrustedPromptText(n.narrative, 500)}` : `  narrative_untrusted: none`,
+          mem ? `  memory_untrusted: ${sanitizeUntrustedPromptText(mem, 500)}` : null,
+        ].filter(Boolean).join("\n");
+      }
 
       // Stage signals for Darwinian weighting — captured before LLM decides
       if (config.darwin?.enabled) {
@@ -1733,6 +1770,24 @@ async function telegramHandler(msg) {
 function fmtPct(value) {
   const n = Number(value);
   return Number.isFinite(n) ? `${n.toFixed(2)}%` : "?";
+}
+
+function buildGmgnFunnelReport(stageCounts, allFiltered = [], { fromStage = 1 } = {}) {
+  if (!stageCounts) return null;
+  const sc = stageCounts;
+  const funnel = `GMGN funnel: ranked=${sc.ranked ?? "?"} → S1=${sc.s1 ?? "?"} → S2=${sc.s2 ?? "?"} → S3=${sc.s3 ?? "?"} → S4=${sc.s4 ?? "?"} → final=${sc.s5 ?? "?"}`;
+  const byStage = {};
+  for (const f of allFiltered) {
+    if (f.stage < fromStage) continue;
+    const key = `s${f.stage}`;
+    if (!byStage[key]) byStage[key] = [];
+    byStage[key].push(`${f.name}: ${f.reason}`);
+  }
+  const stageLabels = { s2: "S2 info", s3: "S3 pool", s4: "S4 indicators", s5: "S5 pick" };
+  const details = Object.entries(byStage)
+    .map(([key, items]) => `${stageLabels[key] || key}:\n${items.map(r => `  • ${r}`).join("\n")}`)
+    .join("\n");
+  return details ? `${funnel}\n\n${details}` : funnel;
 }
 
 function getLoneCandidateSkipReason({ pool, sw, n, ti } = {}) {

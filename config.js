@@ -188,6 +188,20 @@ export const config = {
     maxRatTraderRate: gmgnValue("maxRatTraderRate", "gmgnMaxRatTraderRate", 0.2),
     maxFreshWalletRate: gmgnValue("maxFreshWalletRate", "gmgnMaxFreshWalletRate", 0.2),
     maxDevTeamHoldRate: gmgnValue("maxDevTeamHoldRate", "gmgnMaxDevTeamHoldRate", 0.02),
+    // KOL filtering
+    preferredKolNames: gmgnArray("preferredKolNames", "gmgnPreferredKolNames", []),
+    dumpKolNames: gmgnArray("dumpKolNames", "gmgnDumpKolNames", []),
+    dumpKolMinHoldPct: gmgnValue("dumpKolMinHoldPct", "gmgnDumpKolMinHoldPct", 0.5),
+    // Indicators
+    indicatorFilter: gmgnValue("indicatorFilter", "gmgnIndicatorFilter", false),
+    indicatorInterval: gmgnValue("indicatorInterval", "gmgnIndicatorInterval", "15_MINUTE"),
+    indicatorRules: gmgnValue("indicatorRules", "gmgnIndicatorRules", {}),
+    // Additional risk filters
+    maxSniperCount: gmgnValue("maxSniperCount", "gmgnMaxSniperCount", 20),
+    maxSniperHoldRate: gmgnValue("maxSniperHoldRate", "gmgnMaxSniperHoldRate", 0.3),
+    minTotalFeeSol: gmgnValue("minTotalFeeSol", "gmgnMinTotalFeeSol", 30),
+    maxBotDegenRate: gmgnValue("maxBotDegenRate", "gmgnMaxBotDegenRate", 0.4),
+    athFilterPct: gmgnValue("athFilterPct", "gmgnAthFilterPct", null),
   },
 
   // ─── LLM Settings ──────────────────────
