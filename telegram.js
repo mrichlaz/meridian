@@ -346,9 +346,9 @@ export async function createLiveMessage(title, intro = "Starting...") {
         clearTimeout(state.flushTimer);
         state.flushTimer = null;
       }
-      if (state.flushPromise) await state.flushPromise;
+      if (state.flushPromise) await state.flushPromise.catch(() => null);
       state.footer = finalText;
-      await flushNow();
+      await flushNow().catch(() => null);
       _liveMessageDepth = Math.max(0, _liveMessageDepth - 1);
       typing.stop();
     },
@@ -357,9 +357,9 @@ export async function createLiveMessage(title, intro = "Starting...") {
         clearTimeout(state.flushTimer);
         state.flushTimer = null;
       }
-      if (state.flushPromise) await state.flushPromise;
+      if (state.flushPromise) await state.flushPromise.catch(() => null);
       state.footer = `❌ ${errorText}`;
-      await flushNow();
+      await flushNow().catch(() => null);
       _liveMessageDepth = Math.max(0, _liveMessageDepth - 1);
       typing.stop();
     },

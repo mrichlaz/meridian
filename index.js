@@ -126,7 +126,7 @@ function schedulePeakConfirmation(positionAddress) {
   const timer = setTimeout(async () => {
     _peakConfirmTimers.delete(positionAddress);
     try {
-      const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
+      const result = await getMyPositions({ force: false, silent: true }).catch(() => null);
       const position = result?.positions?.find((p) => p.position === positionAddress);
       resolvePendingPeak(positionAddress, position?.pnl_pct ?? null, TRAILING_PEAK_CONFIRM_TOLERANCE);
     } catch (error) {
