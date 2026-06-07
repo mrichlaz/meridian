@@ -16,7 +16,8 @@ const DB_PATH = path.join(DATA_DIR, "bot-tracker.db");
 
 const BOTS = (process.env.BOT_WALLETS || "3QUnrcMqCQoiGB73s1A6uDzxziywaNFpTLiZiiZbEUoN,NA247a7YE9S3p9CdKmMyETx8TTwbSdVbVYHHxpnHTUV,joeHSutRWndCtp1EPx5tz5zHyaPBZUZ5JsxDEVB1RPZ,MEViEnscUm6tsQRoGd9h6nLQaQspKj7DB2M5FwM3Xvz")
   .split(",").map(a => a.trim()).filter(Boolean);
-const H_KEY = process.env.HELIUS_API_KEY || process.env.HELIUS_KEY || "";
+const rawKey = process.env.HELIUS_API_KEYS || process.env.HELIUS_API_KEY || process.env.HELIUS_KEY || "";
+const H_KEY = rawKey.split(",")[0].trim();
 const H_HTTP = `https://mainnet.helius-rpc.com/?api-key=${H_KEY}`;
 const DEX_API = "https://api.dexscreener.com/latest/dex/tokens";
 const W = 4 * 3600 * 1000;       // 4h window
