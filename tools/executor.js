@@ -380,8 +380,8 @@ const toolMap = {
     // Flat key → config section mapping (covers everything in config.js)
     const CONFIG_MAP = {
       // screening
-      screeningSource: ["screening", "source"],
-      source: ["screening", "source"],  // alias — LLM often sends "source" not "screeningSource"
+      screeningSource: ["screening", "source", ["screeningSource"]],
+      source: ["screening", "source", ["screeningSource"]],  // alias — LLM often sends "source" not "screeningSource"
       minFeeActiveTvlRatio: ["screening", "minFeeActiveTvlRatio"],
       excludeHighSupplyConcentration: ["screening", "excludeHighSupplyConcentration"],
       minTvl: ["screening", "minTvl"],
