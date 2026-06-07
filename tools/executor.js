@@ -28,6 +28,8 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { execSync, spawn } from "child_process";
 
+import { scaleScreeningToTimeframe } from "../screening-scales.js";
+
 import { PATHS } from "../utils/paths.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -146,7 +148,11 @@ async function validateDeployPoolThresholds(args) {
   }
 
   let feeActiveTvlRatio = poolDetailFeeActiveTvlRatio(detail);
-  const minFeeActiveTvlRatio = numberOrNull(config.screening.minFeeActiveTvlRatio);
+  const rawMinFeeActiveTvlRatio = numberOrNull(config.screening.minFeeActiveTvlRatio);
+  // Auto-scale from screening-scales if user hasn't set a custom value
+  const timeframe = config.screening.timeframe || "5m";
+  const { minFeeActiveTvlRatio: scaledFee } = scaleScreeningToTimeframe(timeframe);
+  const minFeeActiveTvlRatio = rawMinFeeActiveTvlRatio ?? scaledFee;
 
   // Pool Discovery single-pool endpoint sometimes returns null for
   // fee_active_tvl_ratio (API caching gap). Fall back to the DLMM
@@ -209,7 +215,7 @@ async function validateDeployPoolThresholds(args) {
     };
   }
 
-  return { pass: true };
+  return { pass: true, detail };
 }
 
 // Registered by index.js so update_config can restart cron jobs when intervals change
@@ -735,6 +741,15 @@ async function runSafetyChecks(name, args) {
     case "deploy_position": {
       const poolThresholds = await validateDeployPoolThresholds(args);
       if (!poolThresholds.pass) return poolThresholds;
+
+      // Inject entry market data from pool detail (captured at deploy time)
+      const deployDetail = poolThresholds.detail;
+      if (deployDetail) {
+        args.entry_mcap = numberOrNull(deployDetail?.token_x?.market_cap);
+        args.entry_tvl = poolDetailTvl(deployDetail);
+        args.entry_volume = numberOrNull(deployDetail?.volume);
+        args.entry_holders = numberOrNull(deployDetail?.token_x?.holder_count);
+      }
 
       // Reject pools with bin_step out of configured range
       const minStep = config.screening.minBinStep;
