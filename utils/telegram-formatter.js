@@ -227,13 +227,20 @@ export function formatStatusCard({ wallet, positions, ml, config } = {}) {
  * Build a single position card with inline action buttons.
  */
 export function formatPositionCard(position) {
-  let text = `📊 ${b(esc(position.pair || position.pool_name || "Position"))}\n\n`;
-  text += `PnL: ${position.pnl_pct >= 0 ? "+" : ""}${(position.pnl_pct ?? 0).toFixed(2)}%\n`;
-  text += `Fees: $${(position.unclaimed_fees_usd ?? 0).toFixed(4)}\n`;
-  text += `Value: $${(position.total_value_usd ?? 0).toFixed(2)}\n`;
-  text += `In range: ${position.in_range ? "Yes" : `No (${position.minutes_out_of_range ?? 0}m)`}\n`;
-  if (position.fee_per_tvl_24h != null) text += `Fee/TVL 24h: ${position.fee_per_tvl_24h}%\n`;
-  if (position.instruction) text += `Note: "${esc(position.instruction)}"\n`;
+  const inRange = position.in_range ? "🟢 IN RANGE" : `🔴 OOR ${position.minutes_out_of_range ?? 0}m`;
+  const bins = position.lower_bin != null ? `${position.lower_bin} → ${position.upper_bin}` : "?";
+  const active = position.active_bin != null ? `active=${position.active_bin}` : "";
+  const shortPool = (position.pool || "").slice(0, 12);
+  const shortPos = (position.position || "").slice(0, 12);
+
+  let text = [
+    `📊 ${b(esc(position.pair || "Position"))}  ${inRange}`,
+    `Pool: \`${shortPool}...\`  Pos: \`${shortPos}...\``,
+    `Bins: ${bins}  ${active}  |  Age: ${position.age_minutes ?? "?"}m`,
+    `PnL: ${position.pnl_pct >= 0 ? "+" : ""}${(position.pnl_pct ?? 0).toFixed(2)}%  |  Value: $${(position.total_value_usd ?? 0).toFixed(2)}  |  Fees: $${(position.unclaimed_fees_usd ?? 0).toFixed(4)}`,
+    position.fee_per_tvl_24h != null ? `Yield: ${position.fee_per_tvl_24h}%` : null,
+  ].filter(Boolean).join("\n");
+  if (position.instruction) text += `\nNote: "${esc(position.instruction)}"\n`;
 
   const buttons = ACTION_BUTTONS.position(
     position.pool,
