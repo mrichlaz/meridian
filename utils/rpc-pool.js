@@ -60,11 +60,12 @@ export function getConnection() {
 }
 
 /**
- * Always returns the first connection (primary key) — for transactions
- * so Helius doesn't reject txs from secondary API keys.
+ * Returns a connection for transactions — round-robin like reads.
+ * All keys share the same Helius plan tier, so txs work on any.
  */
 export function getPrimaryConnection() {
-  return initPool()[0];
+  const pool = initPool();
+  return pool[_idx % pool.length];
 }
 
 /**
