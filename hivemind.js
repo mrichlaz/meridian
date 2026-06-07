@@ -252,6 +252,16 @@ function buildLessonEvent(lesson) {
   const rule = sanitizeText(lesson?.rule, 400);
   if (!rule) return null;
   const sourceType = sanitizeText(lesson.sourceType || inferLessonSourceType(lesson), 24) || "manual";
+  const context = sanitizeText(lesson?.context, 600);
+  const market = {
+    entryMcap: numberOrNullForHive(lesson?.entry_mcap),
+    entryTvl: numberOrNullForHive(lesson?.entry_tvl),
+    entryVolume: numberOrNullForHive(lesson?.entry_volume),
+    exitMcap: numberOrNullForHive(lesson?.exit_mcap),
+    exitTvl: numberOrNullForHive(lesson?.exit_tvl),
+    exitVolume: numberOrNullForHive(lesson?.exit_volume),
+  };
+  const hasMarket = Object.values(market).some((v) => v != null);
   return {
     eventId: `lesson:${getAgentId()}:${lesson.id || crypto.randomUUID()}`,
     agentId: getAgentId(),
@@ -267,6 +277,8 @@ function buildLessonEvent(lesson) {
       confidence: Number.isFinite(Number(lesson.confidence)) ? Number(lesson.confidence) : null,
       pool: sanitizeText(lesson.pool || "", 64) || null,
       pinned: !!lesson.pinned,
+      context: context || null,
+      market: hasMarket ? market : null,
       metrics: {
         pnlPct: Number.isFinite(Number(lesson.pnl_pct)) ? Number(lesson.pnl_pct) : null,
         feesUsd: Number.isFinite(Number(lesson.fees_earned_usd)) ? Number(lesson.fees_earned_usd) : null,
