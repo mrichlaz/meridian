@@ -37,6 +37,7 @@ import { stageSignals, stageMlFeatures } from "./signal-tracker.js";
 import { getWeightsSummary } from "./signal-weights.js";
 import { bootstrapHiveMind, ensureAgentId, getHiveMindPullMode, isHiveMindEnabled, pullHiveMindLessons, pullHiveMindPresets, registerHiveMindAgent, startHiveMindBackgroundSync } from "./hivemind.js";
 import { appendDecision } from "./decision-log.js";
+import { formatScreeningReport, formatManagementReport, liveStage } from "./utils/telegram-formatter.js";
 
 const entrypointPath = process.env.pm_exec_path || process.argv[1];
 const isMain = entrypointPath
@@ -367,8 +368,14 @@ After executing, write a brief one-line result per position.
     _managementBusy = false;
     if (!silent && telegramEnabled()) {
       if (mgmtReport) {
-        if (liveMessage) await liveMessage.finalize(stripThink(mgmtReport)).catch(() => {});
-        else sendMessage(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => { });
+        const { sendMessageWithButtons } = await import("./telegram.js");
+        const { text, buttons } = formatManagementReport(stripThink(mgmtReport), positionData);
+        if (liveMessage) {
+          await liveMessage.finalize(text);
+          await sendMessageWithButtons("—", buttons).catch(() => {});
+        } else {
+          await sendMessageWithButtons(text, buttons).catch(() => {});
+        }
       }
       for (const p of positions) {
         if (!p.in_range && p.minutes_out_of_range >= config.management.outOfRangeWaitMinutes) {
@@ -690,6 +697,8 @@ export async function runScreeningCycle({ silent = false } = {}) {
 
     let deployAttempted = false;
     let deploySucceeded = false;
+    let deployPool = null;
+    let deployPoolName = null;
     const { content } = await agentLoop(`
 SCREENING CYCLE
 ${strategyBlock}
@@ -770,6 +779,10 @@ IMPORTANT:
           if (name === "deploy_position") {
             deployAttempted = true;
             deploySucceeded = Boolean(success && result?.success !== false && !result?.error && !result?.blocked);
+            if (deploySucceeded) {
+              deployPool = result?.pool || null;
+              deployPoolName = result?.pool_name || null;
+            }
           }
           await liveMessage?.toolFinish(name, result, success);
         },
@@ -810,8 +823,19 @@ IMPORTANT:
     _screeningBusy = false;
     if (!silent && telegramEnabled()) {
       if (screenReport) {
-        if (liveMessage) await liveMessage.finalize(stripThink(screenReport)).catch(() => {});
-        else sendMessage(`🔍 Screening Cycle\n\n${stripThink(screenReport)}`).catch(() => { });
+        const { sendMessageWithButtons } = await import("./telegram.js");
+        const { formatScreeningReport } = await import("./utils/telegram-formatter.js");
+        const { text, buttons } = formatScreeningReport(stripThink(screenReport), {
+          pool: deploySucceeded ? deployPool : null,
+          poolName: deployPoolName,
+        });
+        if (liveMessage) {
+          await liveMessage.finalize(text);
+          // Send buttons as a follow-up message (Telegram can't edit to add buttons)
+          await sendMessageWithButtons("—", buttons).catch(() => {});
+        } else {
+          await sendMessageWithButtons(text, buttons).catch(() => {});
+        }
       }
     }
   }
