@@ -5,6 +5,7 @@ import { log } from "../logger.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { confirmIndicatorPreset } from "./chart-indicators.js";
 import { getAgentMeridianBase, getAgentMeridianHeaders } from "./agent-meridian.js";
+import { discoverGmgnPools } from "./gmgn.js";
 
 const DATAPI_JUP = "https://datapi.jup.ag/v1";
 
@@ -543,11 +544,36 @@ export async function discoverPools({
  */
 export async function getTopCandidates({ limit = 10 } = {}) {
   const { config } = await import("../config.js");
-  const discovery = await discoverPools({ page_size: 50 });
-  const { pools } = discovery;
+  const source = String(config.screening.source || "meteora").toLowerCase();
+  if (!["meteora", "gmgn"].includes(source)) {
+    throw new Error(`Invalid screeningSource: ${config.screening.source}. Use meteora or gmgn.`);
+  }
+  const discovery = source === "gmgn"
+    ? await discoverGmgnPools({ limit: Math.max(limit, config.gmgn.enrichLimit || 20) })
+    : await discoverPools({ page_size: 50 });
+  let { pools } = discovery;
   const filteredOut = Array.isArray(discovery.filtered_examples) ? [...discovery.filtered_examples] : [];
 
-  // ── Bot-tracker candidate injection ──────────────────────────
+  // Token blacklist + dev blocklist (Meteora path runs these inside discoverPools; GMGN path does not)
+  if (source === "gmgn") {
+    const before = pools.length;
+    pools = pools.filter((p) => {
+      if (isBlacklisted(p.base?.mint)) {
+        log("blacklist", `Filtered blacklisted token ${p.base?.symbol} (${p.base?.mint?.slice(0, 8)})`);
+        pushFilteredReason(filteredOut, p, "blacklisted token");
+        return false;
+      }
+      if (p.dev && isDevBlocked(p.dev)) {
+        log("dev_blocklist", `Filtered blocked deployer ${p.dev?.slice(0, 8)} token ${p.base?.symbol}`);
+        pushFilteredReason(filteredOut, p, "blocked deployer");
+        return false;
+      }
+      return true;
+    });
+    if (pools.length < before) log("blacklist", `GMGN: filtered ${before - pools.length} blacklisted/blocked pool(s)`);
+  }
+
+  // ── Bot-tracker candidate injection (Meteora path only) ──────
   // Fetch top bot-traded tokens, look up their Meteora DLMM pools,
   // and inject them as candidates. All standard filters apply.
   // Stamp bot_traded on matching discovered pools too.
