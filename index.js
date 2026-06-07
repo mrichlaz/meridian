@@ -1785,8 +1785,15 @@ async function telegramHandler(msg) {
   if (text === "/screen") {
     try {
       const { ACTION_BUTTONS, esc } = await import("./utils/telegram-formatter.js");
+      const { editMessageWithButtons, sendHTML } = await import("./telegram.js");
+      const sent = await sendHTML("🔍 <i>Scanning pools…</i>").catch(() => null);
+      const msgId = sent?.result?.message_id;
       const report = await runDeterministicScreen(5);
-      await sendMessageWithButtons(esc(report), ACTION_BUTTONS.screening()).catch(() => {});
+      if (msgId) {
+        await editMessageWithButtons(esc(report), msgId, ACTION_BUTTONS.screening()).catch(() => {});
+      } else {
+        await sendMessageWithButtons(esc(report), ACTION_BUTTONS.screening()).catch(() => {});
+      }
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
