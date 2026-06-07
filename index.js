@@ -288,11 +288,21 @@ export async function runManagementCycle({ silent = false } = {}) {
 
     const reportLines = positionData.map((p) => {
       const act = actionMap.get(p.position);
-      const inRange = p.in_range ? "🟢 IN" : `🔴 OOR ${p.minutes_out_of_range ?? 0}m`;
-      const val = config.management.solMode ? `◎${p.total_value_usd ?? "?"}` : `$${p.total_value_usd ?? "?"}`;
-      const unclaimed = config.management.solMode ? `◎${p.unclaimed_fees_usd ?? "?"}` : `$${p.unclaimed_fees_usd ?? "?"}`;
+      const inRange = p.in_range ? "🟢 IN RANGE" : `🔴 OOR ${p.minutes_out_of_range ?? 0}m`;
+      const val = `$${p.total_value_usd ?? "?"}`;
+      const unclaimed = `$${p.unclaimed_fees_usd ?? "?"}`;
+      const bins = p.lower_bin != null ? `${p.lower_bin} → ${p.upper_bin}` : "?";
+      const active = p.active_bin != null ? `active=${p.active_bin}` : "";
       const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.action;
-      let line = `**${p.pair}** | Age: ${p.age_minutes ?? "?"}m | Val: ${val} | Unclaimed: ${unclaimed} | PnL: ${p.pnl_pct ?? "?"}% | Yield: ${p.fee_per_tvl_24h ?? "?"}% | ${inRange} | ${statusLabel}`;
+      const shortPool = (p.pool || "").slice(0, 12);
+      const shortPos = (p.position || "").slice(0, 12);
+
+      let line = [
+        `**${p.pair}**  ${inRange}  ${statusLabel}`,
+        `Pool: \`${shortPool}...\`  Pos: \`${shortPos}...\``,
+        `Bins: ${bins}  ${active}  |  Age: ${p.age_minutes ?? "?"}m`,
+        `Value: ${val}  |  PnL: ${p.pnl_pct ?? "?"}%  |  Fees: ${unclaimed}  |  Yield: ${p.fee_per_tvl_24h ?? "?"}%`,
+      ].join("\n");
       if (p.instruction) line += `\nNote: "${p.instruction}"`;
       if (act.action === "CLOSE" && act.rule === "exit") line += `\n⚡ Trailing TP: ${act.reason}`;
       if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\nRule ${act.rule}: ${act.reason}`;
