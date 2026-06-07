@@ -267,7 +267,9 @@ function derivLesson(perf) {
     `fee_tvl_ratio=${perf.fee_tvl_ratio}`,
     `organic=${perf.organic_score}`,
     `bin_range=${typeof perf.bin_range === 'object' ? JSON.stringify(perf.bin_range) : perf.bin_range}`,
-  ].join(", ");
+    perf.entry_mcap != null ? `entry_mcap=${perf.entry_mcap}` : null,
+    perf.exit_mcap != null ? `exit_mcap=${perf.exit_mcap}` : null,
+  ].filter(Boolean).join(", ");
 
   let rule = "";
 

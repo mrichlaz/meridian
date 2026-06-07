@@ -315,6 +315,12 @@ function shouldCountInAdjustedWinRate(closeReason) {
   );
 }
 
+function numberOrNullForHive(value) {
+  if (value == null) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 export async function pushHivePerformanceEvent(perf) {
   if (!isHiveMindEnabled()) return null;
   try {
@@ -337,6 +343,16 @@ export async function pushHivePerformanceEvent(perf) {
           feesSol: Number(perf.fees_earned_sol || 0),
           minutesHeld: Number(perf.minutes_held || 0),
           countInAdjustedWinRate: shouldCountInAdjustedWinRate(perf.close_reason),
+          context: sanitizeText(perf.context, 500) || null,
+          market: {
+            entryMcap: numberOrNullForHive(perf.entry_mcap),
+            entryTvl: numberOrNullForHive(perf.entry_tvl),
+            entryVolume: numberOrNullForHive(perf.entry_volume),
+            entryHolders: numberOrNullForHive(perf.entry_holders),
+            exitMcap: numberOrNullForHive(perf.exit_mcap),
+            exitTvl: numberOrNullForHive(perf.exit_tvl),
+            exitVolume: numberOrNullForHive(perf.exit_volume),
+          },
         },
       },
     });
