@@ -153,7 +153,7 @@ export function formatScreeningReport(rawText, extras = {}) {
   } else {
     // LLM output already contains the ⛔ NO DEPLOY header and structured sections.
     // Just escape for safety — don't add redundant headers.
-    text += esc(rawText);
+    text += esc(rawText).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
   }
 
   text = text.slice(0, 3900);
