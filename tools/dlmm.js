@@ -1528,6 +1528,16 @@ export async function closePosition({ position_address, reason }) {
     const wallet = getWallet();
     const poolAddress = await lookupPoolForPosition(position_address, wallet.publicKey.toString());
     const poolMeta = await getPoolMetadata(poolAddress);
+
+    // Guard: check if the position account still exists on-chain
+    const posAccount = await getPrimaryConnection().getAccountInfo(new PublicKey(position_address)).catch(() => null);
+    if (!posAccount || posAccount.owner.equals(SystemProgram.programId)) {
+      log("close_warn", `Position ${position_address.slice(0, 12)} already closed on-chain (account gone or System Program owner) — cleaning up local state`);
+      recordClose(position_address, reason || "already closed");
+      _positionsCacheAt = 0;
+      return { success: true, position: position_address, pool: poolAddress, pool_name: poolMeta.name || null, pnl_usd: 0, pnl_pct: 0, already_closed: true };
+    }
+
     if (shouldUseLpAgentRelay()) {
       let relaySubmitted = false;
       try {
