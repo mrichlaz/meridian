@@ -5,11 +5,21 @@ import { fileURLToPath } from "url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Use /data on EasyPanel (or any platform with persistent volume), fallback to project dir
-const DATA_ROOT = process.env.DATA_DIR || (fs.existsSync("/data") ? "/data" : __dirname);
-
 function ensureDir(dir) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
+
+function resolveDataRoot() {
+  const configured = process.env.DATA_DIR;
+  if (configured) {
+    try { ensureDir(configured); return configured; }
+    catch { /* DATA_DIR path not writable locally — fall back to project dir */ }
+  }
+  if (fs.existsSync("/data")) return "/data";
+  return __dirname;
+}
+
+const DATA_ROOT = resolveDataRoot();
 
 ensureDir(DATA_ROOT);
 

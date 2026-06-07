@@ -3,11 +3,12 @@
  * Full pipeline diagnostic — tests every stage of management + screening
  * cycles independently with timing. Run locally:
  *
- *   node test/test-pipeline.js
+ *   DATA_DIR=./data node test/test-pipeline.js
  *
  * Requires: .env with WALLET_PRIVATE_KEY, RPC keys, etc.
  */
 
+import "../envcrypt.js";
 import { config } from "../config.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────
