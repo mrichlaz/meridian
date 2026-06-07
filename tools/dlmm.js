@@ -73,18 +73,11 @@ async function getDLMM() {
   };
 }
 
-// ─── Lazy wallet/connection init ──────────────────────────────
-// Avoids crashing on import when WALLET_PRIVATE_KEY is not yet set
-// (e.g. during screening-only tests).
-let _connection = null;
-let _wallet = null;
+// ─── Shared RPC pool (round-robin across multiple API keys) ───
+import { getConnection } from "../utils/rpc-pool.js";
 
-function getConnection() {
-  if (!_connection) {
-    _connection = new Connection(process.env.RPC_URL, "confirmed");
-  }
-  return _connection;
-}
+// ─── Lazy wallet init ────────────────────────────────────────
+let _wallet = null;
 
 function getWallet() {
   if (!_wallet) {

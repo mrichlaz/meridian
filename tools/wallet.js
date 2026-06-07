@@ -9,13 +9,9 @@ import bs58 from "bs58";
 import { log } from "../logger.js";
 import { config } from "../config.js";
 
-let _connection = null;
-let _wallet = null;
+import { getConnection } from "../utils/rpc-pool.js";
 
-function getConnection() {
-  if (!_connection) _connection = new Connection(process.env.RPC_URL, "confirmed");
-  return _connection;
-}
+let _wallet = null;
 
 function getWallet() {
   if (!_wallet) {
