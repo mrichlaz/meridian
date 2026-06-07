@@ -23,8 +23,12 @@ export async function generateBriefing() {
   const totalPnLUsd = perfLast24h.reduce((sum, p) => sum + (p.pnl_usd || 0), 0);
   const totalFeesUsd = perfLast24h.reduce((sum, p) => sum + (p.fees_earned_usd || 0), 0);
 
-  // 3. Lessons Learned
-  const lessonsLast24h = (lessonsData.lessons || []).filter(l => new Date(l.created_at) > last24h);
+  // 3. Lessons Learned (skip config-change spam — show only trading insights)
+  const lessonsLast24h = (lessonsData.lessons || []).filter(l =>
+    new Date(l.created_at) > last24h &&
+    !/SELF-TUNED/i.test(l.rule) &&
+    l.rule.length < 200
+  );
 
   // 4. Current State
   const openPositions = allPositions.filter(p => !p.closed);
