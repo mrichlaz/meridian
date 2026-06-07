@@ -438,6 +438,10 @@ export async function runScreeningCycle({ silent = false } = {}) {
   }
   timers.screeningLastRun = Date.now();
   log("cron", `Starting screening cycle [model: ${config.llm.screeningModel}]`);
+  let deployAttempted = false;
+  let deploySucceeded = false;
+  let deployPool = null;
+  let deployPoolName = null;
   try {
     // Reuse pre-fetched balance — no extra RPC call needed
     const currentBalance = preBalance;
@@ -695,10 +699,10 @@ export async function runScreeningCycle({ silent = false } = {}) {
       mlEmotionContext = getEmotionalPromptContext();
     } catch {}
 
-    let deployAttempted = false;
-    let deploySucceeded = false;
-    let deployPool = null;
-    let deployPoolName = null;
+    deployAttempted = false;
+    deploySucceeded = false;
+    deployPool = null;
+    deployPoolName = null;
     const { content } = await agentLoop(`
 SCREENING CYCLE
 ${strategyBlock}
