@@ -57,6 +57,7 @@ export function listSmartWallets() {
 // Cache wallet positions for 5 minutes to avoid hammering RPC
 const _cache = new Map(); // address -> { positions, fetchedAt }
 const CACHE_TTL = 5 * 60 * 1000;
+const RPC_CONCURRENCY = 3; // max parallel RPC calls — Helius rate-limits above ~10
 
 export async function checkSmartWalletsOnPool({ pool_address }) {
   const { wallets: allWallets } = loadWallets();
@@ -74,21 +75,27 @@ export async function checkSmartWalletsOnPool({ pool_address }) {
 
   const { getWalletPositions } = await import("./tools/dlmm.js");
 
-  const results = await Promise.all(
-    wallets.map(async (wallet) => {
-      try {
-        const cached = _cache.get(wallet.address);
-        if (cached && Date.now() - cached.fetchedAt < CACHE_TTL) {
-          return { wallet, positions: cached.positions };
+  // Batched with concurrency limit to avoid RPC 429 rate limits
+  const results = [];
+  for (let i = 0; i < wallets.length; i += RPC_CONCURRENCY) {
+    const batch = wallets.slice(i, i + RPC_CONCURRENCY);
+    const batchResults = await Promise.all(
+      batch.map(async (wallet) => {
+        try {
+          const cached = _cache.get(wallet.address);
+          if (cached && Date.now() - cached.fetchedAt < CACHE_TTL) {
+            return { wallet, positions: cached.positions };
+          }
+          const { positions } = await getWalletPositions({ wallet_address: wallet.address });
+          _cache.set(wallet.address, { positions: positions || [], fetchedAt: Date.now() });
+          return { wallet, positions: positions || [] };
+        } catch {
+          return { wallet, positions: [] };
         }
-        const { positions } = await getWalletPositions({ wallet_address: wallet.address });
-        _cache.set(wallet.address, { positions: positions || [], fetchedAt: Date.now() });
-        return { wallet, positions: positions || [] };
-      } catch {
-        return { wallet, positions: [] };
-      }
-    })
-  );
+      })
+    );
+    results.push(...batchResults);
+  }
 
   const inPool = results
     .filter((r) => r.positions.some((p) => p.pool === pool_address))
