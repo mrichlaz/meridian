@@ -1628,7 +1628,7 @@ async function telegramHandler(msg) {
   }
 
   if (text === "/help") {
-    await sendHTML(formatHelpText()).catch(() => {});
+    await sendMessage(formatHelpText()).catch(() => {});
     return;
   }
 
