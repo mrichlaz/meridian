@@ -60,7 +60,9 @@ export async function getWalletBalances() {
     return { wallet: null, sol: 0, sol_price: 0, sol_usd: 0, usdc: 0, tokens: [], total_usd: 0, error: "Wallet not configured" };
   }
 
-  const HELIUS_KEY = process.env.HELIUS_API_KEY;
+  // Support HELIUS_API_KEYS or comma-separated HELIUS_API_KEY — pick the first one
+  const rawKey = process.env.HELIUS_API_KEYS || process.env.HELIUS_API_KEY;
+  const HELIUS_KEY = rawKey ? rawKey.split(",")[0].trim() : null;
   if (!HELIUS_KEY) {
     log("wallet_error", "HELIUS_API_KEY not set in .env");
     return { wallet: walletAddress, sol: 0, sol_price: 0, sol_usd: 0, usdc: 0, tokens: [], total_usd: 0, error: "Helius API key missing" };
