@@ -1876,15 +1876,22 @@ async function telegramHandler(msg) {
     try {
       const s = config.screening;
       const perf = getPerformanceSummary();
-      let lines = [
+      const lines = [
         `<b>Screening Thresholds</b>`,
-        `fee/tvl min: ${s.minFeeActiveTvlRatio}`,
-        `organic min: ${s.minOrganic}`,
-        `holders min: ${s.minHolders}`,
-        `tvl: ${s.minTvl}–${s.maxTvl}`,
-        `volume min: ${s.minVolume}`,
-        `timeframe: ${s.timeframe}`,
-        perf ? `\n<b>Performance</b>\n${perf.total_positions_closed} closed | ${perf.win_rate_pct}% win | avg PnL ${perf.avg_pnl_pct}%` : `\nNo closed positions yet.`,
+        `fee/tvl min: <code>${s.minFeeActiveTvlRatio}</code>`,
+        `tvl: <code>${s.minTvl}–${s.maxTvl}</code>`,
+        `mcap: <code>${s.minMcap}–${s.maxMcap}</code>`,
+        `volume min: <code>${s.minVolume}</code>`,
+        `organic min: <code>${s.minOrganic}</code>`,
+        `holders min: <code>${s.minHolders}</code>`,
+        `bin step: <code>${s.minBinStep}–${s.maxBinStep}</code>`,
+        `timeframe: <code>${s.timeframe}</code>`,
+        `token fees min: <code>${s.minTokenFeesSol} SOL</code>`,
+        `bot holders max: <code>${s.maxBotHoldersPct}%</code>`,
+        `top10 max: <code>${s.maxTop10Pct}%</code>`,
+        perf
+          ? `\n<b>Performance</b>\n${perf.total_positions_closed} closed | ${perf.win_rate_pct}% win | avg PnL ${perf.avg_pnl_pct}%`
+          : `\nNo closed positions yet.`,
       ].join("\n");
       await sendHTML(lines).catch(() => {});
     } catch (e) {
