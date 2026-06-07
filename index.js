@@ -1671,8 +1671,8 @@ async function telegramHandler(msg) {
   }
 
   if (text === "/config") {
-    const { ACTION_BUTTONS } = await import("./utils/telegram-formatter.js");
-    await sendMessageWithButtons(formatConfigSnapshot(), ACTION_BUTTONS.status()).catch(() => {});
+    const { ACTION_BUTTONS, esc } = await import("./utils/telegram-formatter.js");
+    await sendMessageWithButtons(esc(formatConfigSnapshot()), ACTION_BUTTONS.status()).catch(() => {});
     return;
   }
 
@@ -1784,9 +1784,9 @@ async function telegramHandler(msg) {
 
   if (text === "/screen") {
     try {
-      const { ACTION_BUTTONS } = await import("./utils/telegram-formatter.js");
+      const { ACTION_BUTTONS, esc } = await import("./utils/telegram-formatter.js");
       const report = await runDeterministicScreen(5);
-      await sendMessageWithButtons(report, ACTION_BUTTONS.screening()).catch(() => {});
+      await sendMessageWithButtons(esc(report), ACTION_BUTTONS.screening()).catch(() => {});
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
@@ -1794,8 +1794,8 @@ async function telegramHandler(msg) {
   }
 
   if (text === "/candidates") {
-    const { ACTION_BUTTONS } = await import("./utils/telegram-formatter.js");
-    await sendMessageWithButtons(describeLatestCandidates(5), ACTION_BUTTONS.screening()).catch(() => {});
+    const { ACTION_BUTTONS, esc } = await import("./utils/telegram-formatter.js");
+    await sendMessageWithButtons(esc(describeLatestCandidates(5)), ACTION_BUTTONS.screening()).catch(() => {});
     return;
   }
 
