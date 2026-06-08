@@ -54,6 +54,7 @@ import {
   formatPerformance,
   formatError,
   formatHelp,
+  formatStart,
   formatDeployResult,
   formatCloseResult,
   formatClaimResult,
@@ -508,10 +509,11 @@ export async function runScreeningCycle({ silent = false } = {}) {
       ? `ACTIVE STRATEGY: ${activeStrategy.name} — LP: ${activeStrategy.lp_strategy} | bins_above: ${activeStrategy.range?.bins_above ?? 0} (FIXED — never change) | deposit: ${activeStrategy.entry?.single_side === "sol" ? "SOL only (amount_y, amount_x=0)" : "dual-sided"} | best for: ${activeStrategy.best_for}`
       : `No active strategy — use default bid_ask, bins_above: 0, SOL only.`;
 
+    await liveStage(liveMessage, "fetching");
     // Fetch + enrich + filter candidates via the shared pipeline. This is
     // the same pipeline the manual /screen path uses, so both surfaces
     // (auto cron and manual /deploy N) see the same surviving pool set.
-    const pipeline = await enrichAndFilterCandidates({ limit: 10 });
+    const pipeline = await enrichAndFilterCandidates({ limit: 10, liveMessage });
     if (pipeline?.error) {
       screenReport = `Screening failed: ${pipeline.error}`;
       return screenReport;
@@ -600,6 +602,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
       }
     }
 
+    await liveStage(liveMessage, "scoring");
     // Pre-fetch active_bin for all passing candidates in parallel
     const activeBinResults = await Promise.allSettled(
       passing.map(({ pool }) => getActiveBin({ pool_address: pool.pool }))
@@ -764,6 +767,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     deploySucceeded = false;
     deployPool = null;
     deployPoolName = null;
+    await liveStage(liveMessage, "deciding");
     const { content } = await agentLoop(`
 SCREENING CYCLE
 ${strategyBlock}
@@ -1941,6 +1945,18 @@ async function telegramHandler(msg) {
     return;
   }
 
+  if (text === "/start") {
+    try {
+      await syncMlPersonalityFromConfig();
+      const [wallet, positions] = await Promise.all([getWalletBalances(), getMyPositions({ force: true })]);
+      const { text: startText, buttons: startBtns } = formatStart({ wallet, positions, config });
+      await sendMessageWithButtons(startText, startBtns).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
   if (text === "/help") {
     await sendHTML(formatHelp()).catch(() => {});
     return;
@@ -2061,7 +2077,7 @@ async function telegramHandler(msg) {
         changes: { [key]: value },
         reason: "Telegram slash command /setcfg",
       });
-      if (key === "mlPersonality") syncMlPersonalityFromConfig();
+      if (key === "mlPersonality") await syncMlPersonalityFromConfig();
       if (!result?.success) {
         await sendMessage(`Config update failed.\nUnknown: ${(result?.unknown || []).join(", ") || "none"}`).catch(() => {});
         return;
@@ -2195,7 +2211,7 @@ async function telegramHandler(msg) {
   }
 
   if (text === "/ml-status" || text === "/mlstatus" || text === "/ml") {
-    syncMlPersonalityFromConfig();
+    await syncMlPersonalityFromConfig();
     try {
       const { mlStatus } = await import("./ml/cli.js");
       const text = mlStatus(config);
@@ -2556,11 +2572,11 @@ function computeBinsBelow(volatility) {
   return Math.max(lo, Math.min(hi, Math.round(lo + (parsedVolatility / 5) * (hi - lo))));
 }
 
-function syncMlPersonalityFromConfig() {
+async function syncMlPersonalityFromConfig() {
   try {
     const desired = config?.ml?.personality;
     if (!desired) return false;
-    const { getActive, setActive } = require("./ml/personalities.js");
+    const { getActive, setActive } = await import("./ml/personalities.js");
     const active = getActive();
     if (active?.name !== desired) {
       setActive(desired);
@@ -2578,7 +2594,8 @@ registerCronRestarter(() => { if (cronStarted) startCronJobs(); });
 //  - runDeterministicScreen() (manual /screen, fills latestCandidates cache)
 // Returns { passing, filteredOut, gmgnStageCounts, gmgnAllFiltered, topCandidates, candidates, allCandidates }.
 // `passing` is the list of {pool, sw, n, ti, mem, study} blocks that survived all hard filters.
-async function enrichAndFilterCandidates({ limit = 10 } = {}) {
+async function enrichAndFilterCandidates({ limit = 10, liveMessage = null } = {}) {
+  await liveStage(liveMessage, "filtering");
   const topCandidates = await getTopCandidates({ limit }).catch((e) => ({ _error: e.message }));
   if (topCandidates?._error) {
     return { error: topCandidates._error };
@@ -2587,6 +2604,7 @@ async function enrichAndFilterCandidates({ limit = 10 } = {}) {
   const gmgnStageCounts = topCandidates?.stage_counts ?? null;
   const gmgnAllFiltered = topCandidates?.all_filtered ?? [];
 
+  await liveStage(liveMessage, "enriching");
   const allCandidates = [];
   const BATCH_SIZE = 2;
   const STAGGER_MS = 200;
