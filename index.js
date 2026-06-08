@@ -2626,10 +2626,10 @@ async function enrichAndFilterCandidates({ limit = 10, liveMessage = null } = {}
   const BATCH_SIZE = 2;
   const STAGGER_MS = 120;
   const BATCH_PAUSE_MS = 120;
-  const SMART_WALLET_TIMEOUT_MS = 1200;
+  const SMART_WALLET_TIMEOUT_MS = 3500;
   const NARRATIVE_TIMEOUT_MS = 1500;
   const TOKEN_INFO_TIMEOUT_MS = 2000;
-  const STUDY_TIMEOUT_MS = 900;
+  const STUDY_TIMEOUT_MS = 3000;
   for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
     const batch = candidates.slice(i, i + BATCH_SIZE);
     const batchResults = await Promise.all(
