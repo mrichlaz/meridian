@@ -6,7 +6,7 @@ import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { confirmIndicatorPreset } from "./chart-indicators.js";
 import { getAgentMeridianBase, getAgentMeridianHeaders } from "./agent-meridian.js";
 import { discoverGmgnPools } from "./gmgn.js";
-import { scaleScreeningToTimeframe } from "../screening-scales.js";
+import { scaleScreeningToTimeframe, getEffectiveWindowThresholds } from "../screening-scales.js";
 
 const DATAPI_JUP = "https://datapi.jup.ag/v1";
 
@@ -465,9 +465,12 @@ export async function discoverPools({
 } = {}) {
   const s = config.screening;
   const tf = s.timeframe || "5m";
-  const { minFeeActiveTvlRatio: scaledFee, minVolume: scaledVolume } = scaleScreeningToTimeframe(tf);
-  const effectiveFee = numeric(s.minFeeActiveTvlRatio) ?? scaledFee;
-  const effectiveVolume = numeric(s.minVolume) ?? scaledVolume;
+  const requestedWindowThresholds = getEffectiveWindowThresholds({
+    minFeeActiveTvlRatio: numeric(s.minFeeActiveTvlRatio),
+    minVolume: numeric(s.minVolume),
+  }, tf);
+  const effectiveFee = requestedWindowThresholds.minFeeActiveTvlRatio;
+  const effectiveVolume = requestedWindowThresholds.minVolume;
   const filters = [
     "base_token_has_critical_warnings=false",
     "quote_token_has_critical_warnings=false",
@@ -492,7 +495,9 @@ export async function discoverPools({
       : null,
   ].filter(Boolean).join("&&");
 
-  const ladder = ["5m", "15m", "30m", "1h", "2h", "4h", "12h", "24h"];
+  // Meteora Pool Discovery does not support 15m. Skip unsupported windows in
+  // the escalation ladder instead of failing the whole discovery cycle.
+  const ladder = ["5m", "30m", "1h", "2h", "4h", "12h", "24h"];
   const startIdx = ladder.indexOf(s.timeframe);
   const startFrom = startIdx >= 0 ? startIdx : 0;
   let rawPools = [];
@@ -513,8 +518,8 @@ export async function discoverPools({
         category: s.category,
       });
     } catch (e) {
-      log("screening", `${candidate} fetch failed: ${e.message}${candidate === s.timeframe ? " — escalating" : ""}`);
-      if (candidate === s.timeframe && i < ladder.length - 1) continue;
+      log("screening", `${candidate} fetch failed: ${e.message} — skipping to next timeframe if available`);
+      if (i < ladder.length - 1) continue;
       break;
     }
     const candidatePools = Array.isArray(data?.data) ? data.data : [];
@@ -586,11 +591,12 @@ export async function discoverPools({
   rawPools = await applyVolatilityTimeframe(rawPools, s.timeframe);
   await enrichDiscordSignalLaunchpads(rawPools);
 
-  const { minFeeActiveTvlRatio: scaledFee2, minVolume: scaledVol } = scaleScreeningToTimeframe(tf);
   const effectiveS = {
     ...s,
-    minFeeActiveTvlRatio: numeric(s.minFeeActiveTvlRatio) ?? scaledFee2,
-    minVolume: numeric(s.minVolume) ?? scaledVol,
+    ...getEffectiveWindowThresholds({
+      minFeeActiveTvlRatio: numeric(s.minFeeActiveTvlRatio),
+      minVolume: numeric(s.minVolume),
+    }, usedTimeframe),
   };
 
   const filteredExamples = [];
@@ -785,9 +791,11 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   const minTvl = Number(config.screening.minTvl ?? 0);
   const maxTvl = config.screening.maxTvl == null ? null : Number(config.screening.maxTvl);
   const tf = config.screening.timeframe || "5m";
-  const { minFeeActiveTvlRatio: scaledFee } = scaleScreeningToTimeframe(tf);
-  const rawMinFee = numeric(config.screening.minFeeActiveTvlRatio);
-  const minFeeActiveTvlRatio = rawMinFee ?? scaledFee;
+  const effectiveWindowThresholds = getEffectiveWindowThresholds({
+    minFeeActiveTvlRatio: numeric(config.screening.minFeeActiveTvlRatio),
+    minVolume: numeric(config.screening.minVolume),
+  }, discovery.discovery_timeframe || tf);
+  const minFeeActiveTvlRatio = effectiveWindowThresholds.minFeeActiveTvlRatio;
 
   const eligible = pools
     .filter((p) => {
