@@ -677,7 +677,7 @@ export function formatPerformance(summary, history, options = {}) {
     lines.push(b("Recent closes"));
     history.positions.slice(0, 5).forEach((p) => {
       const sign = p.pnl_pct >= 0 ? "🟢" : "🔴";
-      lines.push(`  ${sign} ${esc(p.pool_name || p.pool?.slice(0, 8) || "?")} — ${formatPct(p.pnl_pct)} • ${formatUsd(p.pnl_usd)} • ${timeAgo(p.recorded_at)}`);
+      lines.push(`  ${sign} ${esc(p.pool_name || p.pool?.slice(0, 8) || "?")} — ${formatPct(p.pnl_pct)} • ${formatUsd(p.pnl_usd)} • ${timeAgo(p.recorded_at || p.closed_at)}`);
     });
   }
   return { text: lines.join("\n").slice(0, 3900), buttons: ACTION_BUTTONS.status() };
