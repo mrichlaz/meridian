@@ -694,6 +694,7 @@ export function formatHelp() {
     "  /evolve — run threshold evolution",
     "  /performance — win rate / avg PnL / total fees",
     "  /hive — HiveMind sync status",
+    "  /ml-status — model generation, blend λ, emotion state, personality",
     "",
     b("Lifecycle"),
     "  /pause, /resume — pause / resume cron cycles",

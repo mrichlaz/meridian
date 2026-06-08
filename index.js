@@ -2068,6 +2068,17 @@ async function telegramHandler(msg) {
     return;
   }
 
+  if (text === "/ml-status" || text === "/ml") {
+    try {
+      const { mlStatus } = await import("./ml/cli.js");
+      const text = mlStatus(config);
+      await sendMessage(text).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
   if (text === "/evolve") {
     try {
       const perf = getPerformanceSummary();
