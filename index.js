@@ -1866,8 +1866,11 @@ async function telegramHandler(msg) {
         // Fall back to cached live position data for fields getPositionPnl doesn't return
         const live = await getMyPositions({ force: true, silent: true }).catch(() => null);
         const livePos = live?.positions?.find((p) => p.position === posAddr) || {};
-        const allTimeFees = pnl?.all_time_fees_usd
-          ?? Number(livePos?.collected_fees_usd || 0) + Number(livePos?.unclaimed_fees_usd || 0);
+        const liveAllTimeFees = Number(livePos?.collected_fees_usd || 0) + Number(livePos?.unclaimed_fees_usd || 0);
+        const apiAllTimeFees = Number(pnl?.all_time_fees_usd);
+        const allTimeFees = Number.isFinite(apiAllTimeFees) && (apiAllTimeFees > 0 || liveAllTimeFees <= 0)
+          ? apiAllTimeFees
+          : liveAllTimeFees;
         const initialUsd = tracked?.initial_value_usd
           ?? (pnl?.pnl_usd != null && pnl?.current_value_usd != null
             ? pnl.current_value_usd - pnl.pnl_usd
