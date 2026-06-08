@@ -334,7 +334,11 @@ export function formatPositionPnLCard(position, options = {}) {
   const initial = Number(position?.initial_value_usd);
   const final = Number(position?.final_value_usd);
   const fees = Number(position?.fees_earned_usd ?? position?.unclaimed_fees_usd);
-  const inRange = position?.in_range ? "🟢 IN RANGE" : `🔴 OOR ${position?.minutes_out_of_range ?? 0}m`;
+  const inRange = position?.in_range === true
+    ? "🟢 IN RANGE"
+    : position?.in_range === false
+      ? `🔴 OOR ${position?.minutes_out_of_range ?? 0}m`
+      : "—";
   const rangePct = position?.range_efficiency != null ? `${position.range_efficiency.toFixed(1)}%` : "—";
   const age = position?.age_minutes != null ? `${position.age_minutes}m` : "?";
 

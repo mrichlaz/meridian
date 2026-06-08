@@ -1723,24 +1723,36 @@ async function telegramHandler(msg) {
     if (data.startsWith("pnl:")) {
       try {
         const posAddr = data.slice(4);
-        const { getPositionPnl } = await import("./tools/dlmm.js");
+        const { getPositionPnl, getMyPositions } = await import("./tools/dlmm.js");
         const tracked = getTrackedPosition(posAddr);
         const pnl = await getPositionPnl({ pool_address: tracked?.pool, position_address: posAddr });
-        const { formatPositionPnLCard } = await import("./utils/telegram-formatter.js");
+        // Fall back to cached live position data for fields getPositionPnl doesn't return
+        const live = await getMyPositions({ force: true, silent: true }).catch(() => null);
+        const livePos = live?.positions?.find((p) => p.position === posAddr) || {};
+        const allTimeFees = pnl?.all_time_fees_usd
+          ?? Number(livePos?.collected_fees_usd || 0) + Number(livePos?.unclaimed_fees_usd || 0);
+        const initialUsd = tracked?.initial_value_usd
+          ?? (pnl?.pnl_usd != null && pnl?.current_value_usd != null
+            ? pnl.current_value_usd - pnl.pnl_usd
+            : null);
         const positionView = {
           position: posAddr,
-          pool: tracked?.pool,
-          pair: tracked?.pool_name,
+          pool: tracked?.pool || livePos?.pool,
+          pair: tracked?.pool_name || livePos?.pair,
           pnl_pct: pnl?.pnl_pct,
           pnl_usd: pnl?.pnl_usd,
-          initial_value_usd: pnl?.initial_value_usd,
-          final_value_usd: pnl?.final_value_usd,
-          fees_earned_usd: pnl?.fees_earned_usd,
-          unclaimed_fees_usd: pnl?.unclaimed_fees_usd,
-          range_efficiency: pnl?.range_efficiency,
-          fee_per_tvl_24h: pnl?.fee_per_tvl_24h,
-          close_reason: pnl?.close_reason,
+          initial_value_usd: initialUsd,
+          final_value_usd: pnl?.current_value_usd,
+          fees_earned_usd: allTimeFees,
+          unclaimed_fees_usd: pnl?.unclaimed_fee_usd ?? livePos?.unclaimed_fees_usd,
+          range_efficiency: livePos?.range_efficiency,
+          in_range: pnl?.in_range ?? livePos?.in_range,
+          minutes_out_of_range: livePos?.minutes_out_of_range,
+          fee_per_tvl_24h: pnl?.fee_per_tvl_24h ?? livePos?.fee_per_tvl_24h,
+          age_minutes: pnl?.age_minutes ?? livePos?.age_minutes,
+          peak_pnl_pct: tracked?.peak_pnl_pct,
         };
+        const { formatPositionPnLCard } = await import("./utils/telegram-formatter.js");
         const { text: pnlText, buttons: pnlBtns } = formatPositionPnLCard(positionView, {
           solMode: config.management.solMode === true,
         });
@@ -1754,7 +1766,13 @@ async function telegramHandler(msg) {
         const posAddr = data.slice(6);
         await answerCallbackQuery(msg.callbackQueryId, "Closing...").catch(() => {});
         const result = await closePosition({ position_address: posAddr });
-        await sendMessage(`🔒 Closed: ${result?.pnl_pct != null ? `${result.pnl_pct}%` : "done"}`).catch(() => {});
+        const { formatCloseResult } = await import("./utils/telegram-formatter.js");
+        const tracked = getTrackedPosition(posAddr);
+        const { text, buttons } = formatCloseResult(result, {
+          pair: tracked?.pool_name,
+          reason: msg.callbackData?.includes("rebalance") ? "rebalance" : "telegram",
+        });
+        await sendMessageWithButtons(text, buttons).catch(() => {});
       } catch (e) { await sendMessage(`Close failed: ${e.message}`).catch(() => {});
         await answerCallbackQuery(msg.callbackQueryId, "Failed").catch(() => {}); }
       return;
@@ -1864,8 +1882,9 @@ async function telegramHandler(msg) {
       const result = await closePosition({ position_address: pos.position });
       if (result.success) {
         const closeTxs = result.close_txs?.length ? result.close_txs : result.txs;
-        const claimNote = result.claim_txs?.length ? `\nClaim txs: ${result.claim_txs.join(", ")}` : "";
-        await sendMessage(`✅ Closed ${pos.pair}\nPnL: ${config.management.solMode ? "◎" : "$"}${result.pnl_usd ?? "?"} | close txs: ${closeTxs?.join(", ") || "n/a"}${claimNote}`);
+        const { formatCloseResult } = await import("./utils/telegram-formatter.js");
+        const { text, buttons } = formatCloseResult(result, { pair: pos.pair, reason: "/close" });
+        await sendMessageWithButtons(text, buttons).catch(() => {});
       } else {
         await sendMessage(`❌ Close failed: ${JSON.stringify(result)}`);
       }

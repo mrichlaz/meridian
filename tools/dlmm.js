@@ -1983,16 +1983,27 @@ export async function closePosition({ position_address, reason }) {
 
     recordClose(position_address, reason || "agent decision");
 
-    // Record performance for learning
+    // Compute close PnL upfront so we can return it in the success object
+    // (the recordPerformance block also does this internally, but we hoist
+    // it so callers like the Telegram /close handler don't see null PnL).
+    let initialUsd = 0;
+    let finalValueUsd = 0;
+    let pnlUsd = 0;
+    let pnlPct = 0;
+    let feesUsd = 0;
+    let minutesHeld = 0;
+    let minutesOOR = 0;
+
     if (tracked) {
       const deployedAt = new Date(tracked.deployed_at).getTime();
-      const minutesHeld = Math.floor((Date.now() - deployedAt) / 60000);
-
-      let minutesOOR = 0;
+      minutesHeld = Math.floor((Date.now() - deployedAt) / 60000);
       if (tracked.out_of_range_since) {
         minutesOOR = Math.floor((Date.now() - new Date(tracked.out_of_range_since).getTime()) / 60000);
       }
+    }
 
+    // Record performance for learning
+    if (tracked) {
       const shouldRejectClosedPnl = (pct, closeReasonText) => {
         if (!Number.isFinite(pct)) return false;
         const reasonText = String(closeReasonText || "").toLowerCase();
@@ -2003,12 +2014,7 @@ export async function closePosition({ position_address, reason }) {
       };
 
       // Fetch closed PnL from API — authoritative source after withdrawal settles
-      let pnlUsd = 0;
       let pnlTrueUsd = 0;
-      let pnlPct = 0;
-      let finalValueUsd = 0;
-      let initialUsd = 0;
-      let feesUsd = tracked.total_fees_claimed_usd || 0;
       try {
         const closedUrl = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${wallet.publicKey.toString()}&status=closed&pageSize=50&page=1`;
         for (let attempt = 0; attempt < 6; attempt++) {
@@ -2167,6 +2173,11 @@ export async function closePosition({ position_address, reason }) {
       claim_txs: claimTxHashes,
       close_txs: closeTxHashes,
       txs: txHashes,
+      pnl_usd: pnlUsd,
+      pnl_pct: pnlPct,
+      initial_value_usd: initialUsd,
+      final_value_usd: finalValueUsd,
+      fees_earned_usd: feesUsd,
       base_mint: pool.lbPair.tokenXMint.toString(),
     };
   } catch (error) {
