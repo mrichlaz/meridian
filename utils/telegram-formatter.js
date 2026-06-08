@@ -561,6 +561,10 @@ export function formatConfigSnapshot(config, options = {}) {
   if (!config) return { text: "Config not loaded.", buttons: ACTION_BUTTONS.status() };
   const s = config.screening || {};
   const m = config.management || {};
+  const effectiveMinSolToOpen = Math.max(
+    Number(m.minSolToOpen ?? 0),
+    Number(m.deployAmountSol ?? 0) + Number(m.gasReserve ?? 0),
+  );
   const lines = [];
   lines.push(b("⚙️ Config Snapshot"));
   lines.push("");
@@ -584,7 +588,7 @@ export function formatConfigSnapshot(config, options = {}) {
   lines.push("");
   lines.push(b("Management"));
   lines.push(`  • deployAmountSol: ${m.deployAmountSol} • positionSizePct: ${m.positionSizePct}`);
-  lines.push(`  • gasReserve: ${m.gasReserve} • minSolToOpen: ${m.minSolToOpen}`);
+  lines.push(`  • gasReserve: ${m.gasReserve} • minSolToOpen (effective): ${effectiveMinSolToOpen}`);
   lines.push(`  • TP: ${m.takeProfitPct}% • SL: ${m.stopLossPct}%`);
   if (m.trailingTakeProfit) lines.push(`  • trailing: trigger ${m.trailingTriggerPct}% • drop ${m.trailingDropPct}%`);
   lines.push(`  • OOR wait: ${m.outOfRangeWaitMinutes}m (${m.outOfRangeBinsToClose} bins)`);
