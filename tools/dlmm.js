@@ -1169,6 +1169,31 @@ function getClosedPnlPct(posEntry, solMode = false) {
   return deposit && deposit > 0 ? (pnl / deposit) * 100 : 0;
 }
 
+function deriveClosedUsdMetrics(posEntry) {
+  const initialUsd = maybeNum(posEntry?.allTimeDeposits?.total?.usd) ?? 0;
+  const finalValueUsd = maybeNum(posEntry?.allTimeWithdrawals?.total?.usd) ?? 0;
+  const feesUsd = maybeNum(posEntry?.allTimeFees?.total?.usd) ?? 0;
+  const pnlUsd = finalValueUsd + feesUsd - initialUsd;
+  const pnlPct = initialUsd > 0 ? (pnlUsd / initialUsd) * 100 : 0;
+  return { initialUsd, finalValueUsd, feesUsd, pnlUsd, pnlPct };
+}
+
+function closedPnlMismatch(posEntry, { solMode = false, maxPctDiff = 10, maxUsdDiff = 2 } = {}) {
+  const derived = deriveClosedUsdMetrics(posEntry);
+  const reportedPnlUsd = maybeNum(posEntry?.pnlUsd);
+  const reportedPnlPct = getClosedPnlPct(posEntry, solMode);
+  const usdDiff = reportedPnlUsd != null ? Math.abs(reportedPnlUsd - derived.pnlUsd) : 0;
+  const pctDiff = reportedPnlPct != null ? Math.abs(reportedPnlPct - derived.pnlPct) : 0;
+  return {
+    mismatch: (reportedPnlUsd != null && usdDiff > maxUsdDiff) || (reportedPnlPct != null && pctDiff > maxPctDiff),
+    usdDiff,
+    pctDiff,
+    derived,
+    reportedPnlUsd,
+    reportedPnlPct,
+  };
+}
+
 function deriveOpenPnlPct(binData, solMode = false) {
   if (!binData) return null;
 
@@ -2135,9 +2160,19 @@ export async function closePosition({ position_address, reason }) {
               const nextFinalValueUsd = parseFloat(posEntry.allTimeWithdrawals?.total?.usd || 0);
               const nextInitialUsd = parseFloat(posEntry.allTimeDeposits?.total?.usd || 0);
               const nextFeesUsd = parseFloat(posEntry.allTimeFees?.total?.usd || 0) || feesUsd;
+              const mismatch = closedPnlMismatch(posEntry, { solMode: config.management.solMode });
 
               if (shouldRejectClosedPnl(nextPnlPct, reason || tracked?.close_reason)) {
                 log("close_warn", `Rejected unsettled closed PnL for ${position_address.slice(0, 8)} on attempt ${attempt + 1}/6: ${nextPnlPct.toFixed(2)}%`);
+              } else if (mismatch.mismatch) {
+                pnlTrueUsd    = mismatch.derived.pnlUsd;
+                pnlUsd        = config.management.solMode ? nextPnlValue : mismatch.derived.pnlUsd;
+                pnlPct        = mismatch.derived.pnlPct;
+                finalValueUsd = mismatch.derived.finalValueUsd;
+                initialUsd    = mismatch.derived.initialUsd;
+                feesUsd       = mismatch.derived.feesUsd || nextFeesUsd;
+                log("close_warn", `Closed PnL API mismatch for ${position_address.slice(0, 8)} — using derived values instead (usdDiff=${mismatch.usdDiff.toFixed(2)}, pctDiff=${mismatch.pctDiff.toFixed(2)})`);
+                break;
               } else {
                 pnlTrueUsd    = nextPnlUsd;
                 pnlUsd        = nextPnlValue;
