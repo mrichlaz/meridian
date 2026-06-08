@@ -37,9 +37,22 @@ function scoreCandidate(pool) {
   const organic = Number(pool.organic_score || 0);
   const volume = Number(pool.volume_window || 0);
   const holders = Number(pool.holders || 0);
-  const bundlePct = Number(pool.bundle_pct || 0);
-  const top10Pct = Number(pool.top10_pct || pool.holder_top10_pct || 0);
-  const sniperPct = Number(pool.sniper_pct || 0);
+  // Bundle / sniper / top10 — accept either the OKX/Jupiter flat fields
+  // (bundle_pct, sniper_pct, top10_pct) or the GMGN-prefixed equivalents.
+  const bundlePct = Number(
+    pool.bundle_pct ?? pool.gmgn_bundler_pct ?? pool.gmgn_token_info_bundler_pct ?? 0
+  );
+  const top10Pct = Number(
+    pool.top10_pct
+      ?? pool.holder_top10_pct
+      ?? pool.gmgn_top10_holder_rate
+      ?? 0
+  );
+  const sniperPct = Number(
+    pool.sniper_pct
+      ?? pool.gmgn_sniper_count
+      ?? 0
+  );
   const volatility = Number(pool.volatility || 0);
   const priceVsAthPct = Number(pool.price_vs_ath_pct || 0);
   const pvpPenalty = pool.is_pvp ? 120 : 0;
@@ -927,6 +940,58 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     });
     eligible.splice(0, eligible.length, ...filtered);
     if (eligible.length < before) log("dev_blocklist", `Filtered ${before - eligible.length} pool(s) via OKX creator check`);
+
+    // Jupiter free-tier enrichment — fills bundle/sniper/top10/bot/dev/etc.
+    // when OKX advanced-info is unavailable (402 paywall). Only stamps fields
+    // that OKX did not already provide, so the richer source wins.
+    if (eligible.length > 0) {
+      const jupResults = await Promise.allSettled(
+        eligible.map(async (p) => {
+          if (!p.base?.mint) return { pool: p.pool, token: null };
+          try {
+            const res = await fetch(`${DATAPI_JUP}/assets/search?query=${encodeURIComponent(p.base.mint)}`, { signal: AbortSignal.timeout(8_000) });
+            if (!res.ok) return { pool: p.pool, token: null };
+            const data = await res.json();
+            const token = Array.isArray(data) ? data[0] : data;
+            return { pool: p.pool, token: token || null };
+          } catch {
+            return { pool: p.pool, token: null };
+          }
+        })
+      );
+      let enrichedCount = 0;
+      for (const r of jupResults) {
+        if (r.status !== "fulfilled") continue;
+        const { pool: poolAddr, token } = r.value;
+        if (!token) continue;
+        const pool = eligible.find((p) => p.pool === poolAddr);
+        if (!pool) continue;
+        const audit = token.audit || {};
+        if (pool.bundle_pct == null && audit.bundlerStats?.holdingPct != null) {
+          pool.bundle_pct = Number(audit.bundlerStats.holdingPct);
+        }
+        if (pool.sniper_pct == null && audit.sniperPct != null) {
+          pool.sniper_pct = Number(audit.sniperPct);
+        }
+        if (pool.top10_pct == null && audit.topHoldersPercentage != null) {
+          pool.top10_pct = Number(audit.topHoldersPercentage);
+        }
+        if (audit.botHoldersPercentage != null) {
+          pool.bot_holders_pct = Number(audit.botHoldersPercentage);
+        }
+        if (audit.devBalancePercentage != null) {
+          pool.dev_pct = Number(audit.devBalancePercentage);
+        }
+        if (audit.devMigrations != null && pool.dev_migrations == null) {
+          pool.dev_migrations = Number(audit.devMigrations);
+        }
+        if (audit.insiderPct != null && pool.insider_pct == null) {
+          pool.insider_pct = Number(audit.insiderPct);
+        }
+        enrichedCount++;
+      }
+      if (enrichedCount > 0) log("screening", `Jupiter free enrichment: stamped ${enrichedCount} pool(s) with bundle/sniper/top10/bot/dev fields`);
+    }
   }
 
   if (eligible.length > 0) {
