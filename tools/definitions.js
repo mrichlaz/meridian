@@ -384,13 +384,20 @@ WARNING: This executes a real on-chain transaction.`,
       description: `Update any of your operating parameters at runtime.
 Changes persist to user-config.json and take effect immediately — no restart needed.
 
+Aliases (also accepted, for legacy callers): source → screeningSource, binsBelow → maxBinsBelow, takeProfitFeePct → takeProfitPct, strategy is the strategy name (bid_ask / spot / curve).
+
 VALID KEYS (use EXACTLY these key names, nothing else):
-Screening: minFeeActiveTvlRatio, minTvl, maxTvl, minVolume, minOrganic, minQuoteOrganic, minHolders, minMcap, maxMcap, minBinStep, maxBinStep, timeframe, category, minTokenFeesSol, excludeHighSupplyConcentration, allowedLaunchpads, blockedLaunchpads
-Management: minClaimAmount, outOfRangeBinsToClose, outOfRangeWaitMinutes, oorCooldownTriggerCount, oorCooldownHours, repeatDeployCooldownEnabled, repeatDeployCooldownTriggerCount, repeatDeployCooldownHours, repeatDeployCooldownScope, repeatDeployCooldownMinFeeEarnedPct, minVolumeToRebalance, stopLossPct, takeProfitPct, minSolToOpen, deployAmountSol, gasReserve, positionSizePct
+Screening: minFeeActiveTvlRatio, minTvl, maxTvl, minVolume, minOrganic, minQuoteOrganic, minHolders, minMcap, maxMcap, minBinStep, maxBinStep, timeframe, category, minTokenFeesSol, excludeHighSupplyConcentration, allowedLaunchpads, blockedLaunchpads, screeningSource, useDiscordSignals, discordSignalMode, avoidPvpSymbols, blockPvpSymbols, maxBundlePct, maxBotHoldersPct, maxTop10Pct, minTokenAgeHours, maxTokenAgeHours, athFilterPct
+Management: minClaimAmount, outOfRangeBinsToClose, outOfRangeWaitMinutes, oorCooldownTriggerCount, oorCooldownHours, repeatDeployCooldownEnabled, repeatDeployCooldownTriggerCount, repeatDeployCooldownHours, repeatDeployCooldownScope, repeatDeployCooldownMinFeeEarnedPct, minVolumeToRebalance, stopLossPct, takeProfitPct, minSolToOpen, deployAmountSol, gasReserve, positionSizePct, minFeePerTvl24h, minAgeBeforeYieldCheck, trailingTakeProfit, trailingTriggerPct, trailingDropPct, pnlSanityMaxDiffPct, solMode, autoSwapAfterClaim
 Risk: maxPositions, maxDeployAmount
-Schedule: managementIntervalMin, screeningIntervalMin
-Models: managementModel, screeningModel, generalModel
-Strategy: minBinsBelow, maxBinsBelow, defaultBinsBelow (legacy binsBelow maps to maxBinsBelow)
+Schedule: managementIntervalMin, screeningIntervalMin, healthCheckIntervalMin
+Models: managementModel, screeningModel, generalModel, temperature, maxTokens, maxSteps
+Strategy: minBinsBelow, maxBinsBelow, defaultBinsBelow
+ML (opt-in scoring + emotion): mlEnabled, mlTrainEvery, mlMinSamples, mlBatchSize, mlEpochs, mlLearningRate, mlPersonality
+Darwin (signal weighting): darwinEnabled, darwinWindowDays, darwinRecalcEvery, darwinBoost, darwinDecay, darwinFloor, darwinCeiling, darwinMinSamples
+HiveMind (cross-agent lessons): hiveMindUrl, hiveMindApiKey, agentId, hiveMindPullMode
+Agent Meridian API: publicApiKey, agentMeridianApiUrl, lpAgentRelayEnabled
+Chart Indicators: chartIndicatorsEnabled, indicatorEntryPreset, indicatorExitPreset, rsiLength, indicatorIntervals, indicatorCandles, rsiOversold, rsiOverbought, requireAllIntervals
 
 CRITICAL FORMAT: 'changes' MUST be a JSON object with key:value pairs. NOT a string, NOT an array, NOT nested.
 ✓ CORRECT: {"changes": {"minFeeActiveTvlRatio": 0.02, "maxTvl": 200000}}

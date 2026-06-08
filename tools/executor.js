@@ -259,6 +259,8 @@ function normalizeConfigValue(key, value) {
     "solMode",
     "darwinEnabled",
     "mlEnabled",
+    "chartIndicatorsEnabled",
+    "requireAllIntervals",
     "lpAgentRelayEnabled",
   ]);
   const arrayKeys = new Set(["allowedLaunchpads", "blockedLaunchpads"]);
@@ -272,6 +274,9 @@ function normalizeConfigValue(key, value) {
     "managementModel",
     "screeningModel",
     "generalModel",
+    "mlPersonality",
+    "indicatorEntryPreset",
+    "indicatorExitPreset",
     "hiveMindUrl",
     "hiveMindApiKey",
     "agentId",
@@ -279,10 +284,17 @@ function normalizeConfigValue(key, value) {
     "publicApiKey",
     "agentMeridianApiUrl",
   ]);
+  const numberKeys = new Set([
+    "mlTrainEvery", "mlMinSamples", "mlBatchSize", "mlEpochs", "mlLearningRate",
+    "darwinWindowDays", "darwinRecalcEvery", "darwinBoost", "darwinDecay",
+    "darwinFloor", "darwinCeiling", "darwinMinSamples",
+    "rsiLength", "indicatorCandles", "rsiOversold", "rsiOverbought",
+  ]);
   if (value === null) return null;
   if (booleanKeys.has(key)) return coerceBoolean(value, key);
   if (arrayKeys.has(key)) return coerceStringArray(value, key);
   if (stringKeys.has(key)) return coerceString(value, key);
+  if (numberKeys.has(key)) return coerceFiniteNumber(value, key);
   return coerceFiniteNumber(value, key);
 }
 
