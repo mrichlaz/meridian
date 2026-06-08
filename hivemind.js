@@ -5,6 +5,7 @@ import { fileURLToPath } from "url";
 import { log } from "./logger.js";
 import { config } from "./config.js";
 import { PATHS } from "./utils/paths.js";
+import { safeSetInterval } from "./utils/runtime-mode.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const USER_CONFIG_PATH = PATHS.userConfig;
@@ -238,7 +239,7 @@ export async function bootstrapHiveMind() {
 
 export function startHiveMindBackgroundSync() {
   if (!isHiveMindEnabled() || _heartbeatTimer) return null;
-  _heartbeatTimer = setInterval(() => {
+  _heartbeatTimer = safeSetInterval(() => {
     const tasks = [registerHiveMindAgent({ reason: "heartbeat" })];
     if (getPullMode() === "auto") {
       tasks.push(pullHiveMindLessons(), pullHiveMindPresets());

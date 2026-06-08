@@ -992,6 +992,18 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       }
       if (enrichedCount > 0) log("screening", `Jupiter free enrichment: stamped ${enrichedCount} pool(s) with bundle/sniper/top10/bot/dev fields`);
     }
+
+    // ── Risk bucket + volume profile labels (1A, 1B) ─────────────────
+    // These are ADVISORY labels only — they don't filter anyone out.
+    // The downstream `hasMinimumConviction()` and the score still do all
+    // the actual policy work; the labels just make it easier for the
+    // LLM to reason about borderline candidates and for the
+    // screening-snapshot logs to be self-explanatory.
+    for (const pool of eligible) {
+      pool.risk_bucket = classifyRiskBucket(pool);
+      pool.volume_profile = classifyVolumeProfile(pool);
+      pool.rejection_reasons = deriveRejectionReasons(pool, config);
+    }
   }
 
   if (eligible.length > 0) {
@@ -1178,4 +1190,97 @@ function pushFilteredReason(list, pool, reason) {
     name: pool.name || `${pool.base?.symbol || "?"}-${pool.quote?.symbol || "?"}`,
     reason,
   });
+}
+
+// ─── Risk bucket + volume profile labels (1A, 1B) ───────────────────
+// These are ADVISORY labels only — they do not filter anyone out.
+// The downstream `hasMinimumConviction()` and the score still do all
+// the actual policy work; the labels just make it easier for the LLM
+// to reason about borderline candidates and for the
+// screening-snapshot logs to be self-explanatory.
+
+const HIGH_RISK_BUNDLE_PCT = 25;
+const HIGH_RISK_SNIPER_PCT = 20;
+const HIGH_RISK_TOP10_PCT = 50;
+const NEAR_ATH_PCT = 85;
+const PVP_PENALTY_BAR = 1;
+const YOUNG_TOKEN_HOURS = 6;
+const PERSISTENCE_DEAD_HOURS = 24;
+
+export function classifyRiskBucket(pool) {
+  // Hard risk — these pools still go through but the LLM should know
+  // they're exposed. If multiple high-risk markers are present, escalate.
+  const markers = [];
+  if (pool.is_wash) markers.push("wash");
+  if (pool.is_rugpull) markers.push("rugpull");
+  if (pool.bundle_pct != null && Number(pool.bundle_pct) > HIGH_RISK_BUNDLE_PCT) markers.push(`bundle>${HIGH_RISK_BUNDLE_PCT}`);
+  if (pool.sniper_pct != null && Number(pool.sniper_pct) > HIGH_RISK_SNIPER_PCT) markers.push(`sniper>${HIGH_RISK_SNIPER_PCT}`);
+  if (pool.top10_pct != null && Number(pool.top10_pct) > HIGH_RISK_TOP10_PCT) markers.push(`top10>${HIGH_RISK_TOP10_PCT}`);
+  if (pool.price_vs_ath_pct != null && Number(pool.price_vs_ath_pct) > NEAR_ATH_PCT) markers.push(`near_ath>${NEAR_ATH_PCT}`);
+  if (pool.is_pvp) markers.push("pvp");
+  if (pool.dev_migrations != null && Number(pool.dev_migrations) > 50) markers.push("dev_migrations>50");
+  if (Number(pool.token_age_hours) < YOUNG_TOKEN_HOURS) markers.push(`age<${YOUNG_TOKEN_HOURS}h`);
+  if (markers.length >= 2) return { bucket: "high_risk", markers };
+  if (markers.length === 1) return { bucket: "elevated_risk", markers };
+
+  // Preferred — clean signal, persistent volume, smart-money or KOL present
+  const preferred = [];
+  if (Number(pool.organic_score ?? 0) >= 80) preferred.push("high_organic");
+  if (pool.smart_money_buy) preferred.push("smart_money_buy");
+  if (Number(pool.token_age_hours) >= 24) preferred.push("age>=24h");
+  if (preferred.length >= 1) return { bucket: "preferred", markers: preferred };
+
+  return { bucket: "neutral", markers: [] };
+}
+
+export function classifyVolumeProfile(pool) {
+  const vol5m = Number(pool.volume_5m ?? pool.volume_window ?? 0);
+  const vol15m = Number(pool.volume_15m ?? 0);
+  const vol30m = Number(pool.volume_30m ?? 0);
+  const vol1h = Number(pool.volume_1h ?? 0);
+  const tokenAgeHours = Number(pool.token_age_hours ?? 0);
+
+  // No volume at all — likely brand new or illiquid
+  if (vol5m <= 0 && vol30m <= 0) {
+    if (tokenAgeHours > 0 && tokenAgeHours < PERSISTENCE_DEAD_HOURS) return "bootstrapping";
+    return "dead";
+  }
+
+  // 5m present but 30m is 0 or much lower — likely a single recent burst
+  if (vol5m > 0 && (vol30m === 0 || vol5m > vol30m * 2)) {
+    return "burst";
+  }
+
+  // 5m significantly lower than 30m — momentum fading
+  if (vol30m > 0 && vol5m < vol30m * 0.5) {
+    return "cooling";
+  }
+
+  // Sustained across multiple windows
+  if (vol5m > 0 && (vol30m > 0 || vol1h > 0) && (vol15m > 0 || vol30m > 0)) {
+    return "persistent";
+  }
+
+  return "neutral";
+}
+
+export function deriveRejectionReasons(pool, config) {
+  const reasons = [];
+  if (!pool) return reasons;
+  const s = (config && config.screening) || {};
+  if (Number(pool.tvl ?? 0) < Number(s.minTvl ?? 0)) reasons.push("low_tvl");
+  if (Number(pool.fee_active_tvl_ratio ?? 0) < Number(s.minFeeActiveTvlRatio ?? 0)) reasons.push("low_fee_tvl");
+  if (Number(pool.volume_window ?? 0) < Number(s.minVolume ?? 0)) reasons.push("low_volume");
+  if (Number(pool.organic_score ?? 0) < Number(s.minOrganic ?? 0)) reasons.push("low_organic");
+  if (Number(pool.holders ?? 0) < Number(s.minHolders ?? 0)) reasons.push("low_holders");
+  if (Number(pool.mcap ?? 0) < Number(s.minMcap ?? 0)) reasons.push("low_mcap");
+  if (Number(pool.mcap ?? 0) > Number(s.maxMcap ?? Infinity)) reasons.push("high_mcap");
+  if (pool.bundle_pct != null && Number(pool.bundle_pct) > Number(s.maxBundlePct ?? 100)) reasons.push("high_bundle");
+  if (pool.sniper_pct != null && Number(pool.sniper_pct) > Number(s.maxBotHoldersPct ?? 100)) reasons.push("high_sniper");
+  if (pool.bot_holders_pct != null && Number(pool.bot_holders_pct) > Number(s.maxBotHoldersPct ?? 100)) reasons.push("high_bot");
+  if (pool.top10_pct != null && Number(pool.top10_pct) > Number(s.maxTop10Pct ?? 100)) reasons.push("high_top10");
+  if (Number(pool.token_age_hours) < Number(s.minTokenAgeHours ?? Infinity)) reasons.push("too_young");
+  if (s.athFilterPct != null && Number(pool.price_vs_ath_pct ?? 0) > 100 + Number(s.athFilterPct)) reasons.push("near_ath");
+  if (Number(pool.volatility ?? 0) <= 0) reasons.push("unusable_volatility");
+  return reasons;
 }

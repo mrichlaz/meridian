@@ -39,6 +39,7 @@ export const PATHS = {
   strategyLibrary: path.join(DATA_ROOT, "strategy-library.json"),
   deployerBlacklist: path.join(DATA_ROOT, "deployer-blacklist.json"),
   discordSignals: path.join(DATA_ROOT, "discord-signals.json"),
+  performanceRejects: path.join(DATA_ROOT, "performance-rejects.json"),
   // ML / deep learning
   mlModel: path.join(DATA_ROOT, "ml", "ml-model.json"),
   mlDir: path.join(DATA_ROOT, "ml"),

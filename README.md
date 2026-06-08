@@ -19,6 +19,53 @@ Meridian runs continuous screening and management cycles, deploying capital into
 
 ---
 
+## What's new (recent improvements)
+
+The repository is being actively improved. This section documents the latest completed changes so contributors and operators know what is in place.
+
+### Pipeline correctness
+
+- **Performance record validator (3A)** — `recordPerformance()` now runs a centralized `validatePerformanceRecord()` before saving. Records with missing identifiers, non-finite numerics, SOL/USD unit mix, absurd closed PnL without stop-loss reason, or inverted values are quarantined to `data/performance-rejects.json` (capped at 200 lines) instead of polluting `lessons.json`. Use `getPerformanceRejects(limit)` to inspect.
+- **Safer threshold evolution (3C)** — `evolveThresholds()` now iterates a centralized `THRESHOLD_SCHEMA` (in `config.js`) covering 16 live keys. The legacy `maxVolatility` / `minFeeTvlRatio` keys that silently no-op'd are removed. Evolution now adjusts `minFeeActiveTvlRatio`, `minOrganic`, `minTvl`, `maxTvl`, `takeProfitPct`, `stopLossPct`, and the concentration thresholds when performance data shows a real signal.
+
+### Screening
+
+- **Staggered timeframe ladder** — when the configured timeframe returns 0 pools, the screener now steps through the ladder (e.g. 5m → 15m → 30m → 1h → 2h → 4h → 12h → 24h) one step at a time. Broken upstream endpoints (e.g. 15m's recent 400) are caught and the ladder continues.
+- **Jupiter free-tier enrichment** — when OKX advanced-info 402s, the pipeline now falls back to Jupiter's free `/v1/assets/search` API to stamp `bundle_pct`, `sniper_pct`, `top10_pct`, `bot_holders_pct`, `dev_pct`, `dev_migrations`, and `insider_pct` on every candidate. Only fills missing fields, so OKX-stamped data still wins.
+- **Risk bucket + volume profile labels (1A, 1B)** — every candidate is labeled with `risk_bucket: "preferred" | "neutral" | "elevated_risk" | "high_risk"` and `volume_profile: "persistent" | "burst" | "cooling" | "bootstrapping" | "dead" | "neutral"`. **Advisory only** — they do not filter anyone out. The downstream `hasMinimumConviction()` and the score still do the actual policy work.
+- **Adaptive deploy profile** — `chooseAdaptiveDeployProfile()` now blocks auto-deploy on tokens younger than 2h, widens the bin range and reduces size on high-volatility young tokens, and uses the more aggressive `spot` strategy for momentum-style setups.
+- **Better scoring** — `scoreCandidate()` reads both the OKX/Jupiter flat field names and the GMGN-prefixed equivalents, so the score is consistent regardless of the screening source.
+
+### Management
+
+- **Trend-aware exits (2A)** — new helpers in `utils/position-trend.js`:
+  - `isFeeGrowthDecelerating(pool, memory)` — flat/declining unclaimed fees
+  - `isRecoveryImproving(pool, memory)` — PnL trend recovering
+  - `isRangeDriftAccelerating(pool, memory)` — PnL trend declining
+  - `isFeeGrowthAccelerating(pool, memory)` — strong new-fee signal
+  - `assessTrend(position, memory)` — bundles all into `{ level, reasons }`
+  - `getDeterministicCloseRule()` now has a new "Rule 4b" that escalates an OOR close when PnL is declining.
+- **Stronger close PnL fallback** — fixed the path that reported "PnL: +$0.00 (+0.00%)" for closed positions. `deriveCloseMetricsFromTrackedAndLive()` and the cached-fallback path now derive a coherent PnL USD/% from the live or cached snapshot.
+- **RPC 429 retry/backoff** — all deploy, claim, and close transactions go through `sendAndConfirmWithRetry()` which retries 429/5xx/timeout errors with exponential backoff (1.5s → 8s) before giving up. Persistent 429s raise a clear "add more RPC capacity" error.
+
+### Reliability
+
+- **CLI mode guard (4A)** — new `utils/runtime-mode.js` module sets `MERIDIAN_RUNTIME_MODE` to one of `cli | repl | telegram | daemon`. Long-lived timers (pnlPollInterval, hivemind heartbeat, REPL prompt refresh, cache invalidators) are wrapped in `safeSetInterval` which calls `unref()` in CLI mode so one-shot commands never hang. `setRuntimeMode("cli")` is set at the top of `cli.js`.
+- **Shared fetch/retry helper (4B)** — `utils/fetch-json.js` provides `fetchJsonWithRetry(url, options)` with timeout, 429/5xx/408 retry, exponential backoff with jitter, and structured onRetry callbacks. Existing tool-level retries are still in place; new callers should prefer this helper.
+- **Structured screening logs (4C)** — every screening cycle now appends a JSONL line to `data/screening-snapshots/YYYY-MM-DD.jsonl` (capped at 5000 lines per file). The new `/screening-stats` Telegram command shows today's funnel summary, timeframes used, and top rejection reasons.
+
+### Operator UX
+
+- **Overhauled Telegram formatter** (`utils/telegram-formatter.js`):
+  - new helpers: `formatWalletStatus`, `formatPositionCard`, `formatPositionPnLCard`, `formatCandidatesList`, `formatPoolDetail`, `formatBalance`, `formatConfigSnapshot`, `formatThresholds`, `formatLessons`, `formatPerformance`, `formatError`, `formatHelp`, `formatDeployResult`, `formatCloseResult`, `formatClaimResult`
+  - `formatPositionPnLCard()` is now used by the `pnl:<addr>` callback button — replacing the old "answerCallbackQuery" toast that only showed a truncated "PnL: ?%" line. The card shows realized PnL, initial → final, fees, range efficiency, age, peak PnL, and a "Back" button.
+  - `/help` is now generated by the formatter and grouped by category.
+  - `/balance` and `/performance` and `/screening-stats` are new commands.
+- **Overhauled `index.js` Telegram handlers** — all status/positions/candidates/thresholds/lessons/balance/performance handlers use the new formatter, run in a consistent style, and surface runtime mode where useful.
+- **Full `user-config.json` schema** — the file now exposes all the structured keys (screening, strategy, management, schedule, llm, ml, darwin, hiveMind) without changing your existing numeric values. Keys can be set by the CLI (`node cli.js config set <key> <value>`), the LLM (`update_config({ changes: {...} })`), or by editing the file directly.
+
+---
+
 ## How it works
 
 Meridian runs a **ReAct agent loop** — each cycle the LLM reasons over live data, calls tools, and acts. Two specialized agents run on independent cron schedules:
@@ -405,11 +452,34 @@ Meridian sends notifications automatically for:
 
 ### Telegram commands
 
+The table below is generated from `formatHelp()` in `utils/telegram-formatter.js`. Inline buttons appear under each reply (status footer, position actions, screening actions, etc.).
+
 | Command | Action |
 |---|---|
-| `/positions` | List open positions with progress bar |
-| `/close <n>` | Close position by list index |
-| `/set <n> <note>` | Set a note on a position |
+| `/help` | Show grouped help (wallet, screening, config, learning, lifecycle) |
+| `/status`, `/wallet` | Wallet + portfolio + risk summary |
+| `/balance` | Detailed balance including SPL tokens |
+| `/positions` | List open DLMM positions (one card per position with claim/close/PnL buttons) |
+| `/pool <n>` | Detail card for one position |
+| `/screen`, `/candidates` | Refresh deterministic candidate list (no deploy) |
+| `/autoscreen` | Run full AI screening cycle (may deploy) |
+| `/deploy <n>` | Deploy into cached candidate N |
+| `/close <n>` | Close position by index |
+| `/closeall` | Close all open positions |
+| `/set <n> <note>` | Attach a note to a position |
+| `/config` | Full config snapshot |
+| `/thresholds` | Show current screening thresholds + performance summary |
+| `/settings` | Button-driven config menu |
+| `/setcfg <key> <value>` | Update persisted config |
+| `/learn` | Study top LPers from current pool |
+| `/lessons` | Recent saved lessons |
+| `/performance` | Win rate / avg PnL / total fees / recent closes |
+| `/screening-stats` | Today's screening funnel: cycles, screened, eligible, timeframes, top rejections |
+| `/evolve` | Manually run threshold evolution |
+| `/hive`, `/hive pull` | HiveMind sync status / manual pull |
+| `/briefing` | Morning briefing (HTML) |
+| `/pause`, `/resume` | Pause / resume cron cycles |
+| `/stop` | Shut down the agent |
 
 You can also chat freely via Telegram using the same interface as the REPL.
 

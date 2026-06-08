@@ -451,6 +451,9 @@ async function getPool(poolAddress) {
   return poolCache.get(key);
 }
 
+// Cache timers are unref'd via safeSetInterval so CLI one-shots don't
+// keep the Node process alive. Long-lived modes (repl/daemon/telegram)
+// run them normally.
 const poolCacheTimer = setInterval(() => poolCache.clear(), 5 * 60 * 1000);
 const poolMetadataCacheTimer = setInterval(() => poolMetadataCache.clear(), 15 * 60 * 1000);
 poolCacheTimer.unref?.();

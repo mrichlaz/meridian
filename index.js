@@ -29,6 +29,8 @@ import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
+import { logScreeningSnapshot, summarizeScreeningSnapshots, readScreeningSnapshots } from "./screening-snapshot.js";
+import { isRangeDriftAccelerating, isRecoveryImproving, isFeeGrowthDecelerating, isFeeGrowthAccelerating, assessTrend } from "./utils/position-trend.js";
 import { startBotTracker } from "./tools/bot-tracker.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
@@ -37,7 +39,27 @@ import { stageSignals, stageMlFeatures } from "./signal-tracker.js";
 import { getWeightsSummary } from "./signal-weights.js";
 import { bootstrapHiveMind, ensureAgentId, getHiveMindPullMode, isHiveMindEnabled, pullHiveMindLessons, pullHiveMindPresets, registerHiveMindAgent, startHiveMindBackgroundSync } from "./hivemind.js";
 import { appendDecision } from "./decision-log.js";
-import { formatScreeningReport, formatManagementReport, liveStage } from "./utils/telegram-formatter.js";
+import {
+  formatScreeningReport,
+  formatManagementReport,
+  formatWalletStatus,
+  formatPositionCard,
+  formatPositionPnLCard,
+  formatCandidatesList,
+  formatPoolDetail,
+  formatBalance,
+  formatConfigSnapshot as formatConfigSnapshotCard,
+  formatThresholds,
+  formatLessons,
+  formatPerformance,
+  formatError,
+  formatHelp,
+  formatDeployResult,
+  formatCloseResult,
+  formatClaimResult,
+  liveStage,
+} from "./utils/telegram-formatter.js";
+import { setRuntimeMode as setRuntimeModeUtil, RUNTIME_MODES, safeSetInterval, safeSetTimeout, isCli, isTelegram } from "./utils/runtime-mode.js";
 
 const entrypointPath = process.env.pm_exec_path || process.argv[1];
 const isMain = entrypointPath
@@ -45,8 +67,21 @@ const isMain = entrypointPath
   : false;
 
 if (isMain) {
+  // Resolve runtime mode (repl / telegram / daemon) — overrides only
+  // if it wasn't already set explicitly via env or setRuntimeMode.
+  if (!process.env.MERIDIAN_RUNTIME_MODE) {
+    if (process.env.TELEGRAM_BOT_TOKEN) {
+      setRuntimeModeUtil(RUNTIME_MODES.TELEGRAM);
+    } else if (process.stdin && process.stdin.isTTY) {
+      setRuntimeModeUtil(RUNTIME_MODES.REPL);
+    } else {
+      setRuntimeModeUtil(RUNTIME_MODES.DAEMON);
+    }
+  }
+
   log("startup", "DLMM LP Agent starting...");
   log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
+  log("startup", `Runtime mode: ${process.env.MERIDIAN_RUNTIME_MODE}`);
   log("startup", `Model: ${process.env.LLM_MODEL || "hermes-3-405b"}`);
   ensureAgentId();
   bootstrapHiveMind().catch((error) => log("hivemind_warn", `Bootstrap failed: ${error.message}`));
@@ -473,6 +508,8 @@ export async function runScreeningCycle({ silent = false } = {}) {
     const earlyFilteredExamples = topCandidates?.filtered_examples || [];
     const gmgnStageCounts = topCandidates?.stage_counts ?? null;
     const gmgnAllFiltered = topCandidates?.all_filtered ?? [];
+    // Stash the full top-level result for the screening-snapshot log
+    _lastScreeningResult = topCandidates || {};
 
     const allCandidates = [];
     // Enrich in small staggered batches to avoid RPC 429 floods.
@@ -876,6 +913,22 @@ IMPORTANT:
       });
     } catch {}
 
+    // Persist a structured funnel snapshot to data/screening-snapshots/*.jsonl
+    try {
+      const lastResult = _lastScreeningResult || {};
+      logScreeningSnapshot({
+        runtime_mode: process.env.MERIDIAN_RUNTIME_MODE,
+        total_screened: lastResult.total_screened ?? null,
+        total_eligible: lastResult.total_eligible ?? null,
+        discovery_timeframe: lastResult.discovery_timeframe ?? null,
+        bot_tracked_injected: !!lastResult.bot_tracked_injected,
+        deployed: deploySucceeded && deployAttempted,
+        pool: deployPool,
+        pool_name: deployPoolName,
+        filtered_examples: (lastResult.filtered_examples || []).slice(0, 5),
+      });
+      _lastScreeningResult = null;
+    } catch {}
     _screeningBusy = false;
     if (!silent && telegramEnabled()) {
       if (screenReport) {
@@ -949,7 +1002,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
 
   // Lightweight 30s PnL poller — updates trailing TP state between management cycles, no LLM
   let _pnlPollBusy = false;
-  const pnlPollInterval = setInterval(async () => {
+  const pnlPollInterval = safeSetInterval(async () => {
     if (_managementBusy || _screeningBusy || _pnlPollBusy) return;
     if (getTrackedPositions(true).length === 0) return;
     _pnlPollBusy = true;
@@ -1109,6 +1162,16 @@ function getDeterministicCloseRule(position, managementConfig) {
   ) {
     return { action: "CLOSE", rule: 4, reason: "OOR" };
   }
+  // ── Rule 4b (trend-aware) — escalate OOR close if PnL is declining ─────
+  if (
+    position.in_range === false &&
+    (position.minutes_out_of_range ?? 0) >= Math.max(5, Math.floor(managementConfig.outOfRangeWaitMinutes * 0.5))
+  ) {
+    const memory = recallForPool(position.pool);
+    if (isRangeDriftAccelerating(memory, position.position)) {
+      return { action: "CLOSE", rule: "4b", reason: "OOR + declining PnL" };
+    }
+  }
   if (
     position.fee_per_tvl_24h != null &&
     position.fee_per_tvl_24h < managementConfig.minFeePerTvl24h &&
@@ -1116,7 +1179,7 @@ function getDeterministicCloseRule(position, managementConfig) {
   ) {
     const memory = recallForPool(position.pool);
     const snapshots = Array.isArray(memory?.snapshots) ? memory.snapshots : [];
-    const recent = snapshots.filter((s) => s.position === position.position).slice(-2);
+    const recent = snapshots.filter((s) => s.position === position.position).slice(-3);
     const feeGrowthFlat = recent.length >= 2
       ? Math.abs(Number(recent[1].unclaimed_fees_usd || 0) - Number(recent[0].unclaimed_fees_usd || 0)) < 0.02
       : false;
@@ -1142,6 +1205,7 @@ const MAX_HISTORY = 20;    // keep last 20 messages (10 exchanges)
 let _ttyInterface = null;
 let _latestCandidates = [];
 let _latestCandidatesAt = null;
+let _lastScreeningResult = null;
 
 function setLatestCandidates(candidates = []) {
   _latestCandidates = Array.isArray(candidates) ? candidates : [];
@@ -1169,18 +1233,7 @@ function describeLatestCandidates(limit = 5) {
   return `Latest candidates (${_latestCandidates.length}) — updated ${age}\n\n${lines.join("\n")}`;
 }
 
-function formatWalletStatus(wallet, positions) {
-  const deployAmount = computeDeployAmount(wallet.sol);
-  const hive = isHiveMindEnabled() ? "on" : "off";
-  return [
-    `Wallet: ${wallet.sol} SOL ($${wallet.sol_usd})`,
-    `SOL price: $${wallet.sol_price}`,
-    `Open positions: ${positions.total_positions}/${config.risk.maxPositions}`,
-    `Next deploy amount: ${deployAmount} SOL`,
-    `Dry run: ${process.env.DRY_RUN === "true" ? "yes" : "no"}`,
-    `HiveMind: ${hive}`,
-  ].join("\n");
-}
+
 
 function formatConfigSnapshot() {
   return [
@@ -1639,9 +1692,11 @@ async function telegramHandler(msg) {
       if (cmd === "/status" || cmd === "/wallet") {
         try {
           const [wallet, positions] = await Promise.all([getWalletBalances(), getMyPositions({ force: true })]);
-          const { formatStatusCard } = await import("./utils/telegram-formatter.js");
           const { getCurrentState } = await import("./ml/emotions.js");
-          const { text: cardText, buttons: cardBtns } = formatStatusCard({ wallet, positions, ml: getCurrentState(), config });
+          const { text: cardText, buttons: cardBtns } = formatWalletStatus({
+            wallet, positions, ml: getCurrentState(), config,
+            runtimeMode: process.env.MERIDIAN_RUNTIME_MODE,
+          });
           await sendMessageWithButtons(cardText, cardBtns).catch(() => {});
         } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
         return;
@@ -1671,7 +1726,26 @@ async function telegramHandler(msg) {
         const { getPositionPnl } = await import("./tools/dlmm.js");
         const tracked = getTrackedPosition(posAddr);
         const pnl = await getPositionPnl({ pool_address: tracked?.pool, position_address: posAddr });
-        await answerCallbackQuery(msg.callbackQueryId, `PnL: ${pnl.pnlPct ?? "?"}%`).catch(() => {});
+        const { formatPositionPnLCard } = await import("./utils/telegram-formatter.js");
+        const positionView = {
+          position: posAddr,
+          pool: tracked?.pool,
+          pair: tracked?.pool_name,
+          pnl_pct: pnl?.pnl_pct,
+          pnl_usd: pnl?.pnl_usd,
+          initial_value_usd: pnl?.initial_value_usd,
+          final_value_usd: pnl?.final_value_usd,
+          fees_earned_usd: pnl?.fees_earned_usd,
+          unclaimed_fees_usd: pnl?.unclaimed_fees_usd,
+          range_efficiency: pnl?.range_efficiency,
+          fee_per_tvl_24h: pnl?.fee_per_tvl_24h,
+          close_reason: pnl?.close_reason,
+        };
+        const { text: pnlText, buttons: pnlBtns } = formatPositionPnLCard(positionView, {
+          solMode: config.management.solMode === true,
+        });
+        await answerCallbackQuery(msg.callbackQueryId, `PnL: ${pnl?.pnl_pct != null ? `${pnl.pnl_pct.toFixed(2)}%` : "?"}`).catch(() => {});
+        await sendMessageWithButtons(pnlText, pnlBtns).catch(() => {});
       } catch (e) { await answerCallbackQuery(msg.callbackQueryId, e.message).catch(() => {}); }
       return;
     }
@@ -1725,7 +1799,7 @@ async function telegramHandler(msg) {
   }
 
   if (text === "/help") {
-    await sendMessage(formatHelpText()).catch(() => {});
+    await sendMessage(formatHelp()).catch(() => {});
     return;
   }
 
@@ -1733,8 +1807,10 @@ async function telegramHandler(msg) {
     try {
       const [wallet, positions] = await Promise.all([getWalletBalances(), getMyPositions({ force: true })]);
       const { getCurrentState } = await import("./ml/emotions.js");
-      const { formatStatusCard } = await import("./utils/telegram-formatter.js");
-      const { text: cardText, buttons: cardBtns } = formatStatusCard({ wallet, positions, ml: getCurrentState(), config });
+      const { text: cardText, buttons: cardBtns } = formatWalletStatus({
+        wallet, positions, ml: getCurrentState(), config,
+        runtimeMode: process.env.MERIDIAN_RUNTIME_MODE,
+      });
       await sendMessageWithButtons(cardText, cardBtns).catch(() => {});
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
@@ -1743,8 +1819,8 @@ async function telegramHandler(msg) {
   }
 
   if (text === "/config") {
-    const { ACTION_BUTTONS, esc } = await import("./utils/telegram-formatter.js");
-    await sendMessageWithButtons(esc(formatConfigSnapshot()), ACTION_BUTTONS.status()).catch(() => {});
+    const { text, buttons } = formatConfigSnapshotCard(config, { runtimeMode: process.env.MERIDIAN_RUNTIME_MODE });
+    await sendMessageWithButtons(text, buttons).catch(() => {});
     return;
   }
 
@@ -1752,9 +1828,8 @@ async function telegramHandler(msg) {
     try {
       const { positions, total_positions } = await getMyPositions({ force: true });
       if (total_positions === 0) { await sendMessage("No open positions."); return; }
-      const { formatPositionCard } = await import("./utils/telegram-formatter.js");
       for (const p of positions.slice(0, 5)) {
-        const { text: cardText, buttons: cardBtns } = formatPositionCard(p);
+        const { text: cardText, buttons: cardBtns } = formatPositionCard(p, { solMode: config.management.solMode === true });
         await sendMessageWithButtons(cardText, cardBtns).catch(() => {});
       }
       if (positions.length > 5) {
@@ -1770,8 +1845,7 @@ async function telegramHandler(msg) {
       const idx = parseInt(poolMatch[1]) - 1;
       const { positions } = await getMyPositions({ force: true });
       if (idx < 0 || idx >= positions.length) { await sendMessage("Invalid number. Use /positions first."); return; }
-      const { formatPositionCard } = await import("./utils/telegram-formatter.js");
-      const { text: cardText, buttons: cardBtns } = formatPositionCard(positions[idx]);
+      const { text: cardText, buttons: cardBtns } = formatPositionCard(positions[idx], { solMode: config.management.solMode === true });
       await sendMessageWithButtons(cardText, cardBtns).catch(() => {});
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
@@ -1872,8 +1946,19 @@ async function telegramHandler(msg) {
   }
 
   if (text === "/candidates") {
-    const { ACTION_BUTTONS, esc } = await import("./utils/telegram-formatter.js");
-    await sendMessageWithButtons(esc(describeLatestCandidates(5)), ACTION_BUTTONS.screening()).catch(() => {});
+    const recent = _latestCandidates.slice(0, 5);
+    if (!recent.length) {
+      const { ACTION_BUTTONS } = await import("./utils/telegram-formatter.js");
+      const { text: emptyText, buttons: emptyBtns } = formatCandidatesList([], { title: "Top Candidates" });
+      await sendMessageWithButtons(emptyText, emptyBtns).catch(() => {});
+      return;
+    }
+    const discovery_tf = recent[0]?.discovery_timeframe || config.screening.timeframe;
+    const { text: cText, buttons: cBtns } = formatCandidatesList(recent, {
+      title: "Top Candidates",
+      timeWindow: discovery_tf,
+    });
+    await sendMessageWithButtons(cText, cBtns).catch(() => {});
     return;
   }
 
@@ -1952,26 +2037,12 @@ async function telegramHandler(msg) {
 
   if (text === "/thresholds") {
     try {
-      const s = config.screening;
       const perf = getPerformanceSummary();
-      const lines = [
-        `<b>Screening Thresholds</b>`,
-        `fee/tvl min: <code>${s.minFeeActiveTvlRatio}</code>`,
-        `tvl: <code>${s.minTvl}–${s.maxTvl}</code>`,
-        `mcap: <code>${s.minMcap}–${s.maxMcap}</code>`,
-        `volume min: <code>${s.minVolume}</code>`,
-        `organic min: <code>${s.minOrganic}</code>`,
-        `holders min: <code>${s.minHolders}</code>`,
-        `bin step: <code>${s.minBinStep}–${s.maxBinStep}</code>`,
-        `timeframe: <code>${s.timeframe}</code>`,
-        `token fees min: <code>${s.minTokenFeesSol} SOL</code>`,
-        `bot holders max: <code>${s.maxBotHoldersPct}%</code>`,
-        `top10 max: <code>${s.maxTop10Pct}%</code>`,
-        perf
-          ? `\n<b>Performance</b>\n${perf.total_positions_closed} closed | ${perf.win_rate_pct}% win | avg PnL ${perf.avg_pnl_pct}%`
-          : `\nNo closed positions yet.`,
-      ].join("\n");
-      await sendHTML(lines).catch(() => {});
+      const { text: thresholdsText, buttons: thresholdBtns } = formatThresholds(config);
+      const tail = perf
+        ? `\n<b>Performance</b>\n${perf.total_positions_closed} closed | ${perf.win_rate_pct}% win | avg PnL ${perf.avg_pnl_pct}%`
+        : `\n<i>No closed positions yet.</i>`;
+      await sendMessageWithButtons(thresholdsText + tail, thresholdBtns).catch(() => {});
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
@@ -2031,15 +2102,72 @@ async function telegramHandler(msg) {
   if (text === "/lessons") {
     try {
       const { listLessons } = await import("./lessons.js");
-      const data = listLessons({ limit: 10 });
+      const data = listLessons({ limit: 20 });
       if (!data.lessons.length) {
         await sendMessage("No lessons saved yet. Use /learn to generate them.").catch(() => {});
         return;
       }
-      const lines = ["<b>📚 Recent Lessons</b>"];
-      for (const l of data.lessons) {
-        const tag = l.outcome === "good" ? "✅" : l.outcome === "bad" ? "🔴" : "📝";
-        lines.push(`${tag} <code>#${l.id}</code> ${l.rule.slice(0, 140)}`);
+      const { text: lessonsText, buttons: lessonsBtns } = formatLessons(data.lessons, { limit: 20 });
+      await sendMessageWithButtons(lessonsText, lessonsBtns).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/balance") {
+    try {
+      const wallet = await getWalletBalances();
+      const { text: balanceText, buttons: balanceBtns } = formatBalance(wallet, {
+        solMode: config.management.solMode === true,
+      });
+      await sendMessageWithButtons(balanceText, balanceBtns).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/performance") {
+    try {
+      const { getPerformanceHistory, getPerformanceSummary } = await import("./lessons.js");
+      const history = getPerformanceHistory({ hours: 999999, limit: 50 });
+      const summary = getPerformanceSummary();
+      const { text: perfText, buttons: perfBtns } = formatPerformance(summary, history, { limit: 5 });
+      await sendMessageWithButtons(perfText, perfBtns).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/screening-stats") {
+    try {
+      const snapshots = readScreeningSnapshots(new Date(), 200);
+      const summary = summarizeScreeningSnapshots(snapshots);
+      const lines = [
+        "<b>📊 Screening Stats (today, UTC)</b>",
+        `Cycles: <code>${summary.cycles}</code>`,
+        `Total screened: <code>${summary.total_screened}</code>`,
+        `Total eligible: <code>${summary.total_eligible}</code>`,
+        `Bot-tracked injected: <code>${summary.bot_tracked_injected}</code>`,
+      ];
+      if (Object.keys(summary.discovery_timeframes).length) {
+        lines.push("");
+        lines.push("<b>Timeframes used:</b>");
+        for (const [tf, count] of Object.entries(summary.discovery_timeframes)) {
+          lines.push(`  • ${tf}: ${count}`);
+        }
+      }
+      if (Object.keys(summary.rejection_counts).length) {
+        lines.push("");
+        lines.push("<b>Top rejections:</b>");
+        const top = Object.entries(summary.rejection_counts)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 8);
+        for (const [reason, count] of top) {
+          lines.push(`  • ${reason}: ${count}`);
+        }
       }
       await sendHTML(lines.join("\n")).catch(() => {});
     } catch (e) {
@@ -2149,8 +2277,8 @@ if (isMain && isTTY) {
   });
   _ttyInterface = rl;
 
-  // Update prompt countdown every 10 seconds
-  setInterval(() => {
+  // Update prompt countdown every 10 seconds (REPL only)
+  safeSetInterval(() => {
     if (!busy) {
       rl.setPrompt(buildPrompt());
       rl.prompt(true); // true = preserve current line

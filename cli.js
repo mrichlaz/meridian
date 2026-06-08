@@ -5,6 +5,7 @@
  */
 
 import { loadEnv } from "./envcrypt.js";
+import { setRuntimeMode, RUNTIME_MODES } from "./utils/runtime-mode.js";
 import { parseArgs } from "util";
 import os from "os";
 import fs from "fs";
@@ -12,6 +13,9 @@ import path from "path";
 
 // ─── DRY_RUN must be set before any tool imports ─────────────────
 if (process.argv.includes("--dry-run")) process.env.DRY_RUN = "true";
+
+// ─── Runtime mode: this entry point is always a one-shot CLI ─────
+setRuntimeMode(RUNTIME_MODES.CLI);
 
 // ─── Load .env from ~/.meridian/ if present ──────────────────────
 const meridianDir = path.join(os.homedir(), ".meridian");

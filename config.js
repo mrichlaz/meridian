@@ -317,6 +317,157 @@ export function computeDeployAmount(walletSol) {
 }
 
 /**
+ * Centralized threshold schema used by `evolveThresholds()`.
+ * Each entry maps a persisted user-config key to:
+ *  - section: where the live value lives
+ *  - field:   the actual property on that section
+ *  - min/max: hard clamp the evolution must respect
+ *  - step:    max fractional change per evolution step
+ *
+ * Only keys listed here can be auto-evolved. The legacy `maxVolatility` /
+ * `minFeeTvlRatio` keys are intentionally omitted because the live config
+ * uses `minFeeActiveTvlRatio` (and no `maxVolatility` key exists).
+ */
+export const THRESHOLD_SCHEMA = {
+  minFeeActiveTvlRatio: {
+    section: "screening",
+    field: "minFeeActiveTvlRatio",
+    min: 0.01,
+    max: 5.0,
+    step: 0.2,
+    decimals: 3,
+  },
+  minTvl: {
+    section: "screening",
+    field: "minTvl",
+    min: 1000,
+    max: 100_000,
+    step: 0.2,
+    decimals: 0,
+  },
+  maxTvl: {
+    section: "screening",
+    field: "maxTvl",
+    min: 50_000,
+    max: 2_000_000,
+    step: 0.2,
+    decimals: 0,
+  },
+  minVolume: {
+    section: "screening",
+    field: "minVolume",
+    min: 100,
+    max: 100_000,
+    step: 0.2,
+    decimals: 0,
+  },
+  minOrganic: {
+    section: "screening",
+    field: "minOrganic",
+    min: 30,
+    max: 95,
+    step: 0.2,
+    decimals: 0,
+  },
+  minQuoteOrganic: {
+    section: "screening",
+    field: "minQuoteOrganic",
+    min: 30,
+    max: 95,
+    step: 0.2,
+    decimals: 0,
+  },
+  minHolders: {
+    section: "screening",
+    field: "minHolders",
+    min: 100,
+    max: 5_000,
+    step: 0.2,
+    decimals: 0,
+  },
+  minMcap: {
+    section: "screening",
+    field: "minMcap",
+    min: 50_000,
+    max: 1_000_000,
+    step: 0.2,
+    decimals: 0,
+  },
+  maxMcap: {
+    section: "screening",
+    field: "maxMcap",
+    min: 1_000_000,
+    max: 50_000_000,
+    step: 0.2,
+    decimals: 0,
+  },
+  maxBundlePct: {
+    section: "screening",
+    field: "maxBundlePct",
+    min: 5,
+    max: 90,
+    step: 0.2,
+    decimals: 0,
+  },
+  maxBotHoldersPct: {
+    section: "screening",
+    field: "maxBotHoldersPct",
+    min: 5,
+    max: 90,
+    step: 0.2,
+    decimals: 0,
+  },
+  maxTop10Pct: {
+    section: "screening",
+    field: "maxTop10Pct",
+    min: 10,
+    max: 95,
+    step: 0.2,
+    decimals: 0,
+  },
+  takeProfitPct: {
+    section: "management",
+    field: "takeProfitPct",
+    min: 1,
+    max: 100,
+    step: 0.2,
+    decimals: 1,
+  },
+  stopLossPct: {
+    section: "management",
+    field: "stopLossPct",
+    min: -95,
+    max: -1,
+    step: 0.2,
+    decimals: 1,
+  },
+  outOfRangeWaitMinutes: {
+    section: "management",
+    field: "outOfRangeWaitMinutes",
+    min: 5,
+    max: 180,
+    step: 0.2,
+    decimals: 0,
+  },
+  minFeePerTvl24h: {
+    section: "management",
+    field: "minFeePerTvl24h",
+    min: 1,
+    max: 50,
+    step: 0.2,
+    decimals: 1,
+  },
+};
+
+export function getThresholdSpec(persistedKey) {
+  return THRESHOLD_SCHEMA[persistedKey] || null;
+}
+
+export function listThresholdKeys() {
+  return Object.keys(THRESHOLD_SCHEMA);
+}
+
+/**
  * Reload user-config.json and apply updated screening thresholds to the
  * in-memory config object. Called after threshold evolution so the next
  * agent cycle uses the evolved values without a restart.
