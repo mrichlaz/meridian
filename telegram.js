@@ -140,7 +140,23 @@ export async function sendMessageWithButtons(text, inlineKeyboard) {
 
 export async function sendHTML(html) {
   if (!TOKEN || !chatId) return;
-  return postTelegram("sendMessage", { text: html.slice(0, 4096), parse_mode: "HTML" });
+  const text = String(html || "").slice(0, 4096);
+  const result = await postTelegram("sendMessage", { text, parse_mode: "HTML" });
+  if (result) return result;
+
+  // Reversible safety net: if Telegram rejects HTML entity parsing,
+  // fall back to plain text so commands like /help still return something
+  // instead of failing silently. Delete this block if you want strict HTML-only behavior.
+  const plain = text
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n\n")
+    .replace(/<[^>]*>/g, "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+    .trim()
+    .slice(0, 4096);
+  return postTelegram("sendMessage", { text: plain });
 }
 
 export async function editMessage(text, messageId) {
