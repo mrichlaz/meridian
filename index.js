@@ -2193,7 +2193,7 @@ async function telegramHandler(msg) {
     return;
   }
 
-  if (text === "/ml-status" || text === "/ml") {
+  if (text === "/ml-status" || text === "/mlstatus" || text === "/ml") {
     try {
       const { mlStatus } = await import("./ml/cli.js");
       const text = mlStatus(config);
@@ -2236,7 +2236,7 @@ async function telegramHandler(msg) {
     return;
   }
 
-  if (text === "/ml-train") {
+  if (text === "/ml-train" || text === "/mltrain") {
     try {
       const { trainModel, loadTrainingData } = await import("./ml/trainer.js");
       const { getCurrentState } = await import("./ml/emotions.js");
@@ -2330,7 +2330,7 @@ async function telegramHandler(msg) {
     return;
   }
 
-  if (text === "/screening-stats") {
+  if (text === "/screening-stats" || text === "/screeningstats") {
     try {
       const snapshots = readScreeningSnapshots(new Date(), 200);
       const summary = summarizeScreeningSnapshots(snapshots);

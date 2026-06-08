@@ -62,7 +62,8 @@ export function mlStatus(config) {
     lines.push(`Model: gen ${model.generation}, ${model.totalSamples} samples`);
     const recentLoss = model.trainingLoss?.[model.trainingLoss.length - 1];
     if (recentLoss) {
-      lines.push(`  Last loss: ${recentLoss.total?.toFixed(4) || "N/A"}`);
+      const lossValue = recentLoss.loss ?? recentLoss.total ?? recentLoss.totalLoss ?? null;
+      lines.push(`  Last loss: ${lossValue != null ? Number(lossValue).toFixed(4) : "N/A"}`);
     }
   } else {
     lines.push("Model: not trained yet");
@@ -116,8 +117,9 @@ export async function mlTrain(config, args) {
   const lines = [];
   lines.push(`Trained on ${result.trainSize} samples (${result.valSize} validation)`);
   lines.push(`Samples: ${result.sampleCount} total`);
-  if (result.finalLoss) {
-    lines.push(`Final loss: ${result.finalLoss.totalLoss?.toFixed(4) || "N/A"}`);
+  if (result.finalLoss != null) {
+    const finalLossValue = result.finalLoss.loss ?? result.finalLoss.total ?? result.finalLoss.totalLoss ?? result.finalLoss;
+    lines.push(`Final loss: ${finalLossValue != null ? Number(finalLossValue).toFixed(4) : "N/A"}`);
   }
   if (result.validation) {
     lines.push(`Validation: Spearman=${result.validation.spearman?.toFixed(3) || "N/A"} DirectionAcc=${result.validation.directionAccuracy?.toFixed(1) || "N/A"}%`);
