@@ -53,7 +53,13 @@ All filtering, scoring, and rule-checking is done in code — no analysis needed
 Returns the top N eligible pools ranked by score (fee/TVL, organic, stability, volume).
 Each pool includes a score (0-100) and has already passed all hard disqualifiers.
 Use this instead of discover_pools for screening cycles.
-If this returns one candidate, still judge whether it is actually worth deploying; one weak candidate should be skipped.`,
+If this returns one candidate, still judge whether it is actually worth deploying; one weak candidate should be skipped.
+
+IMPORTANT SCREENER GUIDANCE:
+- This is the primary screening tool and is usually sufficient to decide.
+- The returned candidates are already enriched and filtered; do NOT reflexively call extra research tools for every pool.
+- Only call extra tools if one specific ambiguity remains and the result will directly change DEPLOY vs NO DEPLOY.
+- After at most 1-2 extra checks, make a final decision.`,
       parameters: {
         type: "object",
         properties: {
@@ -384,13 +390,20 @@ WARNING: This executes a real on-chain transaction.`,
       description: `Update any of your operating parameters at runtime.
 Changes persist to user-config.json and take effect immediately — no restart needed.
 
+Aliases (also accepted, for legacy callers): source → screeningSource, binsBelow → maxBinsBelow, takeProfitFeePct → takeProfitPct, strategy is the strategy name (bid_ask / spot / curve).
+
 VALID KEYS (use EXACTLY these key names, nothing else):
-Screening: minFeeActiveTvlRatio, minTvl, maxTvl, minVolume, minOrganic, minQuoteOrganic, minHolders, minMcap, maxMcap, minBinStep, maxBinStep, timeframe, category, minTokenFeesSol, excludeHighSupplyConcentration, allowedLaunchpads, blockedLaunchpads
-Management: minClaimAmount, outOfRangeBinsToClose, outOfRangeWaitMinutes, oorCooldownTriggerCount, oorCooldownHours, repeatDeployCooldownEnabled, repeatDeployCooldownTriggerCount, repeatDeployCooldownHours, repeatDeployCooldownScope, repeatDeployCooldownMinFeeEarnedPct, minVolumeToRebalance, stopLossPct, takeProfitPct, minSolToOpen, deployAmountSol, gasReserve, positionSizePct
+Screening: minFeeActiveTvlRatio, minTvl, maxTvl, minVolume, minOrganic, minQuoteOrganic, minHolders, minMcap, maxMcap, minBinStep, maxBinStep, timeframe, category, minTokenFeesSol, excludeHighSupplyConcentration, allowedLaunchpads, blockedLaunchpads, screeningSource, useDiscordSignals, discordSignalMode, avoidPvpSymbols, blockPvpSymbols, maxBundlePct, maxBotHoldersPct, maxTop10Pct, minTokenAgeHours, maxTokenAgeHours, athFilterPct
+Management: minClaimAmount, outOfRangeBinsToClose, outOfRangeWaitMinutes, oorCooldownTriggerCount, oorCooldownHours, repeatDeployCooldownEnabled, repeatDeployCooldownTriggerCount, repeatDeployCooldownHours, repeatDeployCooldownScope, repeatDeployCooldownMinFeeEarnedPct, minVolumeToRebalance, stopLossPct, takeProfitPct, minSolToOpen, deployAmountSol, gasReserve, positionSizePct, minFeePerTvl24h, minAgeBeforeYieldCheck, trailingTakeProfit, trailingTriggerPct, trailingDropPct, pnlSanityMaxDiffPct, solMode, autoSwapAfterClaim
 Risk: maxPositions, maxDeployAmount
-Schedule: managementIntervalMin, screeningIntervalMin
-Models: managementModel, screeningModel, generalModel
-Strategy: minBinsBelow, maxBinsBelow, defaultBinsBelow (legacy binsBelow maps to maxBinsBelow)
+Schedule: managementIntervalMin, screeningIntervalMin, healthCheckIntervalMin
+Models: managementModel, screeningModel, generalModel, temperature, maxTokens, maxSteps
+Strategy: minBinsBelow, maxBinsBelow, defaultBinsBelow
+ML (opt-in scoring + emotion): mlEnabled, mlTrainEvery, mlMinSamples, mlBatchSize, mlEpochs, mlLearningRate, mlPersonality
+Darwin (signal weighting): darwinEnabled, darwinWindowDays, darwinRecalcEvery, darwinBoost, darwinDecay, darwinFloor, darwinCeiling, darwinMinSamples
+HiveMind (cross-agent lessons): hiveMindUrl, hiveMindApiKey, agentId, hiveMindPullMode
+Agent Meridian API: publicApiKey, agentMeridianApiUrl, lpAgentRelayEnabled
+Chart Indicators: chartIndicatorsEnabled, indicatorEntryPreset, indicatorExitPreset, rsiLength, indicatorIntervals, indicatorCandles, rsiOversold, rsiOverbought, requireAllIntervals
 
 CRITICAL FORMAT: 'changes' MUST be a JSON object with key:value pairs. NOT a string, NOT an array, NOT nested.
 ✓ CORRECT: {"changes": {"minFeeActiveTvlRatio": 0.02, "maxTvl": 200000}}
@@ -506,7 +519,12 @@ Use when the user says "add smart wallet", "track this wallet", "add to smart wa
       name: "check_smart_wallets_on_pool",
       description: `Check if any tracked smart wallets have an active position in a given pool.
 Use this before deploying to gauge confidence — if smart wallets are in the pool it's a strong signal.
-If no smart wallets are present, rely on fundamentals (fees, volume, organic score) as usual.`,
+If no smart wallets are present, rely on fundamentals (fees, volume, organic score) as usual.
+
+IMPORTANT:
+- This is an optional confidence check, not a default required step.
+- Do not call it repeatedly for the same pool in one screening decision.
+- If you already have a result for this pool, use it and move on to a final decision.`,
       parameters: {
         type: "object",
         properties: {
@@ -525,7 +543,12 @@ If no smart wallets are present, rely on fundamentals (fees, volume, organic sco
 Use this to research a token before deploying or when the user asks about a token.
 Accepts token name, symbol, or mint address as query.
 
-Returns: organic score, holder count, mcap, liquidity, audit flags (mint/freeze disabled, bot holders %), 1h and 24h stats.`,
+Returns: organic score, holder count, mcap, liquidity, audit flags (mint/freeze disabled, bot holders %), 1h and 24h stats.
+
+IMPORTANT:
+- This is a deeper research tool, not the default first screening step.
+- For screening cycles, prefer get_top_candidates first because much of this information is already reflected there.
+- Only call this when a specific missing token fact would change the decision.`,
       parameters: {
         type: "object",
         properties: {
@@ -549,7 +572,12 @@ Also returns global_fees_sol — total priority/jito tips paid by ALL traders on
 This is a key signal: low global_fees_sol means transactions are bundled or the token is a scam.
 HARD GATE: if global_fees_sol < config.screening.minTokenFeesSol (default 30), do NOT deploy.
 
-NOTE: Requires mint address. If you only have a symbol/name, call get_token_info first to resolve the mint.`,
+NOTE: Requires mint address. If you only have a symbol/name, call get_token_info first to resolve the mint.
+
+IMPORTANT:
+- This is a heavy deep-research tool, not a default screening step.
+- Use it only when concentration/holder structure is still genuinely unclear after get_top_candidates.
+- Do not call it repeatedly for the same token in one screening run.`,
       parameters: {
         type: "object",
         properties: {
@@ -579,7 +607,12 @@ BAD narrative signals (caution or skip):
 - Empty or null — no story at all
 - Pure hype/financial language only: "next 100x", "to the moon", "fair launch gem" with no substance
 - Completely generic: "community-driven token", "meme coin" with zero specific context
-- Copy-paste of another token's narrative`,
+- Copy-paste of another token's narrative
+
+IMPORTANT:
+- This is qualitative research, not a required screening step.
+- Use only if the deployment decision depends on whether the token has a real story/catalyst.
+- If you already have enough hard data to decide, do not call this tool.`,
       parameters: {
         type: "object",
         properties: {
@@ -600,7 +633,12 @@ or when you want to find pools for a specific token outside of the normal screen
 
 Examples: "find pools for ROSIE", "search BONK pools", "look up pool for CA abc123..."
 
-Returns pool address, name, bin_step, fee %, TVL, volume, and token mints.`,
+Returns pool address, name, bin_step, fee %, TVL, volume, and token mints.
+
+IMPORTANT:
+- This is primarily for user-directed lookup, not the default screening path.
+- For autonomous screening, prefer get_top_candidates.
+- Do not bounce between search_pools and get_top_candidates unless the user explicitly asked for a specific token/pool.`,
       parameters: {
         type: "object",
         properties: {

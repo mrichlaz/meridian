@@ -7,7 +7,8 @@ import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
-import { getTopCandidates } from "./tools/screening.js";
+import { getTopCandidates, chooseAdaptiveDeployProfile } from "./tools/screening.js";
+import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
@@ -28,13 +29,43 @@ import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
+import { logScreeningSnapshot, summarizeScreeningSnapshots, readScreeningSnapshots } from "./screening-snapshot.js";
+import { isRangeDriftAccelerating, isRecoveryImproving, isFeeGrowthDecelerating, isFeeGrowthAccelerating, assessTrend } from "./utils/position-trend.js";
 import { startBotTracker } from "./tools/bot-tracker.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
-import { stageSignals } from "./signal-tracker.js";
+import { studyTopLPers } from "./tools/study.js";
+import { stageSignals, stageMlFeatures } from "./signal-tracker.js";
 import { getWeightsSummary } from "./signal-weights.js";
 import { bootstrapHiveMind, ensureAgentId, getHiveMindPullMode, isHiveMindEnabled, pullHiveMindLessons, pullHiveMindPresets, registerHiveMindAgent, startHiveMindBackgroundSync } from "./hivemind.js";
 import { appendDecision } from "./decision-log.js";
+import {
+  formatScreeningReport,
+  formatManagementReport,
+  formatWalletStatus,
+  formatPositionCard,
+  formatPositionPnLCard,
+  formatCandidatesList,
+  formatPoolDetail,
+  formatBalance,
+  formatConfigSnapshot as formatConfigSnapshotCard,
+  formatThresholds,
+  formatLessons,
+  formatPerformance,
+  formatError,
+  formatHelp,
+  formatStart,
+  formatDeployResult,
+  formatCloseResult,
+  formatClaimResult,
+  formatCandidatesListPlain,
+  formatConfigSnapshotPlain,
+  formatThresholdsPlain,
+  formatLessonsPlain,
+  formatPerformancePlain,
+  liveStage,
+} from "./utils/telegram-formatter.js";
+import { setRuntimeMode as setRuntimeModeUtil, RUNTIME_MODES, safeSetInterval, safeSetTimeout, isCli, isTelegram } from "./utils/runtime-mode.js";
 
 const entrypointPath = process.env.pm_exec_path || process.argv[1];
 const isMain = entrypointPath
@@ -42,8 +73,21 @@ const isMain = entrypointPath
   : false;
 
 if (isMain) {
+  // Resolve runtime mode (repl / telegram / daemon) — overrides only
+  // if it wasn't already set explicitly via env or setRuntimeMode.
+  if (!process.env.MERIDIAN_RUNTIME_MODE) {
+    if (process.env.TELEGRAM_BOT_TOKEN) {
+      setRuntimeModeUtil(RUNTIME_MODES.TELEGRAM);
+    } else if (process.stdin && process.stdin.isTTY) {
+      setRuntimeModeUtil(RUNTIME_MODES.REPL);
+    } else {
+      setRuntimeModeUtil(RUNTIME_MODES.DAEMON);
+    }
+  }
+
   log("startup", "DLMM LP Agent starting...");
   log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
+  log("startup", `Runtime mode: ${process.env.MERIDIAN_RUNTIME_MODE}`);
   log("startup", `Model: ${process.env.LLM_MODEL || "hermes-3-405b"}`);
   ensureAgentId();
   bootstrapHiveMind().catch((error) => log("hivemind_warn", `Bootstrap failed: ${error.message}`));
@@ -123,7 +167,7 @@ function schedulePeakConfirmation(positionAddress) {
   const timer = setTimeout(async () => {
     _peakConfirmTimers.delete(positionAddress);
     try {
-      const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
+      const result = await getMyPositions({ force: false, silent: true }).catch(() => null);
       const position = result?.positions?.find((p) => p.position === positionAddress);
       resolvePendingPeak(positionAddress, position?.pnl_pct ?? null, TRAILING_PEAK_CONFIRM_TOLERANCE);
     } catch (error) {
@@ -198,7 +242,7 @@ function stopCronJobs() {
   _cronTasks = [];
 }
 
-export async function runManagementCycle({ silent = false } = {}) {
+export async function runManagementCycle({ silent = false, triggerScreening = true } = {}) {
   if (_managementBusy) return null;
   _managementBusy = true;
   timers.managementLastRun = Date.now();
@@ -218,7 +262,9 @@ export async function runManagementCycle({ silent = false } = {}) {
     if (positions.length === 0) {
       log("cron", "No open positions — triggering screening cycle");
       mgmtReport = "No open positions. Triggering screening cycle.";
-      runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));
+      if (triggerScreening) {
+        runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));
+      }
       return mgmtReport;
     }
 
@@ -285,11 +331,21 @@ export async function runManagementCycle({ silent = false } = {}) {
 
     const reportLines = positionData.map((p) => {
       const act = actionMap.get(p.position);
-      const inRange = p.in_range ? "🟢 IN" : `🔴 OOR ${p.minutes_out_of_range ?? 0}m`;
-      const val = config.management.solMode ? `◎${p.total_value_usd ?? "?"}` : `$${p.total_value_usd ?? "?"}`;
-      const unclaimed = config.management.solMode ? `◎${p.unclaimed_fees_usd ?? "?"}` : `$${p.unclaimed_fees_usd ?? "?"}`;
+      const inRange = p.in_range ? "🟢 IN RANGE" : `🔴 OOR ${p.minutes_out_of_range ?? 0}m`;
+      const val = `$${p.total_value_usd ?? "?"}`;
+      const unclaimed = `$${p.unclaimed_fees_usd ?? "?"}`;
+      const bins = p.lower_bin != null ? `${p.lower_bin} → ${p.upper_bin}` : "?";
+      const active = p.active_bin != null ? `active=${p.active_bin}` : "";
       const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.action;
-      let line = `**${p.pair}** | Age: ${p.age_minutes ?? "?"}m | Val: ${val} | Unclaimed: ${unclaimed} | PnL: ${p.pnl_pct ?? "?"}% | Yield: ${p.fee_per_tvl_24h ?? "?"}% | ${inRange} | ${statusLabel}`;
+      const shortPool = (p.pool || "").slice(0, 12);
+      const shortPos = (p.position || "").slice(0, 12);
+
+      let line = [
+        `**${p.pair}**  ${inRange}  ${statusLabel}`,
+        `Pool: \`${shortPool}...\`  Pos: \`${shortPos}...\``,
+        `Bins: ${bins}  ${active}  |  Age: ${p.age_minutes ?? "?"}m`,
+        `Value: ${val}  |  PnL: ${p.pnl_pct ?? "?"}%  |  Fees: ${unclaimed}  |  Yield: ${p.fee_per_tvl_24h ?? "?"}%`,
+      ].join("\n");
       if (p.instruction) line += `\nNote: "${p.instruction}"`;
       if (act.action === "CLOSE" && act.rule === "exit") line += `\n⚡ Trailing TP: ${act.reason}`;
       if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\nRule ${act.rule}: ${act.reason}`;
@@ -348,13 +404,12 @@ After executing, write a brief one-line result per position.
       mgmtReport += `\n\n${content}`;
     } else {
       log("cron", "Management: all positions STAY — skipping LLM");
-      await liveMessage?.note("No tool actions needed.");
     }
 
     // Trigger screening after management
     const afterPositions = await getMyPositions({ force: true }).catch(() => null);
     const afterCount = afterPositions?.positions?.length ?? 0;
-    if (afterCount < config.risk.maxPositions && Date.now() - _screeningLastTriggered > screeningCooldownMs) {
+    if (triggerScreening && afterCount < config.risk.maxPositions && Date.now() - _screeningLastTriggered > screeningCooldownMs) {
       log("cron", `Post-management: ${afterCount}/${config.risk.maxPositions} positions — triggering screening`);
       runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));
     }
@@ -365,8 +420,11 @@ After executing, write a brief one-line result per position.
     _managementBusy = false;
     if (!silent && telegramEnabled()) {
       if (mgmtReport) {
-        if (liveMessage) await liveMessage.finalize(stripThink(mgmtReport)).catch(() => {});
-        else sendMessage(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => { });
+        if (liveMessage) {
+          await liveMessage.finalize(mgmtReport.slice(0, 4000)).catch(() => {});
+        } else {
+          await sendMessage(mgmtReport.slice(0, 4000)).catch(() => {});
+        }
       }
       for (const p of positions) {
         if (!p.in_range && p.minutes_out_of_range >= config.management.outOfRangeWaitMinutes) {
@@ -395,32 +453,33 @@ export async function runScreeningCycle({ silent = false } = {}) {
     if (prePositions.total_positions >= config.risk.maxPositions) {
       log("cron", `Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions})`);
       screenReport = `Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions}).`;
-      appendDecision({
-        type: "skip",
-        actor: "SCREENER",
-        summary: "Screening skipped",
-        reason: `Max positions reached (${prePositions.total_positions}/${config.risk.maxPositions})`,
-      });
-      _screeningBusy = false;
-      return screenReport;
+    } else {
+      const minRequired = config.management.deployAmountSol + config.management.gasReserve;
+      const isDryRun = process.env.DRY_RUN === "true";
+      if (!isDryRun && preBalance.sol < minRequired) {
+        log("cron", `Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired} needed for deploy + gas)`);
+        screenReport = `Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired} needed for deploy + gas).`;
+      }
     }
-    const minRequired = config.management.deployAmountSol + config.management.gasReserve;
-    const isDryRun = process.env.DRY_RUN === "true";
-    if (!isDryRun && preBalance.sol < minRequired) {
-      log("cron", `Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired} needed for deploy + gas)`);
-      screenReport = `Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired} needed for deploy + gas).`;
+    if (screenReport) {
       appendDecision({
         type: "skip",
         actor: "SCREENER",
         summary: "Screening skipped",
-        reason: `Insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired})`,
+        reason: screenReport,
       });
+      if (!silent && telegramEnabled()) {
+        await sendMessage(screenReport).catch(() => {});
+      }
       _screeningBusy = false;
       return screenReport;
     }
   } catch (e) {
     log("cron_error", `Screening pre-check failed: ${e.message}`);
     screenReport = `Screening pre-check failed: ${e.message}`;
+    if (!silent && telegramEnabled()) {
+      await sendMessage(screenReport).catch(() => {});
+    }
     _screeningBusy = false;
     return screenReport;
   }
@@ -429,10 +488,19 @@ export async function runScreeningCycle({ silent = false } = {}) {
   }
   timers.screeningLastRun = Date.now();
   log("cron", `Starting screening cycle [model: ${config.llm.screeningModel}]`);
+  let deployAttempted = false;
+  let deploySucceeded = false;
+  let deployPool = null;
+  let deployPoolName = null;
+  let screeningBalance = preBalance;
+  let screeningDeployAmount = 0;
+  let passingForFallback = [];
   try {
     // Reuse pre-fetched balance — no extra RPC call needed
     const currentBalance = preBalance;
+    screeningBalance = currentBalance;
     const deployAmount = computeDeployAmount(currentBalance.sol);
+    screeningDeployAmount = deployAmount;
     log("cron", `Computed deploy amount: ${deployAmount} SOL (wallet: ${currentBalance.sol} SOL)`);
 
     // Load active strategy
@@ -441,75 +509,63 @@ export async function runScreeningCycle({ silent = false } = {}) {
       ? `ACTIVE STRATEGY: ${activeStrategy.name} — LP: ${activeStrategy.lp_strategy} | bins_above: ${activeStrategy.range?.bins_above ?? 0} (FIXED — never change) | deposit: ${activeStrategy.entry?.single_side === "sol" ? "SOL only (amount_y, amount_x=0)" : "dual-sided"} | best for: ${activeStrategy.best_for}`
       : `No active strategy — use default bid_ask, bins_above: 0, SOL only.`;
 
-    // Fetch top candidates, then recon each sequentially with a small delay to avoid 429s
-    const topCandidates = await getTopCandidates({ limit: 10 }).catch(() => null);
-    const candidates = (topCandidates?.candidates || topCandidates?.pools || []).slice(0, 10);
-    const earlyFilteredExamples = topCandidates?.filtered_examples || [];
-
-    const allCandidates = [];
-    for (const pool of candidates) {
-      const mint = pool.base?.mint;
-      const [smartWallets, narrative, tokenInfo] = await Promise.allSettled([
-        checkSmartWalletsOnPool({ pool_address: pool.pool }),
-        mint ? getTokenNarrative({ mint }) : Promise.resolve(null),
-        mint ? getTokenInfo({ query: mint }) : Promise.resolve(null),
-      ]);
-      allCandidates.push({
-        pool,
-        sw: smartWallets.status === "fulfilled" ? smartWallets.value : null,
-        n: narrative.status === "fulfilled" ? narrative.value : null,
-        ti: tokenInfo.status === "fulfilled" ? tokenInfo.value?.results?.[0] : null,
-        mem: recallForPool(pool.pool),
-      });
-      await new Promise(r => setTimeout(r, 150)); // avoid 429s
+    await liveStage(liveMessage, "fetching");
+    // Fetch + enrich + filter candidates via the shared pipeline. This is
+    // the same pipeline the manual /screen path uses, so both surfaces
+    // (auto cron and manual /deploy N) see the same surviving pool set.
+    const pipeline = await enrichAndFilterCandidates({ limit: 10, liveMessage });
+    if (pipeline?.error) {
+      screenReport = `Screening failed: ${pipeline.error}`;
+      return screenReport;
     }
-
-    // Hard filters after token recon — block launchpads and excessive Jupiter bot holders
-    const filteredOut = [];
-    const passing = allCandidates.filter(({ pool, ti }) => {
-      const launchpad = ti?.launchpad ?? null;
-      if (launchpad && config.screening.allowedLaunchpads?.length > 0 && !config.screening.allowedLaunchpads.includes(launchpad)) {
-        log("screening", `Skipping ${pool.name} — launchpad ${launchpad} not in allow-list`);
-        filteredOut.push({ name: pool.name, reason: `launchpad ${launchpad} not in allow-list` });
-        return false;
-      }
-      if (launchpad && config.screening.blockedLaunchpads.includes(launchpad)) {
-        log("screening", `Skipping ${pool.name} — blocked launchpad (${launchpad})`);
-        filteredOut.push({ name: pool.name, reason: `blocked launchpad (${launchpad})` });
-        return false;
-      }
-      const botPct = ti?.audit?.bot_holders_pct;
-      const maxBotHoldersPct = config.screening.maxBotHoldersPct;
-      if (botPct != null && maxBotHoldersPct != null && botPct > maxBotHoldersPct) {
-        log("screening", `Bot-holder filter: dropped ${pool.name} — bots ${botPct}% > ${maxBotHoldersPct}%`);
-        filteredOut.push({ name: pool.name, reason: `bot holders ${botPct}% > ${maxBotHoldersPct}%` });
-        return false;
-      }
-      return true;
-    });
+    const { passing, filteredOut, gmgnStageCounts, gmgnAllFiltered, topCandidates, allCandidates } = pipeline;
+    passingForFallback = passing;
+    const earlyFilteredExamples = topCandidates?.filtered_examples || [];
+    // Stash the full top-level result for the screening-snapshot log
+    _lastScreeningResult = topCandidates || {};
+    // Stash the surviving pools + enriched context for /deploy N consistency.
+    // The manual /screen path does the same thing, so the cached list always
+    // matches what the cron saw.
+    setLatestCandidates(passing.map(({ pool }) => pool));
+    _latestCandidatesEnriched = new Map(passing.map((entry) => [entry.pool.pool, entry]));
 
     if (passing.length === 0) {
       const combined = filteredOut.length > 0 ? filteredOut : earlyFilteredExamples;
-      const combinedExamples = combined.slice(0, 3)
+      const combinedExamples = combined.slice(0, 5)
         .map((entry) => `- ${entry.name}: ${entry.reason}`)
         .join("\n");
-      screenReport = combinedExamples
-        ? `No candidates available.\nFiltered examples:\n${combinedExamples}`
-        : `No candidates available (all filtered by launchpad / holder-quality rules).`;
+      const funnelBlock = buildGmgnFunnelReport(gmgnStageCounts, gmgnAllFiltered, { fromStage: 2 });
+      const thresholds = `Thresholds: tvl>$${config.screening.minTvl} | vol>$${config.screening.minVolume} | organic>${config.screening.minOrganic}% | holders>${config.screening.minHolders} | fee/tvl>${config.screening.minFeeActiveTvlRatio}%`;
+      screenReport = funnelBlock
+        ? `No candidates available.\n\n${funnelBlock}`
+        : combinedExamples
+          ? `No candidates available.\nFiltered examples:\n${combinedExamples}`
+          : `No candidates available (all filtered).\n${thresholds}`;
       appendDecision({
         type: "no_deploy",
         actor: "SCREENER",
         summary: "No candidates available",
-        reason: combinedExamples || "All candidates filtered before deploy",
+        reason: funnelBlock || combinedExamples || "All candidates filtered before deploy",
         rejected: combined.slice(0, 5).map((entry) => `${entry.name}: ${entry.reason}`),
+        metrics: {
+          screened_candidates: Array.isArray(combined) ? combined.length : 0,
+          positions_open: prePositions.total_positions,
+          wallet_sol: currentBalance.sol,
+        },
       });
       return screenReport;
+    }
+
+    if (passing.length <= 1 && gmgnStageCounts) {
+      const funnelBlock = buildGmgnFunnelReport(gmgnStageCounts, gmgnAllFiltered, { fromStage: 2 });
+      if (funnelBlock) log("screening", `GMGN funnel (sparse):\n${funnelBlock}`);
     }
 
     if (passing.length === 1) {
       const skipReason = getLoneCandidateSkipReason(passing[0]);
       if (skipReason) {
         const candidateName = passing[0].pool?.name || "unknown";
+        const funnelBlock = buildGmgnFunnelReport(gmgnStageCounts, gmgnAllFiltered, { fromStage: 2 });
         screenReport = [
           "⛔ NO DEPLOY",
           "",
@@ -523,7 +579,8 @@ export async function runScreeningCycle({ silent = false } = {}) {
           "",
           "REJECTED",
           `- ${candidateName}: ${skipReason}`,
-        ].join("\n");
+          funnelBlock ? `\n${funnelBlock}` : null,
+        ].filter(Boolean).join("\n");
         appendDecision({
           type: "no_deploy",
           actor: "SCREENER",
@@ -531,15 +588,57 @@ export async function runScreeningCycle({ silent = false } = {}) {
           reason: skipReason,
           pool: passing[0].pool?.pool,
           pool_name: candidateName,
+          metrics: {
+            fee_tvl_ratio: passing[0].pool?.fee_active_tvl_ratio ?? null,
+            volume: passing[0].pool?.volume_window ?? null,
+            organic: passing[0].pool?.organic_score ?? null,
+            holders: passing[0].pool?.holders ?? null,
+            concentration_top10: passing[0].ti?.audit?.top_holders_pct ?? null,
+            volatility: passing[0].pool?.volatility ?? null,
+            token_age_hours: passing[0].pool?.token_age_hours ?? null,
+          },
         });
         return screenReport;
       }
     }
 
+    await liveStage(liveMessage, "scoring");
     // Pre-fetch active_bin for all passing candidates in parallel
     const activeBinResults = await Promise.allSettled(
       passing.map(({ pool }) => getActiveBin({ pool_address: pool.pool }))
     );
+
+    // Stage ML features for all passing candidates (for training data capture)
+    if (config.ml?.enabled) {
+      const { extractFeatures, normalizeVector } = await import("./ml/features.js");
+      for (const { pool, study, mem } of passing) {
+        try {
+          const rawFeatures = extractFeatures({
+            candidate: pool,
+            poolMemory: null,
+            studyData: study?.patterns || null,
+            context: {
+              walletSol: currentBalance.sol,
+              walletTotalUsd: currentBalance.total_usd,
+              activePositions: prePositions.total_positions,
+              maxPositions: config.risk.maxPositions,
+              deployAmountSol: deployAmount,
+              entryMcap: pool.mcap ?? pool.token_x?.market_cap,
+              entryTvl: pool.tvl ?? pool.active_tvl,
+              entryVolume: pool.volume_window ?? pool.volume,
+              entryHolders: pool.holders ?? pool.token_x?.holder_count,
+            },
+          });
+          if (pool.pool) {
+            stageMlFeatures(pool.pool, {
+              raw: Array.from(rawFeatures),
+              norm: Array.from(normalizeVector(rawFeatures)),
+              studyData: study ? { patterns: study.patterns } : null,
+            });
+          }
+        } catch {}
+      }
+    }
 
     // Build compact candidate blocks
     const candidateBlocks = passing.map(({ pool, sw, n, ti, mem }, i) => {
@@ -576,21 +675,38 @@ export async function runScreeningCycle({ silent = false } = {}) {
         ? `  pvp: HIGH — rival ${pool.pvp_rival_name || pool.pvp_symbol} (${pool.pvp_rival_mint?.slice(0, 8)}...) has pool ${pool.pvp_rival_pool?.slice(0, 8)}..., tvl=$${pool.pvp_rival_tvl}, holders=${pool.pvp_rival_holders}, fees=${pool.pvp_rival_fees}SOL`
         : null;
 
-      const block = [
-        `POOL: ${pool.name} (${pool.pool})`,
-        `  metrics: bin_step=${pool.bin_step}, fee_pct=${pool.fee_pct}%, fee_tvl=${pool.fee_active_tvl_ratio}, vol=$${pool.volume_window}, tvl=$${pool.tvl ?? pool.active_tvl}, volatility_${pool.volatility_timeframe || "30m"}=${pool.volatility}, mcap=$${pool.mcap}, organic=${pool.organic_score}${pool.token_age_hours != null ? `, age=${pool.token_age_hours}h` : ""}`,
-        `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
-        pvpLine,
-        okxParts ? `  okx: ${okxParts}` : okxUnavailable ? `  okx: unavailable` : null,
-        okxTags  ? `  tags: ${okxTags}` : null,
-        botLine,
-        pool.price_vs_ath_pct != null ? `  ath: price_vs_ath=${pool.price_vs_ath_pct}%${pool.top_cluster_trend ? `, top_cluster=${pool.top_cluster_trend}` : ""}` : null,
-        `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
-        activeBin != null ? `  active_bin: ${activeBin}` : null,
-        priceChange != null ? `  1h: price${priceChange >= 0 ? "+" : ""}${priceChange}%, net_buyers=${netBuyers ?? "?"}` : null,
-        n?.narrative ? `  narrative_untrusted: ${sanitizeUntrustedPromptText(n.narrative, 500)}` : `  narrative_untrusted: none`,
-        mem ? `  memory_untrusted: ${sanitizeUntrustedPromptText(mem, 500)}` : null,
-      ].filter(Boolean).join("\n");
+      let block;
+      if (pool.gmgn) {
+        block = [
+          `POOL: ${pool.name} (${pool.pool})`,
+          formatGmgnCandidateForPrompt(pool),
+          pvpLine,
+          `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
+          activeBin != null ? `  active_bin: ${activeBin}` : null,
+          n?.narrative ? `  narrative_untrusted: ${sanitizeUntrustedPromptText(n.narrative, 500)}` : `  narrative_untrusted: none`,
+          mem ? `  memory_untrusted: ${sanitizeUntrustedPromptText(mem, 500)}` : null,
+        ].filter(Boolean).join("\n");
+      } else {
+        const gmgnPriceLine = pool.gmgn_price_action
+          ? `  gmgn_price: rsi2=${pool.gmgn_price_action.rsi2 ?? "?"}, supertrend=${pool.gmgn_price_action.supertrend?.direction || "?"}, price_vs_ath=${pool.gmgn_price_action.priceVsAthPct ?? "?"}%, 1h_change=${pool.gmgn_price_action.priceChangePct ?? "?"}%, max_vol_candle=${pool.gmgn_price_action.maxVolumeShare ?? "?"}%`
+          : null;
+        block = [
+          `POOL: ${pool.name} (${pool.pool})`,
+          `  metrics: bin_step=${pool.bin_step}, fee_pct=${pool.fee_pct}%, fee_tvl=${pool.fee_active_tvl_ratio}, vol=$${pool.volume_window}, tvl=$${pool.tvl ?? pool.active_tvl}, volatility_${pool.volatility_timeframe || "30m"}=${pool.volatility}, mcap=$${pool.mcap}, organic=${pool.organic_score}${pool.token_age_hours != null ? `, age=${pool.token_age_hours}h` : ""}`,
+          `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
+          gmgnPriceLine,
+          pvpLine,
+          okxParts ? `  okx: ${okxParts}` : okxUnavailable ? `  okx: unavailable` : null,
+          okxTags  ? `  tags: ${okxTags}` : null,
+          botLine,
+          pool.price_vs_ath_pct != null ? `  ath: price_vs_ath=${pool.price_vs_ath_pct}%${pool.top_cluster_trend ? `, top_cluster=${pool.top_cluster_trend}` : ""}` : null,
+          `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
+          activeBin != null ? `  active_bin: ${activeBin}` : null,
+          priceChange != null ? `  1h: price${priceChange >= 0 ? "+" : ""}${priceChange}%, net_buyers=${netBuyers ?? "?"}` : null,
+          n?.narrative ? `  narrative_untrusted: ${sanitizeUntrustedPromptText(n.narrative, 500)}` : `  narrative_untrusted: none`,
+          mem ? `  memory_untrusted: ${sanitizeUntrustedPromptText(mem, 500)}` : null,
+        ].filter(Boolean).join("\n");
+      }
 
       // Stage signals for Darwinian weighting — captured before LLM decides
       if (config.darwin?.enabled) {
@@ -613,25 +729,75 @@ export async function runScreeningCycle({ silent = false } = {}) {
 
     const weightsSummary = config.darwin?.enabled ? getWeightsSummary() : null;
 
-    let deployAttempted = false;
-    let deploySucceeded = false;
+    // ML emotion & personality context for the screener
+    let mlEmotionContext = "";
+    try {
+      const { getEmotionalPromptContext } = await import("./ml/inference.js");
+      mlEmotionContext = getEmotionalPromptContext();
+    } catch {}
+
+    // Build a CONFIG section with the actual current config values, so the
+    // LLM never has to guess or invent thresholds.
+    const configBlock = [
+      "CONFIG (current values from user-config.json — use these EXACT numbers, do not invent):",
+      `  minFeeActiveTvlRatio: ${config.screening.minFeeActiveTvlRatio}%`,
+      `  minTvl / maxTvl: $${config.screening.minTvl} / $${config.screening.maxTvl}`,
+      `  minVolume: $${config.screening.minVolume}`,
+      `  minOrganic: ${config.screening.minOrganic}`,
+      `  minHolders: ${config.screening.minHolders}`,
+      `  minMcap / maxMcap: $${config.screening.minMcap} / $${config.screening.maxMcap}`,
+      `  maxBotHoldersPct: ${config.screening.maxBotHoldersPct}%`,
+      `  maxTop10Pct: ${config.screening.maxTop10Pct}%`,
+      `  minTokenFeesSol: ${config.screening.minTokenFeesSol} SOL`,
+      `  maxBinStep: ${config.screening.maxBinStep}`,
+      `  minTokenAgeHours: ${config.screening.minTokenAgeHours ?? "(none)"}`,
+      `  blockedLaunchpads: ${JSON.stringify(config.screening.blockedLaunchpads)}`,
+      `  allowedLaunchpads: ${JSON.stringify(config.screening.allowedLaunchpads)}`,
+    ].join("\n");
+
+    // Build a per-pool hard-filter verdict block. The LLM gets to see, for
+    // each surviving pool, which checks passed and which failed (none should
+    // have failed if it's in `passing`, but show it for transparency).
+    const verdictBlock = passing.map((entry, i) => {
+      const v = formatHardFilterVerdict(entry);
+      return `--- Hard-filter verdict for #${i + 1} ---\n${v}`;
+    }).join("\n\n");
+
+    deployAttempted = false;
+    deploySucceeded = false;
+    deployPool = null;
+    deployPoolName = null;
+    await liveStage(liveMessage, "deciding");
     const { content } = await agentLoop(`
 SCREENING CYCLE
 ${strategyBlock}
 Positions: ${prePositions.total_positions}/${config.risk.maxPositions} | SOL: ${currentBalance.sol.toFixed(3)} | Deploy: ${deployAmount} SOL
+${mlEmotionContext ? "\n" + mlEmotionContext + "\n" : ""}
+${configBlock}
+
+${passing.length} candidate(s) survived every hard check below. Their per-pool hard-filter verdicts are:
+${verdictBlock}
 
 PRE-LOADED CANDIDATES (${passing.length} pools):
 ${candidateBlocks.join("\n\n")}
 
+RULES — read carefully:
+1. Every candidate above has ALREADY passed: (a) hard screening thresholds (config values listed in CONFIG), (b) launchpad allow/block filters, (c) bot-holder concentration check, (d) adaptive deploy profile (token age + volatility guard), and (e) lone-candidate narrative/smart-wallet guard. You are NOT supposed to re-veto pools that passed these checks. Your only job is to pick the best one of ${passing.length} survivor(s).
+2. DO NOT invent thresholds, percentages, or requirements not in the CONFIG section above. If a number in the pool data does not match a CONFIG threshold, the verdict block will say so explicitly.
+3. If you decide no pool qualifies, your reason MUST reference specific data from the pool blocks or the verdict blocks. Never cite a threshold or percentage unless you copy the EXACT number from CONFIG or the pool block.
+4. IMPORTANT on units: if CONFIG says minFeeActiveTvlRatio = 0.015%, that means exactly 0.015%. Do NOT restate it as 2%, 1.5%, or "effectively zero".
+5. IMPORTANT on survivors: every pool shown here already passed the hard threshold checks. That means you must NOT use threshold-failure language like "fee/aTVL below CONFIG minimum", "organic below minimum", or similar for these survivors. If you choose NO DEPLOY anyway, the reason must be qualitative or comparative, not a hard-threshold failure.
+6. If 0 candidates passed (passing.length = 0), use the ⛔ NO DEPLOY format. Otherwise, you should almost always DEPLOY the top-ranked survivor unless there is a strong, data-grounded reason not to.
+
 STEPS:
-1. Decide if any candidate is actually worth deploying. One surviving candidate is not automatically good enough.
-2. Pick the best candidate based on narrative quality, smart wallets, and pool metrics.
-3. Call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
+1. If passing.length >= 1, deploy the top survivor (the one with the highest fee/aTVL × organic × smart-wallet score). If you have a strong data-grounded reason to skip it, name the pool and cite the specific qualitative or comparative data point exactly as shown.
+2. Call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
    bins_below = round(${config.strategy.minBinsBelow} + (candidate volatility/5)*(${config.strategy.maxBinsBelow - config.strategy.minBinsBelow})) clamped to [${config.strategy.minBinsBelow},${config.strategy.maxBinsBelow}].
    pass deploy_position.volatility = the candidate volatility value.
+   pass deploy_position.discovery_timeframe = the candidate discovery_timeframe value exactly as shown.
    For single-side SOL deploys, do not invent upside:
    set amount_y only, keep amount_x = 0, keep bins_above = 0, and let the upper bin stay at the active bin.
-4. Report in this exact format (no tables, no extra sections):
+3. Report in this exact format (no tables, no extra sections):
    🚀 DEPLOYED
 
    <pool name>
@@ -670,7 +836,7 @@ STEPS:
 
    WHY THIS WON
    <2-4 concise sentences on why this pool won, key risks, and why it still beat the alternatives>
-5. If no pool qualifies, report in this exact format instead:
+4. Only use the ⛔ NO DEPLOY format below if you have a strong, data-grounded reason. Use the format:
    ⛔ NO DEPLOY
 
    Cycle finished with no valid entry.
@@ -679,13 +845,14 @@ STEPS:
    <name or none>
 
    WHY SKIPPED
-   <2-4 concise sentences explaining why nothing was good enough>
+   <must cite a specific comparative or qualitative data point from the pool/verdict blocks above. Do NOT claim that a shown survivor failed CONFIG minimums, because shown survivors already passed those hard checks. Good examples: "no smart-wallet confirmation while the other survivor had strong confirmation", "narrative is materially weaker than the other survivor", "momentum/volume persistence is weaker than the alternative despite passing minimums"> 
 
    REJECTED
-   <short flat list of top candidate names and why they were skipped>
+   <short flat list of top candidate names and the SPECIFIC qualitative/comparative reason each was skipped>
 IMPORTANT:
 - Never write "unknown" for OKX. Use real values, omit missing fields, or write exactly "OKX: unavailable".
 - Keep the whole report compact and highly scannable for Telegram.
+- If you cite a CONFIG threshold, copy the EXACT number from the CONFIG section above. Do not paraphrase.
       `, config.llm.maxSteps, [], "SCREENER", config.llm.screeningModel, 2048, {
         onToolStart: async ({ name }) => {
           if (name === "deploy_position") deployAttempted = true;
@@ -695,17 +862,106 @@ IMPORTANT:
           if (name === "deploy_position") {
             deployAttempted = true;
             deploySucceeded = Boolean(success && result?.success !== false && !result?.error && !result?.blocked);
+            if (deploySucceeded) {
+              deployPool = result?.pool || null;
+              deployPoolName = result?.pool_name || null;
+            }
           }
           await liveMessage?.toolFinish(name, result, success);
         },
       });
     screenReport = content;
     if (/⛔\s*NO DEPLOY/i.test(content)) {
+      // Data-anchored audit: when the LLM chose no deploy, surface the actual
+      // hard-filter verdict on the top survivor alongside the LLM's narrative.
+      // The LLM's judgment is respected, but the operator gets to see whether
+      // the LLM's reason matches the data. This is informational, not an
+      // override — the LLM remains the final decision-maker.
+      if (passing.length >= 1) {
+        const topSurvivor = passing[0];
+        const hardFilterVerdict = formatHardFilterVerdict(topSurvivor);
+        const auditBlock = [
+          "DATA AUDIT (operator visibility only — LLM's decision stands)",
+          `Top survivor: ${topSurvivor.pool?.name || "unknown"} — passed all hard checks above.`,
+          "The LLM declined to deploy. Reasons may be qualitative (narrative, smart-wallet timing) or may not match the data. Use /deploy 1 to force-deploy this pool if you disagree.",
+          "",
+          "Hard-filter verdict on the top survivor:",
+          hardFilterVerdict,
+        ].join("\n");
+        log("screening", `LLM no-deploy audit (${passing.length} hard-filter survivors)\n${hardFilterVerdict}`);
+        // Append the audit to the LLM's narrative so the operator sees both side by side.
+        screenReport = `${content}\n\n${auditBlock}`;
+      }
+      // Cross-check the LLM's narrative against the actual data. If the LLM
+      // cited a config threshold that doesn't match the live config, OR a
+      // pool value that doesn't match the data, treat that as a false veto.
+      // In that case we proceed with a deterministic deploy of the top
+      // survivor instead of letting a hallucinated reason block execution.
+      if (passing.length >= 1) {
+        const llmText = stripThink(content);
+        const dataMismatchWarnings = checkLlmNarrativeAgainstData(llmText, passing, config);
+        if (dataMismatchWarnings.length > 0) {
+          const mismatchBlock = [
+            "⚠️ NARRATIVE / DATA MISMATCH (the LLM cited a number that doesn't match the live data):",
+            ...dataMismatchWarnings.map((w) => `  - ${w}`),
+            "",
+            "Because this NO DEPLOY reason contradicts live data, Meridian will ignore the false veto and deploy the top survivor automatically.",
+          ].join("\n");
+          log("screening", `LLM narrative/data mismatches:\n${dataMismatchWarnings.join("\n")}`);
+          screenReport = `${screenReport}\n\n${mismatchBlock}`;
+
+          const topSurvivor = passing[0]?.pool;
+          if (topSurvivor) {
+            const deployProfile = chooseAdaptiveDeployProfile(topSurvivor, config.strategy);
+            if (deployProfile.deployable) {
+              const deployAmountOverride = Number((deployAmount * (deployProfile.sizeMultiplier || 1)).toFixed(2));
+              const initialValueUsd = currentBalance.sol_price ? deployAmountOverride * currentBalance.sol_price : null;
+              const binsBelow = Math.max(35, Math.round(computeBinsBelow(topSurvivor.volatility) * (deployProfile.binsMultiplier || 1)));
+              const fallbackResult = await executeTool("deploy_position", {
+                pool_address: topSurvivor.pool,
+                amount_y: deployAmountOverride,
+                strategy: deployProfile.strategy,
+                bins_below: binsBelow,
+                bins_above: 0,
+                pool_name: topSurvivor.name,
+                base_mint: topSurvivor.base?.mint || topSurvivor.base_mint || null,
+                bin_step: topSurvivor.bin_step,
+                base_fee: topSurvivor.base_fee,
+                volatility: topSurvivor.volatility,
+                fee_tvl_ratio: topSurvivor.fee_active_tvl_ratio ?? topSurvivor.fee_tvl_ratio,
+                organic_score: topSurvivor.organic_score,
+                discovery_timeframe: topSurvivor.discovery_timeframe || config.screening.timeframe,
+                initial_value_usd: initialValueUsd,
+              });
+              deployAttempted = true;
+              deploySucceeded = Boolean(fallbackResult?.success && !fallbackResult?.error && !fallbackResult?.blocked);
+              if (deploySucceeded) {
+                deployPool = fallbackResult?.pool || topSurvivor.pool;
+                deployPoolName = fallbackResult?.pool_name || topSurvivor.name;
+                screenReport = [
+                  "🚀 DEPLOYED (DATA-INTEGRITY FALLBACK)",
+                  "",
+                  `${topSurvivor.name}`,
+                  `${topSurvivor.pool}`,
+                  "",
+                  `◎ ${deployAmountOverride} SOL | ${deployProfile.strategy}`,
+                  `Reason: LLM NO DEPLOY contradicted live data, so the false veto was ignored.`,
+                ].join("\n");
+              }
+            }
+          }
+        }
+      }
       appendDecision({
         type: "no_deploy",
         actor: "SCREENER",
         summary: "LLM chose no deploy",
         reason: stripThink(content).slice(0, 500),
+        metrics: {
+          passing_candidates: passing.length,
+          positions_open: prePositions.total_positions,
+          deploy_amount_sol: deployAmount,
+        },
       });
     } else if (!deploySucceeded) {
       appendDecision({
@@ -713,17 +969,121 @@ IMPORTANT:
         actor: "SCREENER",
         summary: deployAttempted ? "Deploy attempt did not succeed" : "No successful deploy in screening cycle",
         reason: stripThink(content).slice(0, 500),
+        metrics: {
+          passing_candidates: passing.length,
+          deploy_attempted: deployAttempted,
+          deploy_succeeded: deploySucceeded,
+        },
       });
     }
   } catch (error) {
-    log("cron_error", `Screening cycle failed: ${error.message}`);
-    screenReport = `Screening cycle failed: ${error.message}`;
+    const errorText = String(error?.message || error || "unknown error");
+    // Provider fallback: if the LLM provider dies before making a decision,
+    // but screening already produced survivors, deploy the top survivor
+    // deterministically instead of losing the whole cycle.
+    if ((/502|503|524|529|no body|empty response|timeout/i.test(errorText)) && passingForFallback.length >= 1) {
+      try {
+        const topSurvivor = passingForFallback[0]?.pool;
+        if (topSurvivor) {
+          const deployProfile = chooseAdaptiveDeployProfile(topSurvivor, config.strategy);
+          if (deployProfile.deployable) {
+            const deployAmountOverride = Number((screeningDeployAmount * (deployProfile.sizeMultiplier || 1)).toFixed(2));
+            const initialValueUsd = screeningBalance?.sol_price ? deployAmountOverride * screeningBalance.sol_price : null;
+            const binsBelow = Math.max(35, Math.round(computeBinsBelow(topSurvivor.volatility) * (deployProfile.binsMultiplier || 1)));
+            const fallbackResult = await executeTool("deploy_position", {
+              pool_address: topSurvivor.pool,
+              amount_y: deployAmountOverride,
+              strategy: deployProfile.strategy,
+              bins_below: binsBelow,
+              bins_above: 0,
+              pool_name: topSurvivor.name,
+              base_mint: topSurvivor.base?.mint || topSurvivor.base_mint || null,
+              bin_step: topSurvivor.bin_step,
+              base_fee: topSurvivor.base_fee,
+              volatility: topSurvivor.volatility,
+              fee_tvl_ratio: topSurvivor.fee_active_tvl_ratio ?? topSurvivor.fee_tvl_ratio,
+              organic_score: topSurvivor.organic_score,
+              discovery_timeframe: topSurvivor.discovery_timeframe || config.screening.timeframe,
+              initial_value_usd: initialValueUsd,
+            });
+            deployAttempted = true;
+            deploySucceeded = Boolean(fallbackResult?.success && !fallbackResult?.error && !fallbackResult?.blocked);
+            if (deploySucceeded) {
+              deployPool = fallbackResult?.pool || topSurvivor.pool;
+              deployPoolName = fallbackResult?.pool_name || topSurvivor.name;
+              screenReport = [
+                "🚀 DEPLOYED (PROVIDER FALLBACK)",
+                "",
+                `${topSurvivor.name}`,
+                `${topSurvivor.pool}`,
+                "",
+                `◎ ${deployAmountOverride} SOL | ${deployProfile.strategy}`,
+                `Reason: LLM provider failed (${errorText}), so Meridian deployed the top screened survivor deterministically.`,
+              ].join("\n");
+              log("screening", `Provider failure fallback deployed ${topSurvivor.name} after LLM error: ${errorText}`);
+            } else {
+              log("cron_error", `Provider fallback deploy failed after screening error: ${fallbackResult?.error || fallbackResult?.reason || errorText}`);
+              screenReport = `Screening cycle failed: ${errorText}`;
+            }
+          } else {
+            screenReport = `Screening cycle failed: ${errorText}`;
+          }
+        } else {
+          screenReport = `Screening cycle failed: ${errorText}`;
+        }
+      } catch (fallbackError) {
+        log("cron_error", `Provider fallback path failed: ${fallbackError.message}`);
+        screenReport = `Screening cycle failed: ${errorText}`;
+      }
+    } else {
+      log("cron_error", `Screening cycle failed: ${errorText}`);
+      screenReport = `Screening cycle failed: ${errorText}`;
+    }
   } finally {
+    // Update ML emotions based on screening outcome
+    try {
+      const { onScreenerCycle } = await import("./ml/emotions.js");
+      onScreenerCycle({
+        deployed: deploySucceeded && deployAttempted,
+        skipReason: screenReport?.includes("NO DEPLOY") ? "llm rejected"
+                  : screenReport?.includes("not worth deploying") ? "all filtered"
+                  : screenReport?.includes("skipped") ? "no candidates"
+                  : deployAttempted && !deploySucceeded ? "deploy failed"
+                  : null,
+      });
+    } catch {}
+
+    // Persist a structured funnel snapshot to data/screening-snapshots/*.jsonl
+    try {
+      const lastResult = _lastScreeningResult || {};
+      logScreeningSnapshot({
+        runtime_mode: process.env.MERIDIAN_RUNTIME_MODE,
+        total_screened: lastResult.total_screened ?? null,
+        total_eligible: lastResult.total_eligible ?? null,
+        discovery_timeframe: lastResult.discovery_timeframe ?? null,
+        bot_tracked_injected: !!lastResult.bot_tracked_injected,
+        deployed: deploySucceeded && deployAttempted,
+        pool: deployPool,
+        pool_name: deployPoolName,
+        filtered_examples: (lastResult.filtered_examples || []).slice(0, 5),
+      });
+      _lastScreeningResult = null;
+    } catch {}
     _screeningBusy = false;
     if (!silent && telegramEnabled()) {
       if (screenReport) {
-        if (liveMessage) await liveMessage.finalize(stripThink(screenReport)).catch(() => {});
-        else sendMessage(`🔍 Screening Cycle\n\n${stripThink(screenReport)}`).catch(() => { });
+        const { sendMessageWithButtons } = await import("./telegram.js");
+        const { formatScreeningReport } = await import("./utils/telegram-formatter.js");
+        const { text, buttons } = formatScreeningReport(stripThink(screenReport), {
+          pool: deploySucceeded ? deployPool : null,
+          poolName: deployPoolName,
+        });
+        if (liveMessage) {
+          await liveMessage.finalize(null).catch(() => {});
+          await sendMessageWithButtons(text, buttons).catch(() => {});
+        } else {
+          await sendMessageWithButtons(text, buttons).catch(() => {});
+        }
       }
     }
   }
@@ -782,7 +1142,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
 
   // Lightweight 30s PnL poller — updates trailing TP state between management cycles, no LLM
   let _pnlPollBusy = false;
-  const pnlPollInterval = setInterval(async () => {
+  const pnlPollInterval = safeSetInterval(async () => {
     if (_managementBusy || _screeningBusy || _pnlPollBusy) return;
     if (getTrackedPositions(true).length === 0) return;
     _pnlPollBusy = true;
@@ -892,24 +1252,10 @@ process.on("SIGTERM", () => shutdown("SIGTERM"));
 // ═══════════════════════════════════════════
 function formatCandidates(candidates) {
   if (!candidates.length) return "  No eligible pools found right now.";
-
-  const lines = candidates.map((p, i) => {
-    const name = (p.name || "unknown").padEnd(20);
-    const ftvl = `${p.fee_active_tvl_ratio ?? p.fee_tvl_ratio}%`.padStart(8);
-    const vol = `$${((p.volume_window || 0) / 1000).toFixed(1)}k`.padStart(8);
-    const active = `${p.active_pct}%`.padStart(6);
-    const org = String(p.organic_score).padStart(4);
-    return `  [${i + 1}]  ${name}  fee/aTVL:${ftvl}  vol:${vol}  in-range:${active}  organic:${org}`;
-  });
-
-  return [
-    "  #   pool                  fee/aTVL     vol    in-range  organic",
-    "  " + "─".repeat(68),
-    ...lines,
-  ].join("\n");
+  return formatCandidatesListPlain(candidates, { title: "Top candidates" }).text;
 }
 
-function getDeterministicCloseRule(position, managementConfig) {
+export function getDeterministicCloseRule(position, managementConfig) {
   const tracked = getTrackedPosition(position.position);
   const pnlSuspect = (() => {
     if (position.pnl_pct == null) return false;
@@ -942,12 +1288,33 @@ function getDeterministicCloseRule(position, managementConfig) {
   ) {
     return { action: "CLOSE", rule: 4, reason: "OOR" };
   }
+  // ── Rule 4b (trend-aware) — escalate OOR close if PnL is declining ─────
+  if (
+    position.in_range === false &&
+    (position.minutes_out_of_range ?? 0) >= Math.max(5, Math.floor(managementConfig.outOfRangeWaitMinutes * 0.5))
+  ) {
+    const memory = recallForPool(position.pool);
+    if (isRangeDriftAccelerating(memory, position.position)) {
+      return { action: "CLOSE", rule: "4b", reason: "OOR + declining PnL" };
+    }
+  }
   if (
     position.fee_per_tvl_24h != null &&
     position.fee_per_tvl_24h < managementConfig.minFeePerTvl24h &&
     (position.age_minutes ?? 0) >= 60
   ) {
-    return { action: "CLOSE", rule: 5, reason: "low yield" };
+    const memory = recallForPool(position.pool);
+    const snapshots = Array.isArray(memory?.snapshots) ? memory.snapshots : [];
+    const recent = snapshots.filter((s) => s.position === position.position).slice(-3);
+    const feeGrowthFlat = recent.length >= 2
+      ? Math.abs(Number(recent[1].unclaimed_fees_usd || 0) - Number(recent[0].unclaimed_fees_usd || 0)) < 0.02
+      : false;
+    const valueDriftingDown = recent.length >= 2
+      ? Number(recent[1].pnl_pct || 0) <= Number(recent[0].pnl_pct || 0)
+      : false;
+    if (feeGrowthFlat || valueDriftingDown) {
+      return { action: "CLOSE", rule: 5, reason: "low yield" };
+    }
   }
   return null;
 }
@@ -964,10 +1331,16 @@ const MAX_HISTORY = 20;    // keep last 20 messages (10 exchanges)
 let _ttyInterface = null;
 let _latestCandidates = [];
 let _latestCandidatesAt = null;
+let _latestCandidatesEnriched = new Map(); // pool_address -> {pool, sw, n, ti, mem, study}
+let _lastScreeningResult = null;
 
 function setLatestCandidates(candidates = []) {
   _latestCandidates = Array.isArray(candidates) ? candidates : [];
   _latestCandidatesAt = new Date().toISOString();
+  // Don't clear _latestCandidatesEnriched unconditionally — runDeterministicScreen
+  // calls setLatestCandidates after populating the enriched map. External callers
+  // (tests, REPL commands) that go through this helper should also re-enrich if
+  // they want consistent deploy checks.
 }
 
 function getLatestCandidatesMeta() {
@@ -980,45 +1353,14 @@ function getLatestCandidatesMeta() {
 
 function describeLatestCandidates(limit = 5) {
   if (!_latestCandidates.length) return "No cached candidates yet. Run /screen first.";
-  const lines = _latestCandidates.slice(0, limit).map((pool, i) => {
-    const feeTvl = pool.fee_active_tvl_ratio ?? pool.fee_tvl_ratio ?? "?";
-    const vol = pool.volume_window ?? pool.volume_24h ?? "?";
-    const active = pool.active_pct ?? "?";
-    const organic = pool.organic_score ?? "?";
-    return `${i + 1}. ${pool.name} | fee/aTVL ${feeTvl}% | vol $${vol} | in-range ${active}% | organic ${organic}`;
-  });
-  const age = _latestCandidatesAt ? new Date(_latestCandidatesAt).toLocaleString("en-US", { hour12: false }) : "unknown";
-  return `Latest candidates (${_latestCandidates.length}) — updated ${age}\n\n${lines.join("\n")}`;
+  const tf = _latestCandidates[0]?.discovery_timeframe || config.screening.timeframe;
+  return formatCandidatesListPlain(_latestCandidates.slice(0, limit), { title: `Latest candidates (${_latestCandidates.length})`, timeWindow: tf }).text;
 }
 
-function formatWalletStatus(wallet, positions) {
-  const deployAmount = computeDeployAmount(wallet.sol);
-  const hive = isHiveMindEnabled() ? "on" : "off";
-  return [
-    `Wallet: ${wallet.sol} SOL ($${wallet.sol_usd})`,
-    `SOL price: $${wallet.sol_price}`,
-    `Open positions: ${positions.total_positions}/${config.risk.maxPositions}`,
-    `Next deploy amount: ${deployAmount} SOL`,
-    `Dry run: ${process.env.DRY_RUN === "true" ? "yes" : "no"}`,
-    `HiveMind: ${hive}`,
-  ].join("\n");
-}
+
 
 function formatConfigSnapshot() {
-  return [
-    "Config snapshot",
-    "",
-    `Strategy: ${config.strategy.strategy} | binsBelow: ${config.strategy.minBinsBelow}-${config.strategy.maxBinsBelow} | default ${config.strategy.defaultBinsBelow}`,
-    `Deploy: ${config.management.deployAmountSol} SOL | gasReserve: ${config.management.gasReserve} | maxPositions: ${config.risk.maxPositions}`,
-    `Stop loss: ${config.management.stopLossPct}% | take profit: ${config.management.takeProfitPct}%`,
-    `Trailing: ${config.management.trailingTakeProfit ? "on" : "off"} | trigger ${config.management.trailingTriggerPct}% | drop ${config.management.trailingDropPct}%`,
-    `OOR: ${config.management.outOfRangeWaitMinutes}m | cooldown ${config.management.oorCooldownTriggerCount}x / ${config.management.oorCooldownHours}h`,
-    `Repeat deploy cooldown: ${config.management.repeatDeployCooldownEnabled ? "on" : "off"} | ${config.management.repeatDeployCooldownTriggerCount}x / ${config.management.repeatDeployCooldownHours}h | min fee earned ${config.management.repeatDeployCooldownMinFeeEarnedPct}% | ${config.management.repeatDeployCooldownScope}`,
-    `Yield floor: ${config.management.minFeePerTvl24h}% | min age ${config.management.minAgeBeforeYieldCheck}m`,
-    `Screening: ${config.screening.category} / ${config.screening.timeframe} | TVL ${config.screening.minTvl}-${config.screening.maxTvl}`,
-    `Intervals: manage ${config.schedule.managementIntervalMin}m | screen ${config.schedule.screeningIntervalMin}m`,
-    `HiveMind: ${isHiveMindEnabled() ? "enabled" : "disabled"}${config.hiveMind.agentId ? ` | ${config.hiveMind.agentId}` : ""}`,
-  ].join("\n");
+  return formatConfigSnapshotPlain(config).text;
 }
 
 function parseConfigValue(raw) {
@@ -1275,9 +1617,7 @@ async function applySettingsMenuCallback(msg) {
 }
 
 function formatHelpText() {
-  return [
-    "Telegram commands",
-    "",
+  return "📋 Telegram Commands\n\n" + [
     "/help — show commands",
     "/status — wallet + positions snapshot",
     "/wallet — wallet, deploy amount, HiveMind status",
@@ -1290,11 +1630,15 @@ function formatHelpText() {
     "/settings — button menu for common config",
     "/setcfg <key> <value> — update persisted config",
     "/screen — refresh deterministic candidate list",
-    "/candidates — show latest cached candidates",
+    "/candidates — refresh/show deterministic candidate list",
     "/deploy <n> — deploy candidate by cached index",
     "/briefing — morning briefing",
     "/hive — HiveMind sync status",
     "/hive pull — manual HiveMind pull now",
+    "/learn — study top LPers and save lessons",
+    "/lessons — list recent saved lessons",
+    "/thresholds — screening thresholds + stats",
+    "/evolve — trigger threshold evolution",
     "/pause — stop cron cycles",
     "/resume — start cron cycles again",
     "/stop — shut down agent",
@@ -1302,18 +1646,40 @@ function formatHelpText() {
 }
 
 async function runDeterministicScreen(limit = 5) {
-  const top = await getTopCandidates({ limit });
-  const candidates = (top?.candidates || top?.pools || []).slice(0, limit);
-  setLatestCandidates(candidates);
-  if (candidates.length > 0) {
-    const lines = candidates.map((pool, i) => {
+  const { total_positions } = await getMyPositions({ force: true });
+  if (total_positions >= config.risk.maxPositions) {
+    throw new Error(`Max positions reached (${total_positions}/${config.risk.maxPositions})`);
+  }
+  // Use the same enrichment + filter pipeline as the cron path, so /screen
+  // and the auto screening cycle always see the same surviving pool set.
+  const pipeline = await enrichAndFilterCandidates({ limit: 10 });
+  if (pipeline?.error) {
+    return `Screening failed: ${pipeline.error}`;
+  }
+  const { passing, filteredOut } = pipeline;
+  const display = passing.slice(0, limit);
+
+  // Stash the surviving pools (not the raw unfiltered universe) so /deploy N
+  // operates on data that has already passed hard filters.
+  setLatestCandidates(display.map(({ pool }) => pool));
+  // Also stash the enriched data so deployLatestCandidate can reuse it.
+  _latestCandidatesEnriched = new Map(display.map((entry) => [entry.pool.pool, entry]));
+
+  if (display.length > 0) {
+    const lines = display.map((entry, i) => {
+      const { pool, ti } = entry;
       const feeTvl = pool.fee_active_tvl_ratio ?? pool.fee_tvl_ratio ?? "?";
       const vol = pool.volume_window ?? pool.volume_24h ?? "?";
-      return `${i + 1}. ${pool.name} | ${pool.pool}\n   fee/aTVL ${feeTvl}% | vol $${vol} | organic ${pool.organic_score ?? "?"}`;
+      const botPct = ti?.audit?.bot_holders_pct ?? "?";
+      const top10Pct = ti?.audit?.top_holders_pct ?? "?";
+      return `${i + 1}. ${pool.name} | ${pool.pool}\n   fee/aTVL ${feeTvl}% | vol $${vol} | organic ${pool.organic_score ?? "?"} | top10 ${top10Pct}% | bots ${botPct}%`;
     });
-    return `Top candidates (${candidates.length})\n\n${lines.join("\n")}`;
+    const filteredLine = filteredOut.length > 0
+      ? `\n\nFiltered out (${filteredOut.length}):\n${filteredOut.slice(0, 3).map((e) => `- ${e.name}: ${e.reason}`).join("\n")}`
+      : "";
+    return `Top candidates (${display.length} of ${passing.length} passing, ${filteredOut.length} filtered)${filteredLine}\n\n${lines.join("\n")}`;
   }
-  const examples = (top?.filtered_examples || []).slice(0, 3)
+  const examples = (filteredOut || []).slice(0, 3)
     .map((entry) => `- ${entry.name}: ${entry.reason}`)
     .join("\n");
   return examples
@@ -1322,23 +1688,26 @@ async function runDeterministicScreen(limit = 5) {
 }
 
 async function deployLatestCandidate(index) {
+  const { total_positions } = await getMyPositions({ force: true });
+  if (total_positions >= config.risk.maxPositions) {
+    throw new Error(`Max positions reached (${total_positions}/${config.risk.maxPositions})`);
+  }
   const candidate = _latestCandidates[index];
   if (!candidate) {
     throw new Error("Invalid candidate index. Run /screen first.");
   }
+  // Use the enriched context that /screen stashed, so we don't re-fetch RPC.
+  // This is the same data the LLM would have seen if it had picked this candidate.
+  const enriched = _latestCandidatesEnriched?.get(candidate.pool);
+  const context = enriched
+    ? { pool: enriched.pool, sw: enriched.sw, n: enriched.n, ti: enriched.ti, mem: enriched.mem, study: enriched.study }
+    : { pool: candidate };
+
+  // Lone-candidate guard. We use the displayed candidate count (after the
+  // shared pipeline's hard filters), so the same pool that would be flagged
+  // on the auto path is flagged here. The enriched cache is rebuilt by every
+  // /screen call, so this is always up to date.
   if (_latestCandidates.length === 1) {
-    const mint = candidate.base?.mint || candidate.base_mint || null;
-    const [smartWallets, narrative, tokenInfo] = await Promise.allSettled([
-      checkSmartWalletsOnPool({ pool_address: candidate.pool }),
-      mint ? getTokenNarrative({ mint }) : Promise.resolve(null),
-      mint ? getTokenInfo({ query: mint }) : Promise.resolve(null),
-    ]);
-    const context = {
-      pool: candidate,
-      sw: smartWallets.status === "fulfilled" ? smartWallets.value : null,
-      n: narrative.status === "fulfilled" ? narrative.value : null,
-      ti: tokenInfo.status === "fulfilled" ? tokenInfo.value?.results?.[0] : null,
-    };
     const skipReason = getLoneCandidateSkipReason(context);
     if (skipReason) {
       appendDecision({
@@ -1348,16 +1717,43 @@ async function deployLatestCandidate(index) {
         reason: skipReason,
         pool: candidate.pool,
         pool_name: candidate.name,
+        metrics: {
+          fee_tvl_ratio: candidate.fee_active_tvl_ratio ?? candidate.fee_tvl_ratio ?? null,
+          volume: candidate.volume_window ?? null,
+          organic: candidate.organic_score ?? null,
+          holders: candidate.holders ?? null,
+          volatility: candidate.volatility ?? null,
+          token_age_hours: candidate.token_age_hours ?? null,
+        },
       });
       throw new Error(`NO DEPLOY: only cached candidate ${candidate.name} is not worth deploying — ${skipReason}`);
     }
   }
-  const deployAmount = computeDeployAmount((await getWalletBalances()).sol);
-  const binsBelow = computeBinsBelow(candidate.volatility);
+  const wallet = await getWalletBalances();
+  const deployProfile = chooseAdaptiveDeployProfile(candidate, config.strategy);
+  if (!deployProfile.deployable) {
+    appendDecision({
+      type: "no_deploy",
+      actor: "SCREENER",
+      summary: "Adaptive deploy guard blocked candidate",
+      reason: deployProfile.reason,
+      pool: candidate.pool,
+      pool_name: candidate.name,
+      metrics: {
+        volatility: candidate.volatility ?? null,
+        token_age_hours: candidate.token_age_hours ?? null,
+      },
+    });
+    throw new Error(`NO DEPLOY: ${candidate.name} — ${deployProfile.reason}`);
+  }
+  const baseDeployAmount = computeDeployAmount(wallet.sol);
+  const deployAmount = Number((baseDeployAmount * (deployProfile.sizeMultiplier || 1)).toFixed(2));
+  const initialValueUsd = wallet.sol_price ? deployAmount * wallet.sol_price : null;
+  const binsBelow = Math.max(35, Math.round(computeBinsBelow(candidate.volatility) * (deployProfile.binsMultiplier || 1)));
   const result = await executeTool("deploy_position", {
     pool_address: candidate.pool,
     amount_y: deployAmount,
-    strategy: config.strategy.strategy,
+    strategy: deployProfile.strategy,
     bins_below: binsBelow,
     bins_above: 0,
     pool_name: candidate.name,
@@ -1367,12 +1763,13 @@ async function deployLatestCandidate(index) {
     volatility: candidate.volatility,
     fee_tvl_ratio: candidate.fee_active_tvl_ratio ?? candidate.fee_tvl_ratio,
     organic_score: candidate.organic_score,
-    initial_value_usd: candidate.tvl ?? candidate.active_tvl ?? null,
+    discovery_timeframe: candidate.discovery_timeframe || config.screening.timeframe,
+    initial_value_usd: initialValueUsd,
   });
   if (result?.success === false || result?.error) {
     throw new Error(result.error || "Deploy failed");
   }
-  return { result, candidate, deployAmount, binsBelow };
+  return { result, candidate, deployAmount, binsBelow, deployProfile };
 }
 
 function appendHistory(userMsg, assistantMsg) {
@@ -1400,14 +1797,138 @@ async function drainTelegramQueue() {
 async function telegramHandler(msg) {
   const text = msg?.text?.trim();
   if (!text) return;
-  if (msg?.isCallback && text.startsWith("cfg:")) {
-    try {
-      await applySettingsMenuCallback(msg);
-    } catch (e) {
-      await answerCallbackQuery(msg.callbackQueryId, e.message).catch(() => {});
+
+  // ── Callback button handlers ──────────────────────────
+  if (msg?.isCallback) {
+    const data = text;
+    // Settings menu
+    if (data.startsWith("cfg:")) {
+      try { await applySettingsMenuCallback(msg); } catch (e) {
+        await answerCallbackQuery(msg.callbackQueryId, e.message).catch(() => {});
+      }
+      return;
+    }
+    // Forward slash commands from inline buttons
+    if (data.startsWith("cmd:")) {
+      const cmd = data.slice(4);
+      await answerCallbackQuery(msg.callbackQueryId).catch(() => {});
+      if (cmd === "/screen" || cmd === "/candidates") {
+        try {
+          const { ACTION_BUTTONS, esc } = await import("./utils/telegram-formatter.js");
+          const sent = await sendHTML("🔍 <i>Scanning pools…</i>").catch(() => null);
+          const msgId = sent?.result?.message_id;
+          const report = await runDeterministicScreen(5);
+          if (msgId) {
+            await editMessageWithButtons(esc(report), msgId, ACTION_BUTTONS.screening()).catch(() => {});
+          } else {
+            await sendMessageWithButtons(esc(report), ACTION_BUTTONS.screening()).catch(() => {});
+          }
+        } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+        return;
+      }
+      if (cmd === "/status" || cmd === "/wallet") {
+        try {
+          const [wallet, positions] = await Promise.all([getWalletBalances(), getMyPositions({ force: true })]);
+          const { getCurrentState } = await import("./ml/emotions.js");
+          const { text: cardText, buttons: cardBtns } = formatWalletStatus({
+            wallet, positions, ml: getCurrentState(), config,
+            runtimeMode: process.env.MERIDIAN_RUNTIME_MODE,
+          });
+          await sendMessageWithButtons(cardText, cardBtns).catch(() => {});
+        } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+        return;
+      }
+      if (cmd === "/positions") {
+        try {
+          const { positions, total_positions } = await getMyPositions({ force: true });
+          if (total_positions === 0) { await sendMessage("No open positions."); return; }
+          for (const p of positions.slice(0, 5)) {
+            const { formatPositionCard } = await import("./utils/telegram-formatter.js");
+            const { text: cardText, buttons: cardBtns } = formatPositionCard(p);
+            await sendMessageWithButtons(cardText, cardBtns).catch(() => {});
+          }
+        } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+        return;
+      }
+      if (cmd === "/settings") {
+        await showSettingsMenu().catch((e) => sendMessage(`Settings error: ${e.message}`).catch(() => {}));
+        return;
+      }
+      return;
+    }
+    // Position-level actions
+    if (data.startsWith("pnl:")) {
+      try {
+        const posAddr = data.slice(4);
+        const { getPositionPnl, getMyPositions } = await import("./tools/dlmm.js");
+        const tracked = getTrackedPosition(posAddr);
+        const pnl = await getPositionPnl({ pool_address: tracked?.pool, position_address: posAddr });
+        // Fall back to cached live position data for fields getPositionPnl doesn't return
+        const live = await getMyPositions({ force: true, silent: true }).catch(() => null);
+        const livePos = live?.positions?.find((p) => p.position === posAddr) || {};
+        const allTimeFees = pnl?.all_time_fees_usd
+          ?? Number(livePos?.collected_fees_usd || 0) + Number(livePos?.unclaimed_fees_usd || 0);
+        const initialUsd = tracked?.initial_value_usd
+          ?? (pnl?.pnl_usd != null && pnl?.current_value_usd != null
+            ? pnl.current_value_usd - pnl.pnl_usd
+            : null);
+        const positionView = {
+          position: posAddr,
+          pool: tracked?.pool || livePos?.pool,
+          pair: tracked?.pool_name || livePos?.pair,
+          pnl_pct: pnl?.pnl_pct,
+          pnl_usd: pnl?.pnl_usd,
+          initial_value_usd: initialUsd,
+          final_value_usd: pnl?.current_value_usd,
+          fees_earned_usd: allTimeFees,
+          unclaimed_fees_usd: pnl?.unclaimed_fee_usd ?? livePos?.unclaimed_fees_usd,
+          range_efficiency: livePos?.range_efficiency,
+          in_range: pnl?.in_range ?? livePos?.in_range,
+          minutes_out_of_range: livePos?.minutes_out_of_range,
+          fee_per_tvl_24h: pnl?.fee_per_tvl_24h ?? livePos?.fee_per_tvl_24h,
+          age_minutes: pnl?.age_minutes ?? livePos?.age_minutes,
+          peak_pnl_pct: tracked?.peak_pnl_pct,
+        };
+        const { formatPositionPnLCard } = await import("./utils/telegram-formatter.js");
+        const { text: pnlText, buttons: pnlBtns } = formatPositionPnLCard(positionView, {
+          solMode: config.management.solMode === true,
+        });
+        await answerCallbackQuery(msg.callbackQueryId, `PnL: ${pnl?.pnl_pct != null ? `${pnl.pnl_pct.toFixed(2)}%` : "?"}`).catch(() => {});
+        await sendMessageWithButtons(pnlText, pnlBtns).catch(() => {});
+      } catch (e) { await answerCallbackQuery(msg.callbackQueryId, e.message).catch(() => {}); }
+      return;
+    }
+    if (data.startsWith("close:")) {
+      try {
+        const posAddr = data.slice(6);
+        await answerCallbackQuery(msg.callbackQueryId, "Closing...").catch(() => {});
+        const result = await closePosition({ position_address: posAddr });
+        const { formatCloseResult } = await import("./utils/telegram-formatter.js");
+        const tracked = getTrackedPosition(posAddr);
+        const { text, buttons } = formatCloseResult(result, {
+          pair: tracked?.pool_name,
+          reason: msg.callbackData?.includes("rebalance") ? "rebalance" : "telegram",
+        });
+        await sendMessageWithButtons(text, buttons).catch(() => {});
+      } catch (e) { await sendMessage(`Close failed: ${e.message}`).catch(() => {});
+        await answerCallbackQuery(msg.callbackQueryId, "Failed").catch(() => {}); }
+      return;
+    }
+    if (data.startsWith("claim:")) {
+      try {
+        const posAddr = data.slice(6);
+        await answerCallbackQuery(msg.callbackQueryId, "Claiming...").catch(() => {});
+        const { claimFees } = await import("./tools/dlmm.js");
+        const result = await claimFees({ position_address: posAddr });
+        await sendMessage(`💰 Claimed: ${result?.claimed_amount ?? "done"}`).catch(() => {});
+      } catch (e) { await sendMessage(`Claim failed: ${e.message}`).catch(() => {});
+        await answerCallbackQuery(msg.callbackQueryId, "Failed").catch(() => {}); }
+      return;
     }
     return;
   }
+
+  // ── Settings menu shortcuts ──────────────────────────────
   if (text === "/settings" || text === "/menu" || text === "/configmenu") {
     await showSettingsMenu().catch((e) => sendMessage(`Settings error: ${e.message}`).catch(() => {}));
     return;
@@ -1432,18 +1953,32 @@ async function telegramHandler(msg) {
     return;
   }
 
+  if (text === "/start") {
+    try {
+      await syncMlPersonalityFromConfig();
+      const [wallet, positions] = await Promise.all([getWalletBalances(), getMyPositions({ force: true })]);
+      const { text: startText, buttons: startBtns } = formatStart({ wallet, positions, config });
+      await sendMessageWithButtons(startText, startBtns).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
   if (text === "/help") {
-    await sendMessage(formatHelpText()).catch(() => {});
+    await sendHTML(formatHelp()).catch(() => {});
     return;
   }
 
   if (text === "/wallet" || text === "/status") {
     try {
       const [wallet, positions] = await Promise.all([getWalletBalances(), getMyPositions({ force: true })]);
-      const suffix = text === "/status" && positions.total_positions
-        ? `\n\nUse /positions for the numbered list.`
-        : "";
-      await sendMessage(`${formatWalletStatus(wallet, positions)}${suffix}`).catch(() => {});
+      const { getCurrentState } = await import("./ml/emotions.js");
+      const { text: cardText, buttons: cardBtns } = formatWalletStatus({
+        wallet, positions, ml: getCurrentState(), config,
+        runtimeMode: process.env.MERIDIAN_RUNTIME_MODE,
+      });
+      await sendMessageWithButtons(cardText, cardBtns).catch(() => {});
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
@@ -1451,7 +1986,8 @@ async function telegramHandler(msg) {
   }
 
   if (text === "/config") {
-    await sendMessage(formatConfigSnapshot()).catch(() => {});
+    const { text, buttons } = formatConfigSnapshotCard(config, { runtimeMode: process.env.MERIDIAN_RUNTIME_MODE });
+    await sendMessageWithButtons(text, buttons).catch(() => {});
     return;
   }
 
@@ -1459,14 +1995,13 @@ async function telegramHandler(msg) {
     try {
       const { positions, total_positions } = await getMyPositions({ force: true });
       if (total_positions === 0) { await sendMessage("No open positions."); return; }
-      const cur = config.management.solMode ? "◎" : "$";
-      const lines = positions.map((p, i) => {
-        const pnl = p.pnl_usd >= 0 ? `+${cur}${p.pnl_usd}` : `-${cur}${Math.abs(p.pnl_usd)}`;
-        const age = p.age_minutes != null ? `${p.age_minutes}m` : "?";
-        const oor = !p.in_range ? " ⚠️OOR" : "";
-        return `${i + 1}. ${p.pair} | ${cur}${p.total_value_usd} | PnL: ${pnl} | fees: ${cur}${p.unclaimed_fees_usd} | ${age}${oor}`;
-      });
-      await sendMessage(`📊 Open Positions (${total_positions}):\n\n${lines.join("\n")}\n\n/close <n> to close | /set <n> <note> to set instruction`);
+      for (const p of positions.slice(0, 5)) {
+        const { text: cardText, buttons: cardBtns } = formatPositionCard(p, { solMode: config.management.solMode === true });
+        await sendMessageWithButtons(cardText, cardBtns).catch(() => {});
+      }
+      if (positions.length > 5) {
+        await sendMessageWithButtons(`... and ${positions.length - 5} more positions. Use /pool <n> for detail.`, ACTION_BUTTONS.screening()).catch(() => {});
+      }
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }
@@ -1477,17 +2012,8 @@ async function telegramHandler(msg) {
       const idx = parseInt(poolMatch[1]) - 1;
       const { positions } = await getMyPositions({ force: true });
       if (idx < 0 || idx >= positions.length) { await sendMessage("Invalid number. Use /positions first."); return; }
-      const pos = positions[idx];
-      await sendMessage([
-        `${idx + 1}. ${pos.pair}`,
-        `Pool: ${pos.pool}`,
-        `Position: ${pos.position}`,
-        `Range: ${pos.lower_bin} → ${pos.upper_bin} | active ${pos.active_bin}`,
-        `PnL: ${pos.pnl_pct ?? "?"}% | fees: ${config.management.solMode ? "◎" : "$"}${pos.unclaimed_fees_usd ?? "?"}`,
-        `Value: ${config.management.solMode ? "◎" : "$"}${pos.total_value_usd ?? "?"}`,
-        `Age: ${pos.age_minutes ?? "?"}m | ${pos.in_range ? "IN RANGE" : `OOR ${pos.minutes_out_of_range ?? 0}m`}`,
-        pos.instruction ? `Note: ${pos.instruction}` : null,
-      ].filter(Boolean).join("\n"));
+      const { text: cardText, buttons: cardBtns } = formatPositionCard(positions[idx], { solMode: config.management.solMode === true });
+      await sendMessageWithButtons(cardText, cardBtns).catch(() => {});
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
@@ -1505,8 +2031,9 @@ async function telegramHandler(msg) {
       const result = await closePosition({ position_address: pos.position });
       if (result.success) {
         const closeTxs = result.close_txs?.length ? result.close_txs : result.txs;
-        const claimNote = result.claim_txs?.length ? `\nClaim txs: ${result.claim_txs.join(", ")}` : "";
-        await sendMessage(`✅ Closed ${pos.pair}\nPnL: ${config.management.solMode ? "◎" : "$"}${result.pnl_usd ?? "?"} | close txs: ${closeTxs?.join(", ") || "n/a"}${claimNote}`);
+        const { formatCloseResult } = await import("./utils/telegram-formatter.js");
+        const { text, buttons } = formatCloseResult(result, { pair: pos.pair, reason: "/close" });
+        await sendMessageWithButtons(text, buttons).catch(() => {});
       } else {
         await sendMessage(`❌ Close failed: ${JSON.stringify(result)}`);
       }
@@ -1558,6 +2085,7 @@ async function telegramHandler(msg) {
         changes: { [key]: value },
         reason: "Telegram slash command /setcfg",
       });
+      if (key === "mlPersonality") await syncMlPersonalityFromConfig();
       if (!result?.success) {
         await sendMessage(`Config update failed.\nUnknown: ${(result?.unknown || []).join(", ") || "none"}`).catch(() => {});
         return;
@@ -1571,7 +2099,15 @@ async function telegramHandler(msg) {
 
   if (text === "/screen") {
     try {
-      await sendMessage(await runDeterministicScreen(5)).catch(() => {});
+      const { ACTION_BUTTONS, esc } = await import("./utils/telegram-formatter.js");
+      const sent = await sendHTML("🔍 <i>Scanning pools…</i>").catch(() => null);
+      const msgId = sent?.result?.message_id;
+      const report = await runDeterministicScreen(5);
+      if (msgId) {
+        await editMessageWithButtons(esc(report), msgId, ACTION_BUTTONS.screening()).catch(() => {});
+      } else {
+        await sendMessageWithButtons(esc(report), ACTION_BUTTONS.screening()).catch(() => {});
+      }
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
@@ -1579,7 +2115,19 @@ async function telegramHandler(msg) {
   }
 
   if (text === "/candidates") {
-    await sendMessage(describeLatestCandidates(5)).catch(() => {});
+    const recent = _latestCandidates.slice(0, 5);
+    if (!recent.length) {
+      const { ACTION_BUTTONS } = await import("./utils/telegram-formatter.js");
+      const { text: emptyText, buttons: emptyBtns } = formatCandidatesList([], { title: "Top Candidates" });
+      await sendMessageWithButtons(emptyText, emptyBtns).catch(() => {});
+      return;
+    }
+    const discovery_tf = recent[0]?.discovery_timeframe || config.screening.timeframe;
+    const { text: cText, buttons: cBtns } = formatCandidatesList(recent, {
+      title: "Top Candidates",
+      timeWindow: discovery_tf,
+    });
+    await sendMessageWithButtons(cText, cBtns).catch(() => {});
     return;
   }
 
@@ -1640,19 +2188,232 @@ async function telegramHandler(msg) {
         (pullMode === "auto" || isManualPull) ? pullHiveMindLessons(12) : Promise.resolve(null),
         (pullMode === "auto" || isManualPull) ? pullHiveMindPresets() : Promise.resolve(null),
       ]);
-      await sendMessage([
-        "HiveMind: enabled",
-        `Agent ID: ${agentId}`,
+      await sendHTML([
+        "<b>🧠 HiveMind</b>",
+        `Agent: <code>${agentId}</code>`,
         `URL: ${config.hiveMind.url}`,
-        `Pull mode: ${pullMode}`,
-        `Register: ${registerResult ? "ok" : "warn"}`,
-        `Shared lessons: ${Array.isArray(lessons) ? lessons.length : (pullMode === "manual" ? "manual" : 0)}`,
+        `Pull: ${pullMode}`,
+        `Register: ${registerResult ? "✅ ok" : "⚠️ warn"}`,
+        `Lessons: ${Array.isArray(lessons) ? lessons.length : (pullMode === "manual" ? "manual" : 0)}`,
         `Presets: ${Array.isArray(presets) ? presets.length : (pullMode === "manual" ? "manual" : 0)}`,
         isManualPull ? "Manual pull: completed" : null,
-      ].join("\n")).catch(() => {});
+      ].filter(Boolean).join("\n")).catch(() => {});
     } catch (e) {
       await sendMessage(`HiveMind error: ${e.message}`).catch(() => {});
     }
+    return;
+  }
+
+  if (text === "/thresholds") {
+    try {
+      const perf = getPerformanceSummary();
+      const { text: thresholdsText, buttons: thresholdBtns } = formatThresholds(config);
+      const tail = perf
+        ? `\n<b>Performance</b>\n${perf.total_positions_closed} closed | ${perf.win_rate_pct}% win | avg PnL ${perf.avg_pnl_pct}%`
+        : `\n<i>No closed positions yet.</i>`;
+      await sendMessageWithButtons(thresholdsText + tail, thresholdBtns).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/ml-status" || text === "/mlstatus" || text === "/ml") {
+    await syncMlPersonalityFromConfig();
+    try {
+      const { mlStatus } = await import("./ml/cli.js");
+      const text = mlStatus(config);
+      await sendMessage(text).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/evolve") {
+    try {
+      const perf = getPerformanceSummary();
+      if (!perf || perf.total_positions_closed < 5) {
+        const needed = 5 - (perf?.total_positions_closed || 0);
+        await sendMessage(`Need ${needed} more closed position(s) to evolve (have ${perf?.total_positions_closed || 0}).`).catch(() => {});
+        return;
+      }
+      const { PATHS } = await import("./utils/paths.js");
+      const lessonsData = JSON.parse((await import("fs")).readFileSync(PATHS.lessons, "utf8"));
+      const result = evolveThresholds(lessonsData.performance, config);
+      if (!result || Object.keys(result.changes).length === 0) {
+        await sendMessage("No threshold changes needed.").catch(() => {});
+      } else {
+        reloadScreeningThresholds();
+        const lines = ["<b>Thresholds Evolved</b>"];
+        for (const [k, v] of Object.entries(result.changes)) {
+          lines.push(`  • <code>${k}</code>: ${v}`);
+        }
+        for (const [k, v] of Object.entries(result.rationale || {})) {
+          lines.push(`  <i>${k}: ${v}</i>`);
+        }
+        lines.push("");
+        lines.push("Saved to user-config.json and applied to live config.");
+        await sendHTML(lines.join("\n")).catch(() => {});
+      }
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  if (/^\/mlpersonality\s+/i.test(text)) {
+    try {
+      const desired = text.replace(/^\/mlpersonality\s+/i, "").trim().toLowerCase();
+      const { setActive, list } = await import("./ml/personalities.js");
+      setActive(desired);
+      await executeTool("update_config", {
+        changes: { mlPersonality: desired },
+        reason: "Telegram slash command /mlpersonality",
+      });
+      await sendMessage(`✅ ML personality set to ${desired}. Available: ${list().join(", ")}`).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/ml-train" || text === "/mltrain") {
+    try {
+      const { trainModel, loadTrainingData } = await import("./ml/trainer.js");
+      const { getCurrentState } = await import("./ml/emotions.js");
+      const mlCfg = config?.ml || {};
+      const sampleCount = loadTrainingData().length;
+      const result = await trainModel({ config: mlCfg, emotionState: getCurrentState(), force: true });
+      if (!result.trained) {
+        await sendMessage(`ML training skipped — ${result.reason || "unknown"}\nNeed at least ${mlCfg.minSamples || 10} closed positions (have ${result.sampleCount ?? sampleCount ?? 0}).`).catch(() => {});
+        return;
+      }
+      const finalLossValue = result.finalLoss?.loss ?? result.finalLoss?.total ?? result.finalLoss?.totalLoss ?? result.finalLoss;
+      const loss = finalLossValue != null && Number.isFinite(Number(finalLossValue)) ? Number(finalLossValue).toFixed(4) : "N/A";
+      const cvAcc = result.cv?.accuracy != null ? `${result.cv.accuracy}%` : "n/a";
+      const cvF1 = result.cv?.f1 != null ? result.cv.f1 : "n/a";
+      const lines = [
+        "<b>🧠 ML Training</b>",
+        `Trained on ${result.sampleCount} samples`,
+        `Final loss: ${loss}`,
+        `K-fold: ${result.folds || result.cv?.foldCount || "n/a"}`,
+        `CV accuracy: ${cvAcc}`,
+        `CV F1: ${cvF1}`,
+        "",
+        "Model checkpoint saved to <code>data/ml/ml-model.json</code>.",
+      ];
+      await sendHTML(lines.join("\n")).catch(() => {});
+    } catch (e) {
+      await sendMessage(`ML training failed: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  if (text.startsWith("/learn")) {
+    try {
+      const parts = text.split(" ");
+      const poolArg = parts[1] || null;
+      let poolsToStudy = [];
+      if (poolArg) {
+        poolsToStudy = [{ pool: poolArg, name: poolArg }];
+      } else {
+        const { candidates } = await getTopCandidates({ limit: 5 });
+        poolsToStudy = candidates.map((c) => ({ pool: c.pool, name: c.name }));
+      }
+      if (!poolsToStudy.length) {
+        await sendMessage("No pools to study. Run /screen first.").catch(() => {});
+        return;
+      }
+      await sendMessage(`Studying top LPers across ${poolsToStudy.length} pools...`).catch(() => {});
+      // This is forwarded to the agent loop below — the LLM handles it
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+      return;
+    }
+    // Fall through to agent loop — don't return
+  }
+
+  if (text === "/lessons") {
+    try {
+      const { listLessons } = await import("./lessons.js");
+      const data = listLessons({ limit: 20 });
+      if (!data.lessons.length) {
+        await sendMessage("No lessons saved yet. Use /learn to generate them.").catch(() => {});
+        return;
+      }
+      const { text: lessonsText, buttons: lessonsBtns } = formatLessons(data.lessons, { limit: 20 });
+      await sendMessageWithButtons(lessonsText, lessonsBtns).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/balance") {
+    try {
+      const wallet = await getWalletBalances();
+      const { text: balanceText, buttons: balanceBtns } = formatBalance(wallet, {
+        solMode: config.management.solMode === true,
+      });
+      await sendMessageWithButtons(balanceText, balanceBtns).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/performance") {
+    try {
+      const { getPerformanceHistory, getPerformanceSummary } = await import("./lessons.js");
+      const history = getPerformanceHistory({ hours: 999999, limit: 50 });
+      const summary = getPerformanceSummary();
+      const { text: perfText, buttons: perfBtns } = formatPerformance(summary, history, { limit: 5 });
+      await sendMessageWithButtons(perfText, perfBtns).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/screening-stats" || text === "/screeningstats") {
+    try {
+      const snapshots = readScreeningSnapshots(new Date(), 200);
+      const summary = summarizeScreeningSnapshots(snapshots);
+      const lines = [
+        "<b>📊 Screening Stats (today, UTC)</b>",
+        `Cycles: <code>${summary.cycles}</code>`,
+        `Total screened: <code>${summary.total_screened}</code>`,
+        `Total eligible: <code>${summary.total_eligible}</code>`,
+        `Bot-tracked injected: <code>${summary.bot_tracked_injected}</code>`,
+      ];
+      if (Object.keys(summary.discovery_timeframes).length) {
+        lines.push("");
+        lines.push("<b>Timeframes used:</b>");
+        for (const [tf, count] of Object.entries(summary.discovery_timeframes)) {
+          lines.push(`  • ${tf}: ${count}`);
+        }
+      }
+      if (Object.keys(summary.rejection_counts).length) {
+        lines.push("");
+        lines.push("<b>Top rejections:</b>");
+        const top = Object.entries(summary.rejection_counts)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 8);
+        for (const [reason, count] of top) {
+          lines.push(`  • ${reason}: ${count}`);
+        }
+      }
+      await sendHTML(lines.join("\n")).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/stop") {
+    await sendMessage("🛑 Shutting down...").catch(() => {});
+    await shutdown("telegram command");
     return;
   }
 
@@ -1686,6 +2447,107 @@ async function telegramHandler(msg) {
 function fmtPct(value) {
   const n = Number(value);
   return Number.isFinite(n) ? `${n.toFixed(2)}%` : "?";
+}
+
+function buildGmgnFunnelReport(stageCounts, allFiltered = [], { fromStage = 1 } = {}) {
+  if (!stageCounts) return null;
+  const sc = stageCounts;
+  const funnel = `GMGN funnel: ranked=${sc.ranked ?? "?"} → S1=${sc.s1 ?? "?"} → S2=${sc.s2 ?? "?"} → S3=${sc.s3 ?? "?"} → S4=${sc.s4 ?? "?"} → final=${sc.s5 ?? "?"}`;
+  const byStage = {};
+  for (const f of allFiltered) {
+    if (f.stage < fromStage) continue;
+    const key = `s${f.stage}`;
+    if (!byStage[key]) byStage[key] = [];
+    byStage[key].push(`${f.name}: ${f.reason}`);
+  }
+  const stageLabels = { s2: "S2 info", s3: "S3 pool", s4: "S4 indicators", s5: "S5 pick" };
+  const details = Object.entries(byStage)
+    .map(([key, items]) => `${stageLabels[key] || key}:\n${items.map(r => `  • ${r}`).join("\n")}`)
+    .join("\n");
+  return details ? `${funnel}\n\n${details}` : funnel;
+}
+
+// Data-anchored verdict for a single candidate. Used to surface the real
+// hard-filter state alongside the LLM's narrative so the operator can
+// spot when the LLM invents a reason that doesn't match the config.
+function formatHardFilterVerdict({ pool, sw, n, ti } = {}) {
+  if (!pool) return "(no pool data)";
+  const feeTvl = pool.fee_active_tvl_ratio ?? pool.fee_tvl_ratio;
+  const feeTvlPass = Number.isFinite(feeTvl) && feeTvl >= config.screening.minFeeActiveTvlRatio;
+  const tvl = pool.tvl ?? pool.active_tvl;
+  const tvlPass = Number.isFinite(tvl) && tvl >= config.screening.minTvl && tvl <= config.screening.maxTvl;
+  const organic = pool.organic_score;
+  const organicPass = Number.isFinite(organic) && organic >= config.screening.minOrganic;
+  const botPct = ti?.audit?.bot_holders_pct;
+  const botPass = botPct == null || botPct <= config.screening.maxBotHoldersPct;
+  const top10Pct = ti?.audit?.top_holders_pct;
+  const top10Pass = top10Pct == null || top10Pct <= config.screening.maxTop10Pct;
+  const swCount = sw?.in_pool?.length ?? pool.gmgn_smart_wallets ?? 0;
+  const hasNarrative = !!n?.narrative;
+  const launchpad = ti?.launchpad;
+  const launchpadPass = launchpad == null
+    || (config.screening.allowedLaunchpads?.length === 0 || config.screening.allowedLaunchpads.includes(launchpad))
+    || (config.screening.blockedLaunchpads?.length === 0 || !config.screening.blockedLaunchpads.includes(launchpad));
+  const rows = [
+    ["name", pool.name, true],
+    ["fee/aTVL", `${feeTvl ?? "?"}% (min ${config.screening.minFeeActiveTvlRatio}%)`, feeTvlPass],
+    ["tvl", `$${tvl ?? "?"} (range $${config.screening.minTvl}-$${config.screening.maxTvl})`, tvlPass],
+    ["organic", `${organic ?? "?"} (min ${config.screening.minOrganic})`, organicPass],
+    ["bot holders", `${botPct ?? "?"}% (max ${config.screening.maxBotHoldersPct}%)`, botPass],
+    ["top10", `${top10Pct ?? "?"}% (max ${config.screening.maxTop10Pct}%)`, top10Pass],
+    ["launchpad", launchpad ?? "(none)", launchpadPass],
+    ["smart wallets", String(swCount), swCount > 0 || hasNarrative],
+    ["narrative", n?.narrative?.slice(0, 80) || "(none)", hasNarrative],
+  ];
+  return rows.map(([k, v, ok]) => `  ${ok ? "✓" : "✗"} ${k}: ${v}`).join("\n");
+}
+
+// Cross-check the LLM's NO DEPLOY narrative against the actual data + config.
+// Returns a list of human-readable warnings, e.g.:
+//   - "Cited threshold 2% but config minFeeActiveTvlRatio is 0.015%"
+//   - "Cited pool fee/aTVL 0% but pool block shows 0.04%"
+function checkLlmNarrativeAgainstData(llmText, passing, cfg) {
+  const warnings = new Set();
+  if (!llmText || !passing?.length) return [];
+  const feeTvlCitations = findPercentCitations(llmText, "fee");
+  const thresholdCitation = llmText.match(/minimum[^.\n]{0,40}?(\d+(?:\.\d+)?)\s*%/i)
+    || llmText.match(/threshold[^.\n]{0,40}?(\d+(?:\.\d+)?)\s*%/i)
+    || llmText.match(/required[^.\n]{0,40}?(\d+(?:\.\d+)?)\s*%/i);
+
+  if (thresholdCitation) {
+    const cited = Number(thresholdCitation[1]);
+    const actual = Number(cfg.screening.minFeeActiveTvlRatio);
+    if (Number.isFinite(cited) && Number.isFinite(actual) && Math.abs(cited - actual) > 0.001) {
+      warnings.add(`Cited fee/TVL threshold ${cited}% but config minFeeActiveTvlRatio is ${actual}%`);
+    }
+  }
+
+  for (const { value } of feeTvlCitations) {
+    const cited = Number(value);
+    if (!Number.isFinite(cited)) continue;
+    if (cited === 0) {
+      const nonzero = passing.find((e) => {
+        const v = e.pool?.fee_active_tvl_ratio ?? e.pool?.fee_tvl_ratio;
+        return Number.isFinite(v) && v > 0;
+      });
+      if (nonzero) {
+        warnings.add(`Cited fee/aTVL 0% for ${nonzero.pool.name} but pool block shows ${nonzero.pool.fee_active_tvl_ratio ?? nonzero.pool.fee_tvl_ratio}%`);
+      }
+    }
+  }
+
+  return [...warnings];
+}
+
+// Find percent citations in the LLM text. Looks for "field context ... 0.04%" patterns.
+function findPercentCitations(text, fieldRegex) {
+  const citations = [];
+  const re = new RegExp(`(${fieldRegex})[^.\n]{0,60}?(\\d+(?:\\.\\d+)?)\\s*%`, "gi");
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    citations.push({ value: m[2], fieldContext: m[1] });
+  }
+  return citations;
 }
 
 function getLoneCandidateSkipReason({ pool, sw, n, ti } = {}) {
@@ -1722,8 +2584,136 @@ function computeBinsBelow(volatility) {
   return Math.max(lo, Math.min(hi, Math.round(lo + (parsedVolatility / 5) * (hi - lo))));
 }
 
+async function syncMlPersonalityFromConfig() {
+  try {
+    const desired = config?.ml?.personality;
+    if (!desired) return false;
+    const { getActive, setActive } = await import("./ml/personalities.js");
+    const active = getActive();
+    if (active?.name !== desired) {
+      setActive(desired);
+      return true;
+    }
+  } catch {}
+  return false;
+}
+
 // Register restarter — when update_config changes intervals, running cron jobs get replaced
 registerCronRestarter(() => { if (cronStarted) startCronJobs(); });
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+
+// Shared candidate enrichment + filter pipeline. Used by:
+//  - runScreeningCycle() (cron path, builds LLM context)
+//  - runDeterministicScreen() (manual /screen, fills latestCandidates cache)
+// Returns { passing, filteredOut, gmgnStageCounts, gmgnAllFiltered, topCandidates, candidates, allCandidates }.
+// `passing` is the list of {pool, sw, n, ti, mem, study} blocks that survived all hard filters.
+async function enrichAndFilterCandidates({ limit = 10, liveMessage = null } = {}) {
+  await liveStage(liveMessage, "filtering");
+  const topCandidates = await getTopCandidates({ limit }).catch((e) => ({ _error: e.message }));
+  if (topCandidates?._error) {
+    return { error: topCandidates._error };
+  }
+  const candidates = (topCandidates?.candidates || topCandidates?.pools || []).slice(0, limit);
+  const gmgnStageCounts = topCandidates?.stage_counts ?? null;
+  const gmgnAllFiltered = topCandidates?.all_filtered ?? [];
+
+  await liveStage(liveMessage, "enriching");
+  const allCandidates = [];
+  const BATCH_SIZE = 2;
+  const STAGGER_MS = 120;
+  const BATCH_PAUSE_MS = 120;
+  const SMART_WALLET_TIMEOUT_MS = 3500;
+  const NARRATIVE_TIMEOUT_MS = 1500;
+  const TOKEN_INFO_TIMEOUT_MS = 2000;
+  const STUDY_TIMEOUT_MS = 3000;
+  for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
+    const batch = candidates.slice(i, i + BATCH_SIZE);
+    const batchResults = await Promise.all(
+      batch.map(async (pool, j) => {
+        if (j > 0) await sleep(STAGGER_MS);
+        const mint = pool.base?.mint;
+        const [smartWallets, narrative, tokenInfo, study] = await Promise.allSettled([
+          withTimeout(
+            checkSmartWalletsOnPool({ pool_address: pool.pool }).catch(() => null),
+            SMART_WALLET_TIMEOUT_MS,
+          ),
+          mint
+            ? withTimeout(getTokenNarrative({ mint }).catch(() => null), NARRATIVE_TIMEOUT_MS)
+            : Promise.resolve(null),
+          mint
+            ? withTimeout(getTokenInfo({ query: mint }).catch(() => null), TOKEN_INFO_TIMEOUT_MS)
+            : Promise.resolve(null),
+          withTimeout(
+            studyTopLPers({ pool_address: pool.pool, limit: 3 }).catch(() => null),
+            STUDY_TIMEOUT_MS,
+          ),
+        ]);
+
+        const swValue = smartWallets.status === "fulfilled" ? smartWallets.value : null;
+        const narrativeValue = narrative.status === "fulfilled" ? narrative.value : null;
+        const tokenInfoValue = tokenInfo.status === "fulfilled" ? tokenInfo.value : null;
+        const studyValue = study.status === "fulfilled" ? study.value : null;
+
+        if (study.status === "fulfilled" && study.value == null) {
+          log("screening", `Study timeout: ${pool.name} exceeded ${STUDY_TIMEOUT_MS}ms — continuing without LP study`);
+        }
+        if (tokenInfo.status === "fulfilled" && tokenInfo.value == null) {
+          log("screening", `Token info timeout: ${pool.name} exceeded ${TOKEN_INFO_TIMEOUT_MS}ms — continuing with partial data`);
+        }
+        if (narrative.status === "fulfilled" && narrative.value == null) {
+          log("screening", `Narrative timeout: ${pool.name} exceeded ${NARRATIVE_TIMEOUT_MS}ms — continuing without narrative`);
+        }
+        if (smartWallets.status === "fulfilled" && smartWallets.value == null) {
+          log("screening", `Smart-wallet timeout: ${pool.name} exceeded ${SMART_WALLET_TIMEOUT_MS}ms — continuing without smart-wallet signal`);
+        }
+
+        return {
+          pool,
+          sw: swValue,
+          n: narrativeValue,
+          ti: tokenInfoValue?.results?.[0] || null,
+          mem: recallForPool(pool.pool),
+          study: studyValue,
+        };
+      })
+    );
+    allCandidates.push(...batchResults);
+    if (i + BATCH_SIZE < candidates.length) {
+      await sleep(BATCH_PAUSE_MS);
+    }
+  }
+
+  // Hard filters after token recon — block launchpads and excessive Jupiter bot holders
+  const filteredOut = [];
+  const passing = allCandidates.filter(({ pool, ti }) => {
+    if (pool.gmgn) return true;
+    const launchpad = ti?.launchpad ?? null;
+    if (launchpad && config.screening.allowedLaunchpads?.length > 0 && !config.screening.allowedLaunchpads.includes(launchpad)) {
+      log("screening", `Skipping ${pool.name} — launchpad ${launchpad} not in allow-list`);
+      filteredOut.push({ name: pool.name, reason: `launchpad ${launchpad} not in allow-list` });
+      return false;
+    }
+    if (launchpad && config.screening.blockedLaunchpads.includes(launchpad)) {
+      log("screening", `Skipping ${pool.name} — blocked launchpad (${launchpad})`);
+      filteredOut.push({ name: pool.name, reason: `blocked launchpad (${launchpad})` });
+      return false;
+    }
+    const botPct = ti?.audit?.bot_holders_pct;
+    const maxBotHoldersPct = config.screening.maxBotHoldersPct;
+    if (botPct != null && maxBotHoldersPct != null && botPct > maxBotHoldersPct) {
+      log("screening", `Bot-holder filter: dropped ${pool.name} — bots ${botPct}% > ${maxBotHoldersPct}%`);
+      filteredOut.push({ name: pool.name, reason: `bot holders ${botPct}% > ${maxBotHoldersPct}%` });
+      return false;
+    }
+    return true;
+  });
+
+  return { passing, filteredOut, gmgnStageCounts, gmgnAllFiltered, topCandidates, candidates, allCandidates };
+}
 
 if (isMain && isTTY) {
   const rl = readline.createInterface({
@@ -1733,8 +2723,8 @@ if (isMain && isTTY) {
   });
   _ttyInterface = rl;
 
-  // Update prompt countdown every 10 seconds
-  setInterval(() => {
+  // Update prompt countdown every 10 seconds (REPL only)
+  safeSetInterval(() => {
     if (!busy) {
       rl.setPrompt(buildPrompt());
       rl.prompt(true); // true = preserve current line
@@ -1813,7 +2803,8 @@ Commands:
   1 / 2 / 3 ...  Deploy ${DEPLOY} SOL into that pool
   auto           Let the agent pick and deploy automatically
   /status        Refresh wallet + positions
-  /candidates    Refresh top pool list
+  /screen        Refresh deterministic candidate list
+  /candidates    Refresh deterministic candidate list
   /briefing      Show morning briefing (last 24h)
   /learn         Study top LPers from the best current pool and save lessons
   /learn <addr>  Study top LPers from a specific pool address
@@ -1875,14 +2866,11 @@ Commands:
 
     if (input === "/status") {
       await runBusy(async () => {
+        const { formatWalletStatusPlain } = await import("./utils/telegram-formatter.js");
+        const { getCurrentState } = await import("./ml/emotions.js");
         const [wallet, positions] = await Promise.all([getWalletBalances(), getMyPositions({ force: true })]);
-        console.log(`\nWallet: ${wallet.sol} SOL  ($${wallet.sol_usd})`);
-        console.log(`Positions: ${positions.total_positions}`);
-        for (const p of positions.positions) {
-          const status = p.in_range ? "in-range ✓" : "OUT OF RANGE ⚠";
-          console.log(`  ${p.pair.padEnd(16)} ${status}  fees: ${config.management.solMode ? "◎" : "$"}${p.unclaimed_fees_usd}`);
-        }
-        console.log();
+        const out = formatWalletStatusPlain({ wallet, positions, ml: getCurrentState(), config, runtimeMode: "repl" });
+        console.log("\n" + out.text);
       });
       return;
     }

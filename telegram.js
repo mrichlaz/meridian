@@ -133,13 +133,30 @@ export async function sendMessageWithButtons(text, inlineKeyboard) {
   if (!TOKEN || !chatId) return;
   return postTelegram("sendMessage", {
     text: String(text).slice(0, 4096),
+    parse_mode: "HTML",
     reply_markup: { inline_keyboard: inlineKeyboard },
   });
 }
 
 export async function sendHTML(html) {
   if (!TOKEN || !chatId) return;
-  return postTelegram("sendMessage", { text: html.slice(0, 4096), parse_mode: "HTML" });
+  const text = String(html || "").slice(0, 4096);
+  const result = await postTelegram("sendMessage", { text, parse_mode: "HTML" });
+  if (result) return result;
+
+  // Reversible safety net: if Telegram rejects HTML entity parsing,
+  // fall back to plain text so commands like /help still return something
+  // instead of failing silently. Delete this block if you want strict HTML-only behavior.
+  const plain = text
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n\n")
+    .replace(/<[^>]*>/g, "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+    .trim()
+    .slice(0, 4096);
+  return postTelegram("sendMessage", { text: plain });
 }
 
 export async function editMessage(text, messageId) {
@@ -162,6 +179,7 @@ export async function editMessageWithButtons(text, messageId, inlineKeyboard) {
     return await postTelegram("editMessageText", {
       message_id: messageId,
       text: String(text).slice(0, 4096),
+      parse_mode: "HTML",
       reply_markup: { inline_keyboard: inlineKeyboard },
     });
   } catch (error) {
@@ -182,31 +200,37 @@ export function hasActiveLiveMessage() {
   return _liveMessageDepth > 0;
 }
 
+// Global singleton — prevents concurrent sendChatAction 429 spam
+let _typingRefs = 0;
+let _typingInterval = null;
+
+function _startTyping() {
+  if (_typingInterval) return;
+  _typingInterval = setInterval(() => {
+    if (_typingRefs <= 0) {
+      clearInterval(_typingInterval);
+      _typingInterval = null;
+      return;
+    }
+    postTelegram("sendChatAction", { action: "typing" }).catch(() => {});
+  }, 5000);
+}
+
 function createTypingIndicator() {
   if (!TOKEN || !chatId) {
     return { stop() {} };
   }
 
-  let stopped = false;
-  let timer = null;
-
-  async function tick() {
-    if (stopped) return;
-    try {
-      await postTelegram("sendChatAction", { action: "typing" });
-    } catch {}
-    timer = setTimeout(() => {
-      tick().catch(() => null);
-    }, 4000);
-  }
-
-  tick().catch(() => null);
+  _typingRefs++;
+  _startTyping();
 
   return {
     stop() {
-      stopped = true;
-      if (timer) clearTimeout(timer);
-      timer = null;
+      _typingRefs = Math.max(0, _typingRefs - 1);
+      if (_typingRefs <= 0 && _typingInterval) {
+        clearInterval(_typingInterval);
+        _typingInterval = null;
+      }
     },
   };
 }
@@ -338,9 +362,9 @@ export async function createLiveMessage(title, intro = "Starting...") {
         clearTimeout(state.flushTimer);
         state.flushTimer = null;
       }
-      if (state.flushPromise) await state.flushPromise;
+      if (state.flushPromise) await state.flushPromise.catch(() => null);
       state.footer = finalText;
-      await flushNow();
+      await flushNow().catch(() => null);
       _liveMessageDepth = Math.max(0, _liveMessageDepth - 1);
       typing.stop();
     },
@@ -349,9 +373,9 @@ export async function createLiveMessage(title, intro = "Starting...") {
         clearTimeout(state.flushTimer);
         state.flushTimer = null;
       }
-      if (state.flushPromise) await state.flushPromise;
+      if (state.flushPromise) await state.flushPromise.catch(() => null);
       state.footer = `❌ ${errorText}`;
-      await flushNow();
+      await flushNow().catch(() => null);
       _liveMessageDepth = Math.max(0, _liveMessageDepth - 1);
       typing.stop();
     },
@@ -420,6 +444,14 @@ const BOT_COMMANDS = [
   { command: "briefing",   description: "Morning briefing" },
   { command: "hive",       description: "HiveMind sync status" },
   { command: "learn",      description: "Study top LPers and save lessons" },
+  { command: "lessons",    description: "List recent saved lessons" },
+  { command: "thresholds", description: "Screening thresholds + performance stats" },
+  { command: "performance",description: "Show closed-position performance" },
+  { command: "screeningstats", description: "Show screening funnel stats" },
+  { command: "mlstatus",   description: "Show ML model and emotion state" },
+  { command: "mltrain",    description: "Force an ML training pass" },
+  { command: "mlpersonality", description: "Set ML personality preset" },
+  { command: "evolve",     description: "Trigger threshold evolution from data" },
   { command: "pause",      description: "Stop cron cycles" },
   { command: "resume",     description: "Start cron cycles again" },
   { command: "stop",       description: "Shut down agent" },
@@ -453,7 +485,6 @@ export function stopPolling() {
 
 // ─── Notification helpers ────────────────────────────────────────
 export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, rangeCoverage, binStep, baseFee }) {
-  if (hasActiveLiveMessage()) return;
   const priceStr = priceRange
     ? `Price range: ${priceRange.min < 0.0001 ? priceRange.min.toExponential(3) : priceRange.min.toFixed(6)} – ${priceRange.max < 0.0001 ? priceRange.max.toExponential(3) : priceRange.max.toFixed(6)}\n`
     : "";
@@ -474,17 +505,17 @@ export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, 
   );
 }
 
-export async function notifyClose({ pair, pnlUsd, pnlPct }) {
-  if (hasActiveLiveMessage()) return;
+export async function notifyClose({ pair, pnlUsd, pnlPct, reason }) {
   const sign = pnlUsd >= 0 ? "+" : "";
+  const reasonLine = reason ? `\nReason: ${String(reason).replace(/[<>]/g, "")}` : "";
   await sendHTML(
     `🔒 <b>Closed</b> ${pair}\n` +
-    `PnL: ${sign}$${(pnlUsd ?? 0).toFixed(2)} (${sign}${(pnlPct ?? 0).toFixed(2)}%)`
+    `PnL: ${sign}$${(pnlUsd ?? 0).toFixed(2)} (${sign}${(pnlPct ?? 0).toFixed(2)}%)` +
+    reasonLine
   );
 }
 
 export async function notifySwap({ inputSymbol, outputSymbol, amountIn, amountOut, tx }) {
-  if (hasActiveLiveMessage()) return;
   await sendHTML(
     `🔄 <b>Swapped</b> ${inputSymbol} → ${outputSymbol}\n` +
     `In: ${amountIn ?? "?"} | Out: ${amountOut ?? "?"}\n` +

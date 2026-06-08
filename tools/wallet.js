@@ -9,13 +9,9 @@ import bs58 from "bs58";
 import { log } from "../logger.js";
 import { config } from "../config.js";
 
-let _connection = null;
-let _wallet = null;
+import { getConnection } from "../utils/rpc-pool.js";
 
-function getConnection() {
-  if (!_connection) _connection = new Connection(process.env.RPC_URL, "confirmed");
-  return _connection;
-}
+let _wallet = null;
 
 function getWallet() {
   if (!_wallet) {
@@ -64,7 +60,14 @@ export async function getWalletBalances() {
     return { wallet: null, sol: 0, sol_price: 0, sol_usd: 0, usdc: 0, tokens: [], total_usd: 0, error: "Wallet not configured" };
   }
 
-  const HELIUS_KEY = process.env.HELIUS_API_KEY;
+  // Support HELIUS_API_KEYS or comma-separated HELIUS_API_KEY — pick the first one
+  const rawKey = process.env.HELIUS_API_KEYS || process.env.HELIUS_API_KEY;
+  if (!rawKey) {
+    log("wallet_error", "HELIUS_API_KEYS not set in .env");
+    return { wallet: walletAddress, sol: 0, sol_price: 0, sol_usd: 0, usdc: 0, tokens: [], total_usd: 0, error: "Helius API keys missing" };
+  }
+  const keys = rawKey.split(",").map((s) => s.trim()).filter(Boolean);
+  const HELIUS_KEY = keys[Math.floor(Math.random() * keys.length)];
   if (!HELIUS_KEY) {
     log("wallet_error", "HELIUS_API_KEY not set in .env");
     return { wallet: walletAddress, sol: 0, sol_price: 0, sol_usd: 0, usdc: 0, tokens: [], total_usd: 0, error: "Helius API key missing" };
@@ -72,7 +75,7 @@ export async function getWalletBalances() {
 
   try {
     const url = `https://api.helius.xyz/v1/wallet/${walletAddress}/balances?api-key=${HELIUS_KEY}`;
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
     
     if (!res.ok) {
       throw new Error(`Helius API error: ${res.status} ${res.statusText}`);

@@ -78,10 +78,28 @@ export function getAndClearStagedSignals(poolAddress, baseMint = null) {
   return signals;
 }
 
+// ─── ML feature staging ──────────────────────────────────────────
+
+const _stagedMlFeatures = new Map();
+
 /**
- * Get all currently staged pool addresses (for debugging).
+ * Stage a full ML feature vector for a pool during screening.
+ * Called alongside stageSignals to capture all 74 features at deploy time.
  */
-export function getStagedPools() {
+export function stageMlFeatures(poolAddress, features) {
+  const poolKey = normalizeKey(poolAddress);
+  if (!poolKey) return;
+  _stagedMlFeatures.set(poolKey, { ...features, staged_at: Date.now() });
+}
+
+/**
+ * Retrieve and clear staged ML features for a pool.
+ */
+export function getAndClearStagedMlFeatures(poolAddress) {
   cleanupStale();
-  return [..._staged.keys()];
+  const poolKey = normalizeKey(poolAddress);
+  const data = poolKey ? _stagedMlFeatures.get(poolKey) : null;
+  if (!data) return null;
+  _stagedMlFeatures.delete(poolKey);
+  return data;
 }

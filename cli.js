@@ -5,6 +5,7 @@
  */
 
 import { loadEnv } from "./envcrypt.js";
+import { setRuntimeMode, RUNTIME_MODES } from "./utils/runtime-mode.js";
 import { parseArgs } from "util";
 import os from "os";
 import fs from "fs";
@@ -12,6 +13,9 @@ import path from "path";
 
 // ─── DRY_RUN must be set before any tool imports ─────────────────
 if (process.argv.includes("--dry-run")) process.env.DRY_RUN = "true";
+
+// ─── Runtime mode: this entry point is always a one-shot CLI ─────
+setRuntimeMode(RUNTIME_MODES.CLI);
 
 // ─── Load .env from ~/.meridian/ if present ──────────────────────
 const meridianDir = path.join(os.homedir(), ".meridian");
@@ -373,7 +377,14 @@ switch (subcommand) {
       await new Promise(r => setTimeout(r, 150)); // avoid 429s
     }
 
-    out({ candidates: enriched, total_screened: raw.total_screened });
+    out({
+      candidates: enriched,
+      total_screened: raw.total_screened,
+      total_eligible: raw.total_eligible,
+      discovery_timeframe: raw.discovery_timeframe,
+      bot_tracked_injected: raw.bot_tracked_injected,
+      filtered_examples: raw.filtered_examples,
+    });
     break;
   }
 
@@ -510,7 +521,7 @@ switch (subcommand) {
   // ── manage ───────────────────────────────────────────────────────
   case "manage": {
     const { runManagementCycle } = await import("./index.js");
-    const report = await runManagementCycle({ silent });
+    const report = await runManagementCycle({ silent, triggerScreening: false });
     out({ done: true, report: report || "No action taken" });
     break;
   }
@@ -686,6 +697,15 @@ switch (subcommand) {
       strategy: flags.strategy || "spot",
       single_sided_x: argv.includes("--single-sided-x"),
     }));
+    break;
+  }
+
+  // ── ml ───────────────────────────────────────────────────────────
+  case "ml": {
+    const { handleMlCommand } = await import("./ml/cli.js");
+    const mlArgs = argv.filter(a => !a.startsWith("-")).slice(1);
+    const result = await handleMlCommand(mlArgs, (await import("./config.js")).config);
+    process.stdout.write((typeof result === "string" ? result : JSON.stringify(result, null, 2)) + "\n");
     break;
   }
 

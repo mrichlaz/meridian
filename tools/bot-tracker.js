@@ -9,6 +9,7 @@ import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
 import { log } from "../logger.js";
+import { getConnection } from "../utils/rpc-pool.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.resolve(__dirname, "../data");
@@ -16,8 +17,6 @@ const DB_PATH = path.join(DATA_DIR, "bot-tracker.db");
 
 const BOTS = (process.env.BOT_WALLETS || "3QUnrcMqCQoiGB73s1A6uDzxziywaNFpTLiZiiZbEUoN,NA247a7YE9S3p9CdKmMyETx8TTwbSdVbVYHHxpnHTUV,joeHSutRWndCtp1EPx5tz5zHyaPBZUZ5JsxDEVB1RPZ,MEViEnscUm6tsQRoGd9h6nLQaQspKj7DB2M5FwM3Xvz")
   .split(",").map(a => a.trim()).filter(Boolean);
-const H_KEY = process.env.HELIUS_API_KEY || process.env.HELIUS_KEY || "";
-const H_HTTP = `https://mainnet.helius-rpc.com/?api-key=${H_KEY}`;
 const DEX_API = "https://api.dexscreener.com/latest/dex/tokens";
 const W = 4 * 3600 * 1000;       // 4h window
 const POLL_INTERVAL = 10_000;     // poll every 10s
@@ -139,7 +138,8 @@ function initDB() {
 
 // ─── Helius RPC call ───
 async function heliusCall(method, params) {
-  const r = await fetchWithRetry(H_HTTP, {
+  const conn = getConnection();
+  const r = await fetchWithRetry(conn.rpcEndpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
@@ -287,6 +287,8 @@ export function startBotTracker() {
 
   log("bot_tracker", `Started tracking ${BOTS.length} wallet(s)...`);
 
+  let lastHeartbeat = 0;
+
   (async function loop() {
     while (!_stopped) {
       try {
@@ -328,6 +330,14 @@ export function startBotTracker() {
 
         if (stats.newEvents > 0) {
           log("bot_tracker", `${stats.newEvents} new events, ${db.prepare("SELECT COUNT(*) as c FROM tokens").get().c} tokens tracked`);
+        }
+
+        // Heartbeat every 5 minutes so terminal shows the tracker is alive
+        if (Date.now() - lastHeartbeat > 300_000) {
+          const tokenCount = db.prepare("SELECT COUNT(*) as c FROM tokens").get().c;
+          const eventCount = db.prepare("SELECT COUNT(*) as c FROM events").get().c;
+          log("bot_tracker", `Heartbeat — ${tokenCount} tokens, ${eventCount} events tracked`);
+          lastHeartbeat = Date.now();
         }
       } catch (e) {
         log("bot_tracker", `Cycle error: ${e.message}`);

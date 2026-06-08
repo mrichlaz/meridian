@@ -4,14 +4,20 @@ import { fileURLToPath } from "url";
 import { PATHS } from "./utils/paths.js";
 
 const USER_CONFIG_PATH = PATHS.userConfig;
+const GMGN_CONFIG_PATH = path.join(PATHS.data, "gmgn-config.json");
 const DEFAULT_HIVEMIND_URL = "https://api.agentmeridian.xyz";
 const DEFAULT_AGENT_MERIDIAN_API_URL = "https://api.agentmeridian.xyz/api";
 const DEFAULT_AGENT_MERIDIAN_PUBLIC_KEY = "bWVyaWRpYW4taXMtdGhlLWJlc3QtYWdlbnRz";
 const DEFAULT_HIVEMIND_API_KEY = DEFAULT_AGENT_MERIDIAN_PUBLIC_KEY;
 
-const u = fs.existsSync(USER_CONFIG_PATH)
-  ? JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8"))
-  : {};
+function readJsonIfExists(filePath) {
+  return fs.existsSync(filePath)
+    ? JSON.parse(fs.readFileSync(filePath, "utf8"))
+    : {};
+}
+
+const u = readJsonIfExists(USER_CONFIG_PATH);
+const gmgnUserConfig = readJsonIfExists(GMGN_CONFIG_PATH);
 export const MIN_SAFE_BINS_BELOW = 35;
 
 function numericConfig(value) {
@@ -40,8 +46,21 @@ if (u.llmApiKey)  process.env.LLM_API_KEY       ||= u.llmApiKey;
 if (u.dryRun !== undefined) process.env.DRY_RUN ||= String(u.dryRun);
 if (u.publicApiKey) process.env.PUBLIC_API_KEY ||= u.publicApiKey;
 if (u.agentMeridianApiUrl) process.env.AGENT_MERIDIAN_API_URL ||= u.agentMeridianApiUrl;
+if (gmgnUserConfig.apiKey || u.gmgnApiKey) {
+  process.env.GMGN_API_KEY ||= gmgnUserConfig.apiKey || u.gmgnApiKey;
+}
 
 const indicatorUserConfig = u.chartIndicators ?? {};
+
+function gmgnValue(key, legacyKey, fallback) {
+  return gmgnUserConfig[key] ?? u[legacyKey] ?? fallback;
+}
+
+function gmgnArray(key, legacyKey, fallback) {
+  if (Array.isArray(gmgnUserConfig[key])) return gmgnUserConfig[key];
+  if (Array.isArray(u[legacyKey])) return u[legacyKey];
+  return fallback;
+}
 
 function nonEmptyString(...values) {
   for (const value of values) {
@@ -61,6 +80,7 @@ export const config = {
 
   // ─── Pool Screening Thresholds ───────────
   screening: {
+    source:            u.screeningSource    ?? "meteora", // meteora | gmgn
     excludeHighSupplyConcentration: u.excludeHighSupplyConcentration ?? true,
     minFeeActiveTvlRatio: u.minFeeActiveTvlRatio ?? 0.05,
     minTvl:            u.minTvl            ?? 10_000,
@@ -136,6 +156,54 @@ export const config = {
     healthCheckIntervalMin: u.healthCheckIntervalMin ?? 60,
   },
 
+  // ─── GMGN Configuration ────────────────
+  gmgn: {
+    apiKey: nonEmptyString(gmgnUserConfig.apiKey, u.gmgnApiKey, process.env.GMGN_API_KEY),
+    baseUrl: nonEmptyString(gmgnUserConfig.baseUrl, u.gmgnBaseUrl, "https://openapi.gmgn.ai"),
+    interval: gmgnValue("interval", "gmgnInterval", "5m"),
+    orderBy: gmgnValue("orderBy", "gmgnOrderBy", "default"),
+    direction: gmgnValue("direction", "gmgnDirection", "desc"),
+    limit: gmgnValue("limit", "gmgnLimit", 100),
+    enrichLimit: gmgnValue("enrichLimit", "gmgnEnrichLimit", 20),
+    requestDelayMs: gmgnValue("requestDelayMs", "gmgnRequestDelayMs", 350),
+    maxRetries: gmgnValue("maxRetries", "gmgnMaxRetries", 2),
+    holdersLimit: gmgnValue("holdersLimit", "gmgnHoldersLimit", 100),
+    klineResolution: gmgnValue("klineResolution", "gmgnKlineResolution", "5m"),
+    klineLookbackMinutes: gmgnValue("klineLookbackMinutes", "gmgnKlineLookbackMinutes", 60),
+    filters: gmgnArray("filters", "gmgnFilters", ["renounced", "frozen", "not_wash_trading"]),
+    platforms: gmgnArray("platforms", "gmgnPlatforms", ["Pump.fun", "meteora_virtual_curve", "pool_meteora"]),
+    minMcap: gmgnValue("minMcap", "gmgnMinMcap", u.minMcap ?? 150_000),
+    maxMcap: gmgnValue("maxMcap", "gmgnMaxMcap", u.maxMcap ?? 10_000_000),
+    minTvl: gmgnValue("minTvl", "gmgnMinTvl", u.minTvl ?? 10_000),
+    minVolume: gmgnValue("minVolume", "gmgnMinVolume", 1000),
+    minHolders: gmgnValue("minHolders", "gmgnMinHolders", u.minHolders ?? 500),
+    minTokenAgeHours: gmgnValue("minTokenAgeHours", "gmgnMinTokenAgeHours", 2),
+    maxTokenAgeHours: gmgnValue("maxTokenAgeHours", "gmgnMaxTokenAgeHours", 24 * 7),
+    minSmartDegenCount: gmgnValue("minSmartDegenCount", "gmgnMinSmartDegenCount", 1),
+    requireKol: gmgnValue("requireKol", "gmgnRequireKol", true),
+    minKolCount: gmgnValue("minKolCount", "gmgnMinKolCount", 1),
+    maxRugRatio: gmgnValue("maxRugRatio", "gmgnMaxRugRatio", 0.3),
+    maxTop10HolderRate: gmgnValue("maxTop10HolderRate", "gmgnMaxTop10HolderRate", 0.5),
+    maxBundlerRate: gmgnValue("maxBundlerRate", "gmgnMaxBundlerRate", 0.5),
+    maxRatTraderRate: gmgnValue("maxRatTraderRate", "gmgnMaxRatTraderRate", 0.2),
+    maxFreshWalletRate: gmgnValue("maxFreshWalletRate", "gmgnMaxFreshWalletRate", 0.2),
+    maxDevTeamHoldRate: gmgnValue("maxDevTeamHoldRate", "gmgnMaxDevTeamHoldRate", 0.02),
+    // KOL filtering
+    preferredKolNames: gmgnArray("preferredKolNames", "gmgnPreferredKolNames", []),
+    dumpKolNames: gmgnArray("dumpKolNames", "gmgnDumpKolNames", []),
+    dumpKolMinHoldPct: gmgnValue("dumpKolMinHoldPct", "gmgnDumpKolMinHoldPct", 0.5),
+    // Indicators
+    indicatorFilter: gmgnValue("indicatorFilter", "gmgnIndicatorFilter", false),
+    indicatorInterval: gmgnValue("indicatorInterval", "gmgnIndicatorInterval", "15_MINUTE"),
+    indicatorRules: gmgnValue("indicatorRules", "gmgnIndicatorRules", {}),
+    // Additional risk filters
+    maxSniperCount: gmgnValue("maxSniperCount", "gmgnMaxSniperCount", 20),
+    maxSniperHoldRate: gmgnValue("maxSniperHoldRate", "gmgnMaxSniperHoldRate", 0.3),
+    minTotalFeeSol: gmgnValue("minTotalFeeSol", "gmgnMinTotalFeeSol", 30),
+    maxBotDegenRate: gmgnValue("maxBotDegenRate", "gmgnMaxBotDegenRate", 0.4),
+    athFilterPct: gmgnValue("athFilterPct", "gmgnAthFilterPct", null),
+  },
+
   // ─── LLM Settings ──────────────────────
   llm: {
     temperature: u.temperature ?? 0.373,
@@ -156,6 +224,25 @@ export const config = {
     weightFloor:    u.darwinFloor       ?? 0.3,
     weightCeiling:  u.darwinCeiling     ?? 2.5,
     minSamples:     u.darwinMinSamples  ?? 10,
+  },
+
+  // ─── Deep Learning / ML ────────────────
+  ml: {
+    enabled:            u.mlEnabled            ?? false,
+    trainEvery:         u.mlTrainEvery         ?? 5,     // retrain every N closes
+    minSamples:         u.mlMinSamples         ?? 10,    // min positions before training
+    batchSize:          u.mlBatchSize          ?? 16,
+    epochs:             u.mlEpochs             ?? 5,
+    learningRate:       u.mlLearningRate       ?? 0.001,
+    entropyBeta:        u.mlEntropyBeta        ?? 0.02,
+    validationSplit:    u.mlValidationSplit    ?? 0.2,
+    rewardScale:        u.mlRewardScale        ?? 1.0,
+    emotionInfluence:   u.mlEmotionInfluence   ?? 0.3,
+    blendLambdaStart:   u.mlBlendLambdaStart   ?? 0.1,
+    blendLambdaMax:     u.mlBlendLambdaMax     ?? 0.7,
+    blendLambdaGrowth:  u.mlBlendLambdaGrowth  ?? 0.05,
+    saveCheckpoints:    u.mlSaveCheckpoints    ?? true,
+    personality:        u.mlPersonality        ?? "balanced",
   },
 
   // ─── Common Token Mints ────────────────
@@ -220,12 +307,164 @@ export const config = {
 export function computeDeployAmount(walletSol) {
   const reserve  = config.management.gasReserve      ?? 0.2;
   const pct      = config.management.positionSizePct ?? 0.35;
-  const floor    = config.management.deployAmountSol;
+  const configuredFloor = config.management.deployAmountSol;
   const ceil     = config.risk.maxDeployAmount;
+  const floor    = Math.min(configuredFloor, ceil);
   const deployable = Math.max(0, walletSol - reserve);
   const dynamic    = deployable * pct;
   const result     = Math.min(ceil, Math.max(floor, dynamic));
   return parseFloat(result.toFixed(2));
+}
+
+/**
+ * Centralized threshold schema used by `evolveThresholds()`.
+ * Each entry maps a persisted user-config key to:
+ *  - section: where the live value lives
+ *  - field:   the actual property on that section
+ *  - min/max: hard clamp the evolution must respect
+ *  - step:    max fractional change per evolution step
+ *
+ * Only keys listed here can be auto-evolved. The legacy `maxVolatility` /
+ * `minFeeTvlRatio` keys are intentionally omitted because the live config
+ * uses `minFeeActiveTvlRatio` (and no `maxVolatility` key exists).
+ */
+export const THRESHOLD_SCHEMA = {
+  minFeeActiveTvlRatio: {
+    section: "screening",
+    field: "minFeeActiveTvlRatio",
+    min: 0.01,
+    max: 5.0,
+    step: 0.2,
+    decimals: 3,
+  },
+  minTvl: {
+    section: "screening",
+    field: "minTvl",
+    min: 1000,
+    max: 100_000,
+    step: 0.2,
+    decimals: 0,
+  },
+  maxTvl: {
+    section: "screening",
+    field: "maxTvl",
+    min: 50_000,
+    max: 2_000_000,
+    step: 0.2,
+    decimals: 0,
+  },
+  minVolume: {
+    section: "screening",
+    field: "minVolume",
+    min: 100,
+    max: 100_000,
+    step: 0.2,
+    decimals: 0,
+  },
+  minOrganic: {
+    section: "screening",
+    field: "minOrganic",
+    min: 30,
+    max: 95,
+    step: 0.2,
+    decimals: 0,
+  },
+  minQuoteOrganic: {
+    section: "screening",
+    field: "minQuoteOrganic",
+    min: 30,
+    max: 95,
+    step: 0.2,
+    decimals: 0,
+  },
+  minHolders: {
+    section: "screening",
+    field: "minHolders",
+    min: 100,
+    max: 5_000,
+    step: 0.2,
+    decimals: 0,
+  },
+  minMcap: {
+    section: "screening",
+    field: "minMcap",
+    min: 50_000,
+    max: 1_000_000,
+    step: 0.2,
+    decimals: 0,
+  },
+  maxMcap: {
+    section: "screening",
+    field: "maxMcap",
+    min: 1_000_000,
+    max: 50_000_000,
+    step: 0.2,
+    decimals: 0,
+  },
+  maxBundlePct: {
+    section: "screening",
+    field: "maxBundlePct",
+    min: 5,
+    max: 90,
+    step: 0.2,
+    decimals: 0,
+  },
+  maxBotHoldersPct: {
+    section: "screening",
+    field: "maxBotHoldersPct",
+    min: 5,
+    max: 90,
+    step: 0.2,
+    decimals: 0,
+  },
+  maxTop10Pct: {
+    section: "screening",
+    field: "maxTop10Pct",
+    min: 10,
+    max: 95,
+    step: 0.2,
+    decimals: 0,
+  },
+  takeProfitPct: {
+    section: "management",
+    field: "takeProfitPct",
+    min: 1,
+    max: 100,
+    step: 0.2,
+    decimals: 1,
+  },
+  stopLossPct: {
+    section: "management",
+    field: "stopLossPct",
+    min: -95,
+    max: -1,
+    step: 0.2,
+    decimals: 1,
+  },
+  outOfRangeWaitMinutes: {
+    section: "management",
+    field: "outOfRangeWaitMinutes",
+    min: 5,
+    max: 180,
+    step: 0.2,
+    decimals: 0,
+  },
+  minFeePerTvl24h: {
+    section: "management",
+    field: "minFeePerTvl24h",
+    min: 1,
+    max: 50,
+    step: 0.2,
+    decimals: 1,
+  },
+};
+
+export function getThresholdSpec(persistedKey) {
+  return THRESHOLD_SCHEMA[persistedKey] || null;
+}
+
+export function listThresholdKeys() {
+  return Object.keys(THRESHOLD_SCHEMA);
 }
 
 /**

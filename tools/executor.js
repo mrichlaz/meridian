@@ -28,6 +28,8 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { execSync, spawn } from "child_process";
 
+import { scaleScreeningToTimeframe } from "../screening-scales.js";
+
 import { PATHS } from "../utils/paths.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -85,6 +87,32 @@ async function fetchFreshPoolDetail(poolAddress, timeframe = config.screening.ti
   return (data?.data || [])[0] ?? null;
 }
 
+/**
+ * Fallback: fetch pool detail from the DLMM API when Pool Discovery
+ * returns null for fee_active_tvl_ratio (known caching gap).
+ * The DLMM endpoint returns fee_tvl_ratio as a time-bucketed object
+ * {"30m": 0.04, "24h": 0.62} — we extract the matching timeframe bucket.
+ */
+async function fetchDlmmFallback(poolAddress) {
+  const url = `https://dlmm.datapi.meteora.ag/pools/${poolAddress}`;
+  const res = await fetch(url, { headers: { Accept: "application/json" } });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+function extractDlmmTvl(pool) {
+  return numberOrNull(pool?.tvl ?? pool?.active_tvl);
+}
+
+function extractDlmmFeeTvlRatio(pool, timeframe = config.screening.timeframe || "5m") {
+  // DLMM returns fee_tvl_ratio as {"30m": 0.04, "1h": ..., "24h": ...}
+  const buckets = pool?.fee_tvl_ratio;
+  if (!buckets || typeof buckets !== "object") return null;
+  return numberOrNull(buckets[timeframe])
+    ?? numberOrNull(buckets["30m"])  // fallback to 30m
+    ?? numberOrNull(Object.values(buckets)[0]); // last resort
+}
+
 async function validateDeployPoolThresholds(args) {
   let detail;
   try {
@@ -119,16 +147,46 @@ async function validateDeployPoolThresholds(args) {
     };
   }
 
-  const feeActiveTvlRatio = poolDetailFeeActiveTvlRatio(detail);
-  const minFeeActiveTvlRatio = numberOrNull(config.screening.minFeeActiveTvlRatio);
+  let feeActiveTvlRatio = poolDetailFeeActiveTvlRatio(detail);
+  const candidateFeeActiveTvlRatio = numberOrNull(args.fee_tvl_ratio);
+  const rawMinFeeActiveTvlRatio = numberOrNull(config.screening.minFeeActiveTvlRatio);
+  // Use the candidate's discovery timeframe when available. Custom values are
+  // treated as 5m baselines and scaled linearly to the effective window.
+  const timeframe = args.discovery_timeframe || config.screening.timeframe || "5m";
+  const { minFeeActiveTvlRatio: scaledFee } = scaleScreeningToTimeframe(timeframe);
+  const minFeeActiveTvlRatio = rawMinFeeActiveTvlRatio != null
+    ? (rawMinFeeActiveTvlRatio * (({ "5m": 5, "15m": 15, "30m": 30, "1h": 60, "2h": 120, "4h": 240, "12h": 720, "24h": 1440 })[timeframe] || 5) / 5)
+    : scaledFee;
+
+  // Pool Discovery single-pool endpoint can lag behind the list endpoint and
+  // return null or 0 for fee_active_tvl_ratio even when screening just saw a
+  // valid positive value. First try the DLMM fallback; if that still comes back
+  // empty/zero, trust the screened candidate snapshot carried in args.
+  if (feeActiveTvlRatio == null || feeActiveTvlRatio <= 0) {
+    try {
+      const dlmmPool = await fetchDlmmFallback(args.pool_address);
+      if (dlmmPool) {
+        const dlmmFeeActiveTvlRatio = extractDlmmFeeTvlRatio(dlmmPool);
+        if (dlmmFeeActiveTvlRatio != null && dlmmFeeActiveTvlRatio > 0) {
+          feeActiveTvlRatio = dlmmFeeActiveTvlRatio;
+        }
+      }
+    } catch { /* non-critical — screening already validated this */ }
+  }
+  if ((feeActiveTvlRatio == null || feeActiveTvlRatio <= 0) && candidateFeeActiveTvlRatio != null && candidateFeeActiveTvlRatio > 0) {
+    log("executor_warn", `Deploy validation using screened candidate fee/active-TVL snapshot ${candidateFeeActiveTvlRatio}% for ${args.pool_address} because fresh detail returned ${feeActiveTvlRatio ?? "null"}%`);
+    feeActiveTvlRatio = candidateFeeActiveTvlRatio;
+  }
+
   if (
     minFeeActiveTvlRatio != null &&
     minFeeActiveTvlRatio > 0 &&
-    (feeActiveTvlRatio == null || feeActiveTvlRatio < minFeeActiveTvlRatio)
+    feeActiveTvlRatio != null &&
+    feeActiveTvlRatio < minFeeActiveTvlRatio
   ) {
     return {
       pass: false,
-      reason: `Pool fee/active-TVL ${feeActiveTvlRatio ?? "unknown"}% is below configured minFeeActiveTvlRatio ${minFeeActiveTvlRatio}%.`,
+      reason: `Pool fee/active-TVL ${feeActiveTvlRatio}% is below configured minFeeActiveTvlRatio ${minFeeActiveTvlRatio}%.`,
     };
   }
 
@@ -169,7 +227,7 @@ async function validateDeployPoolThresholds(args) {
     };
   }
 
-  return { pass: true };
+  return { pass: true, detail };
 }
 
 // Registered by index.js so update_config can restart cron jobs when intervals change
@@ -212,6 +270,9 @@ function normalizeConfigValue(key, value) {
     "trailingTakeProfit",
     "solMode",
     "darwinEnabled",
+    "mlEnabled",
+    "chartIndicatorsEnabled",
+    "requireAllIntervals",
     "lpAgentRelayEnabled",
   ]);
   const arrayKeys = new Set(["allowedLaunchpads", "blockedLaunchpads"]);
@@ -219,10 +280,15 @@ function normalizeConfigValue(key, value) {
     "timeframe",
     "category",
     "discordSignalMode",
+    "screeningSource",
+    "source",
     "strategy",
     "managementModel",
     "screeningModel",
     "generalModel",
+    "mlPersonality",
+    "indicatorEntryPreset",
+    "indicatorExitPreset",
     "hiveMindUrl",
     "hiveMindApiKey",
     "agentId",
@@ -230,10 +296,17 @@ function normalizeConfigValue(key, value) {
     "publicApiKey",
     "agentMeridianApiUrl",
   ]);
+  const numberKeys = new Set([
+    "mlTrainEvery", "mlMinSamples", "mlBatchSize", "mlEpochs", "mlLearningRate",
+    "darwinWindowDays", "darwinRecalcEvery", "darwinBoost", "darwinDecay",
+    "darwinFloor", "darwinCeiling", "darwinMinSamples",
+    "rsiLength", "indicatorCandles", "rsiOversold", "rsiOverbought",
+  ]);
   if (value === null) return null;
   if (booleanKeys.has(key)) return coerceBoolean(value, key);
   if (arrayKeys.has(key)) return coerceStringArray(value, key);
   if (stringKeys.has(key)) return coerceString(value, key);
+  if (numberKeys.has(key)) return coerceFiniteNumber(value, key);
   return coerceFiniteNumber(value, key);
 }
 
@@ -338,6 +411,8 @@ const toolMap = {
     // Flat key → config section mapping (covers everything in config.js)
     const CONFIG_MAP = {
       // screening
+      screeningSource: ["screening", "source", ["screeningSource"]],
+      source: ["screening", "source", ["screeningSource"]],  // alias — LLM often sends "source" not "screeningSource"
       minFeeActiveTvlRatio: ["screening", "minFeeActiveTvlRatio"],
       excludeHighSupplyConcentration: ["screening", "excludeHighSupplyConcentration"],
       minTvl: ["screening", "minTvl"],
@@ -421,6 +496,22 @@ const toolMap = {
       publicApiKey: ["api", "publicApiKey"],
       agentMeridianApiUrl: ["api", "url"],
       lpAgentRelayEnabled: ["api", "lpAgentRelayEnabled"],
+      // ml / darwin
+      mlEnabled: ["ml", "enabled", ["mlEnabled"]],
+      mlTrainEvery: ["ml", "trainEvery", ["mlTrainEvery"]],
+      mlMinSamples: ["ml", "minSamples", ["mlMinSamples"]],
+      mlBatchSize: ["ml", "batchSize", ["mlBatchSize"]],
+      mlEpochs: ["ml", "epochs", ["mlEpochs"]],
+      mlLearningRate: ["ml", "learningRate", ["mlLearningRate"]],
+      mlPersonality: ["ml", "personality", ["mlPersonality"]],
+      darwinEnabled: ["darwin", "enabled", ["darwinEnabled"]],
+      darwinWindowDays: ["darwin", "windowDays", ["darwinWindowDays"]],
+      darwinRecalcEvery: ["darwin", "recalcEvery", ["darwinRecalcEvery"]],
+      darwinBoost: ["darwin", "boostFactor", ["darwinBoost"]],
+      darwinDecay: ["darwin", "decayFactor", ["darwinDecay"]],
+      darwinFloor: ["darwin", "weightFloor", ["darwinFloor"]],
+      darwinCeiling: ["darwin", "weightCeiling", ["darwinCeiling"]],
+      darwinMinSamples: ["darwin", "minSamples", ["darwinMinSamples"]],
       // chart indicators
       chartIndicatorsEnabled: ["indicators", "enabled", ["chartIndicators", "enabled"]],
       indicatorEntryPreset: ["indicators", "entryPreset", ["chartIndicators", "entryPreset"]],
@@ -626,7 +717,12 @@ export async function executeTool(name, args) {
       } else if (name === "deploy_position") {
         notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, priceRange: result.price_range, rangeCoverage: result.range_coverage, binStep: result.bin_step, baseFee: result.base_fee }).catch(() => {});
       } else if (name === "close_position") {
-        notifyClose({ pair: result.pool_name || args.position_address?.slice(0, 8), pnlUsd: result.pnl_usd ?? 0, pnlPct: result.pnl_pct ?? 0 }).catch(() => {});
+        notifyClose({
+          pair: result.pool_name || args.position_address?.slice(0, 8),
+          pnlUsd: result.pnl_usd ?? 0,
+          pnlPct: result.pnl_pct ?? 0,
+          reason: result.reason || args.reason,
+        }).catch(() => {});
         // Note low-yield closes in pool memory so screener avoids redeploying
         if (args.reason && args.reason.toLowerCase().includes("yield")) {
           const poolAddr = result.pool || args.pool_address;
@@ -691,6 +787,15 @@ async function runSafetyChecks(name, args) {
     case "deploy_position": {
       const poolThresholds = await validateDeployPoolThresholds(args);
       if (!poolThresholds.pass) return poolThresholds;
+
+      // Inject entry market data from pool detail (captured at deploy time)
+      const deployDetail = poolThresholds.detail;
+      if (deployDetail) {
+        args.entry_mcap = numberOrNull(deployDetail?.token_x?.market_cap);
+        args.entry_tvl = poolDetailTvl(deployDetail);
+        args.entry_volume = numberOrNull(deployDetail?.volume);
+        args.entry_holders = numberOrNull(deployDetail?.token_x?.holder_count);
+      }
 
       // Reject pools with bin_step out of configured range
       const minStep = config.screening.minBinStep;

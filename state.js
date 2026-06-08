@@ -69,6 +69,11 @@ export function trackPosition({
   organic_score,
   initial_value_usd,
   signal_snapshot = null,
+  ml_snapshot = null,
+  entry_mcap = null,
+  entry_tvl = null,
+  entry_volume = null,
+  entry_holders = null,
 }) {
   const state = load();
   state.positions[position] = {
@@ -87,6 +92,11 @@ export function trackPosition({
     organic_score,
     initial_value_usd,
     signal_snapshot: signal_snapshot || null,
+    ml_snapshot: ml_snapshot || null,
+    entry_mcap,
+    entry_tvl,
+    entry_volume,
+    entry_holders,
     deployed_at: new Date().toISOString(),
     out_of_range_since: null,
     last_claim_at: null,
@@ -188,6 +198,27 @@ export function recordClose(position_address, reason) {
   pushEvent(state, { action: "close", position: position_address, pool_name: pos.pool_name || pos.pool, reason });
   save(state);
   log("state", `Position ${position_address} marked closed: ${reason}`);
+}
+
+/**
+ * Persist the latest live accounting snapshot for a tracked position.
+ * Used as a fallback when a position is already closed on-chain before we can
+ * fetch its closed-position PnL from Meteora.
+ */
+export function updatePositionLiveSnapshot(position_address, snapshot = {}) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed) return false;
+  pos.last_live_pnl_usd = snapshot.last_live_pnl_usd ?? pos.last_live_pnl_usd ?? null;
+  pos.last_live_pnl_true_usd = snapshot.last_live_pnl_true_usd ?? pos.last_live_pnl_true_usd ?? null;
+  pos.last_live_pnl_pct = snapshot.last_live_pnl_pct ?? pos.last_live_pnl_pct ?? null;
+  pos.last_live_total_value_usd = snapshot.last_live_total_value_usd ?? pos.last_live_total_value_usd ?? null;
+  pos.last_live_total_value_true_usd = snapshot.last_live_total_value_true_usd ?? pos.last_live_total_value_true_usd ?? null;
+  pos.last_live_collected_fees_true_usd = snapshot.last_live_collected_fees_true_usd ?? pos.last_live_collected_fees_true_usd ?? null;
+  pos.last_live_unclaimed_fees_true_usd = snapshot.last_live_unclaimed_fees_true_usd ?? pos.last_live_unclaimed_fees_true_usd ?? null;
+  pos.last_live_seen_at = new Date().toISOString();
+  save(state);
+  return true;
 }
 
 /**

@@ -22,13 +22,14 @@ import {
   getTrackedPosition,
   minutesOutOfRange,
   syncOpenPositions,
+  updatePositionLiveSnapshot,
 } from "../state.js";
 import { recordPerformance } from "../lessons.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { normalizeMint } from "./wallet.js";
 import { appendDecision } from "../decision-log.js";
 import { agentMeridianJson, getAgentIdForRequests, getAgentMeridianHeaders } from "./agent-meridian.js";
-import { getAndClearStagedSignals } from "../signal-tracker.js";
+import { getAndClearStagedSignals, getAndClearStagedMlFeatures } from "../signal-tracker.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
 // @meteora-ag/dlmm → @coral-xyz/anchor uses CJS directory imports
@@ -73,18 +74,70 @@ async function getDLMM() {
   };
 }
 
-// ─── Lazy wallet/connection init ──────────────────────────────
-// Avoids crashing on import when WALLET_PRIVATE_KEY is not yet set
-// (e.g. during screening-only tests).
-let _connection = null;
-let _wallet = null;
+// ─── Shared RPC pool (round-robin across multiple API keys) ───
+import { getConnection, getPrimaryConnection } from "../utils/rpc-pool.js";
 
-function getConnection() {
-  if (!_connection) {
-    _connection = new Connection(process.env.RPC_URL, "confirmed");
-  }
-  return _connection;
+function isRpcRateLimitError(error) {
+  const msg = String(error?.message || error || "");
+  return /429|too many requests|rate limit/i.test(msg);
 }
+
+function isRetryableRpcError(error) {
+  const msg = String(error?.message || error || "");
+  return isRpcRateLimitError(error) || /blockhash not found|node is behind|timed out|timeout|socket hang up|fetch failed/i.test(msg);
+}
+
+async function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function sendAndConfirmWithRetry(tx, signers, { label = "transaction", maxAttempts = 4 } = {}) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await sendAndConfirmTransaction(getPrimaryConnection(), tx, signers);
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableRpcError(error) || attempt >= maxAttempts) break;
+      const delayMs = Math.min(1500 * (2 ** (attempt - 1)), 8000);
+      log("rpc_retry", `${label} attempt ${attempt}/${maxAttempts} failed: ${error.message}. Retrying in ${delayMs}ms`);
+      await sleep(delayMs);
+    }
+  }
+  if (isRpcRateLimitError(lastError)) {
+    throw new Error(`${label} blocked by RPC 429 Too Many Requests after retries. Add more RPC capacity or wait before retrying.`);
+  }
+  throw lastError;
+}
+
+function deriveCloseMetricsFromTrackedAndLive(tracked, livePosition, feesUsd = 0) {
+  const initialUsd = Number(tracked?.initial_value_usd ?? 0);
+  const liveValueUsd = Number(livePosition?.total_value_true_usd ?? livePosition?.total_value_usd ?? 0);
+  const livePnlUsd = Number(livePosition?.pnl_true_usd ?? livePosition?.pnl_usd ?? 0);
+  const normalizedFeesUsd = Number.isFinite(Number(feesUsd)) ? Number(feesUsd) : 0;
+
+  let finalValueUsd = liveValueUsd;
+  let pnlUsd = livePnlUsd;
+  let pnlPct = Number(livePosition?.pnl_pct ?? 0);
+
+  if (initialUsd > 0 && finalValueUsd <= 0 && (livePnlUsd !== 0 || normalizedFeesUsd > 0)) {
+    finalValueUsd = Math.max(0, initialUsd + livePnlUsd - normalizedFeesUsd);
+  }
+  if (initialUsd > 0 && finalValueUsd > 0) {
+    pnlUsd = finalValueUsd + normalizedFeesUsd - initialUsd;
+    pnlPct = (pnlUsd / initialUsd) * 100;
+  }
+
+  return {
+    initialUsd,
+    finalValueUsd,
+    pnlUsd,
+    pnlPct,
+  };
+}
+
+// ─── Lazy wallet init ────────────────────────────────────────
+let _wallet = null;
 
 function getWallet() {
   if (!_wallet) {
@@ -399,8 +452,13 @@ async function getPool(poolAddress) {
   return poolCache.get(key);
 }
 
-setInterval(() => poolCache.clear(), 5 * 60 * 1000);
-setInterval(() => poolMetadataCache.clear(), 15 * 60 * 1000);
+// Cache timers are unref'd via safeSetInterval so CLI one-shots don't
+// keep the Node process alive. Long-lived modes (repl/daemon/telegram)
+// run them normally.
+const poolCacheTimer = setInterval(() => poolCache.clear(), 5 * 60 * 1000);
+const poolMetadataCacheTimer = setInterval(() => poolMetadataCache.clear(), 15 * 60 * 1000);
+poolCacheTimer.unref?.();
+poolMetadataCacheTimer.unref?.();
 
 async function getPoolMetadata(poolAddress) {
   const key = String(poolAddress);
@@ -466,6 +524,11 @@ export async function deployPosition({
   fee_tvl_ratio,
   organic_score,
   initial_value_usd,
+  // entry market conditions (injected by executor safety checks)
+  entry_mcap,
+  entry_tvl,
+  entry_volume,
+  entry_holders,
 }) {
   pool_address = normalizeMint(pool_address);
   const activeStrategy = strategy || config.strategy.strategy;
@@ -687,6 +750,9 @@ export async function deployPosition({
         const signalSnapshot = config.darwin?.enabled
           ? getAndClearStagedSignals(pool_address, baseMint)
           : null;
+        const mlSnapshot = config.ml?.enabled
+          ? getAndClearStagedMlFeatures(pool_address)
+          : null;
         trackPosition({
           position: positionAddress,
           pool: pool_address,
@@ -702,6 +768,11 @@ export async function deployPosition({
           active_bin: activeBin.binId,
           initial_value_usd,
           signal_snapshot: signalSnapshot,
+          ml_snapshot: mlSnapshot,
+          entry_mcap,
+          entry_tvl,
+          entry_volume,
+          entry_holders,
         });
       }
 
@@ -785,7 +856,7 @@ export async function deployPosition({
       const createTxArray = Array.isArray(createTxs) ? createTxs : [createTxs];
       for (let i = 0; i < createTxArray.length; i++) {
         const signers = i === 0 ? [wallet, newPosition] : [wallet];
-        const txHash = await sendAndConfirmTransaction(getConnection(), createTxArray[i], signers);
+        const txHash = await sendAndConfirmWithRetry(createTxArray[i], signers, { label: `deploy create tx ${i + 1}` });
         txHashes.push(txHash);
         log("deploy", `Create tx ${i + 1}/${createTxArray.length}: ${txHash}`);
       }
@@ -801,7 +872,7 @@ export async function deployPosition({
       });
       const addTxArray = Array.isArray(addTxs) ? addTxs : [addTxs];
       for (let i = 0; i < addTxArray.length; i++) {
-        const txHash = await sendAndConfirmTransaction(getConnection(), addTxArray[i], [wallet]);
+        const txHash = await sendAndConfirmWithRetry(addTxArray[i], [wallet], { label: `deploy add-liquidity tx ${i + 1}` });
         txHashes.push(txHash);
         log("deploy", `Add liquidity tx ${i + 1}/${addTxArray.length}: ${txHash}`);
       }
@@ -815,7 +886,7 @@ export async function deployPosition({
         strategy: { maxBinId, minBinId, strategyType },
         slippage: 1000, // 10% in bps
       });
-      const txHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet, newPosition]);
+      const txHash = await sendAndConfirmWithRetry(tx, [wallet, newPosition], { label: "deploy initialize+add-liquidity" });
       txHashes.push(txHash);
     }
 
@@ -824,6 +895,9 @@ export async function deployPosition({
     _positionsCacheAt = 0;
     const signalSnapshot = config.darwin?.enabled
       ? getAndClearStagedSignals(pool_address, baseMint)
+      : null;
+    const mlSnapshot = config.ml?.enabled
+      ? getAndClearStagedMlFeatures(pool_address)
       : null;
     trackPosition({
       position: newPosition.publicKey.toString(),
@@ -840,6 +914,11 @@ export async function deployPosition({
       active_bin: activeBin.binId,
       initial_value_usd,
       signal_snapshot: signalSnapshot,
+      ml_snapshot: mlSnapshot,
+      entry_mcap,
+      entry_tvl,
+      entry_volume,
+      entry_holders,
     });
 
     appendDecision({
@@ -908,6 +987,7 @@ async function fetchLpAgentOpenPositions(walletAddress) {
       headers: {
         "x-api-key": process.env.LPAGENT_API_KEY,
       },
+      signal: AbortSignal.timeout(15_000),
     });
     if (!res.ok) {
       const body = await res.text().catch(() => "");
@@ -932,7 +1012,7 @@ async function fetchLpAgentOpenPositions(walletAddress) {
 async function fetchDlmmPnlForPool(poolAddress, walletAddress) {
   const url = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${walletAddress}&status=open&pageSize=100&page=1`;
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       log("pnl_api", `HTTP ${res.status} for pool ${poolAddress.slice(0, 8)}: ${body.slice(0, 120)}`);
@@ -1133,8 +1213,8 @@ async function fetchRawOpenPositionsFromMeridian({ walletAddress, agentId }) {
   const payload = await agentMeridianJson(`/positions/open/raw?${search.toString()}`, {
     headers: getAgentMeridianHeaders(),
     retry: {
-      maxElapsedMs: 30_000,
-      perAttemptTimeoutMs: 10_000,
+      maxElapsedMs: 10_000,
+      perAttemptTimeoutMs: 5_000,
     },
   });
   const rows = Array.isArray(payload?.data) ? payload.data : [];
@@ -1193,7 +1273,7 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
     // Detailed range data stays on Meteora PnL API; value/PnL can be overridden by LPAgent below.
     if (!silent) log("positions", "Fetching portfolio via Meteora portfolio API...");
     const portfolioUrl = `https://dlmm.datapi.meteora.ag/portfolio/open?user=${walletAddress}`;
-    const res = await fetch(portfolioUrl);
+    const res = await fetch(portfolioUrl, { signal: AbortSignal.timeout(15_000) });
     if (!res.ok) throw new Error(`Portfolio API ${res.status}: ${await res.text().catch(() => "")}`);
     const portfolio = await res.json();
 
@@ -1245,6 +1325,57 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
         const pnlPctSuspicious = pnlPctDiff != null && pnlPctDiff > (config.management.pnlSanityMaxDiffPct ?? 5);
         if (pnlPctSuspicious) {
           log("positions_warn", `Suspicious pnl_pct for ${positionAddress.slice(0, 8)}: reported=${reportedPnlPct.toFixed(2)} derived=${derivedPnlPct.toFixed(2)} diff=${pnlPctDiff.toFixed(2)}`);
+        }
+
+        const liveSnapshot = {
+          last_live_pnl_usd: lpData
+            ? Math.round((
+                config.management.solMode
+                  ? safeNum(lpData.pnl?.valueNative)
+                  : safeNum(lpData.pnl?.value)
+              ) * 10000) / 10000
+            : binData
+            ? Math.round(parseFloat(config.management.solMode ? (binData.pnlSol || 0) : (binData.pnlUsd || 0)) * 10000) / 10000
+            : null,
+          last_live_pnl_true_usd: lpData
+            ? Math.round(safeNum(lpData.pnl?.value) * 10000) / 10000
+            : binData
+            ? Math.round(parseFloat(binData.pnlUsd || 0) * 10000) / 10000
+            : null,
+          last_live_pnl_pct: (lpData || binData)
+            ? Math.round(reportedPnlPct * 100) / 100
+            : null,
+          last_live_total_value_usd: lpData
+            ? Math.round((
+                config.management.solMode
+                  ? safeNum(lpData.valueNative)
+                  : safeNum(lpData.value)
+              ) * 10000) / 10000
+            : binData
+            ? Math.round((
+                config.management.solMode
+                  ? parseFloat(binData.unrealizedPnl?.balancesSol || 0)
+                  : parseFloat(binData.unrealizedPnl?.balances || 0)
+              ) * 10000) / 10000
+            : null,
+          last_live_total_value_true_usd: lpData
+            ? Math.round(safeNum(lpData.value) * 10000) / 10000
+            : binData
+            ? Math.round(parseFloat(binData.unrealizedPnl?.balances || 0) * 10000) / 10000
+            : null,
+          last_live_collected_fees_true_usd: lpData
+            ? Math.round(safeNum(lpData.collectedFee) * 10000) / 10000
+            : binData
+            ? Math.round(parseFloat(binData.allTimeFees?.total?.usd || 0) * 10000) / 10000
+            : null,
+          last_live_unclaimed_fees_true_usd: lpData
+            ? Math.round(safeNum(lpData.unCollectedFee) * 10000) / 10000
+            : binData
+            ? Math.round((parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenX?.usd || 0) + parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenY?.usd || 0)) * 10000) / 10000
+            : null,
+        };
+        if (useLocalWallet && tracked?.position && !tracked?.closed) {
+          updatePositionLiveSnapshot(positionAddress, liveSnapshot);
         }
 
         positions.push({
@@ -1486,7 +1617,7 @@ export async function claimFees({ position_address }) {
 
     const txHashes = [];
     for (const tx of txs) {
-      const txHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet]);
+      const txHash = await sendAndConfirmWithRetry(tx, [wallet], { label: "claim fees" });
       txHashes.push(txHash);
     }
     log("claim", `SUCCESS txs: ${txHashes.join(", ")}`);
@@ -1514,6 +1645,70 @@ export async function closePosition({ position_address, reason }) {
     const wallet = getWallet();
     const poolAddress = await lookupPoolForPosition(position_address, wallet.publicKey.toString());
     const poolMeta = await getPoolMetadata(poolAddress);
+
+    // Guard: check if the position account still exists on-chain
+    const posAccount = await getPrimaryConnection().getAccountInfo(new PublicKey(position_address)).catch(() => null);
+    if (!posAccount || posAccount.owner.equals(SystemProgram.programId)) {
+      log("close_warn", `Position ${position_address.slice(0, 12)} already closed on-chain (account gone or System Program owner) — cleaning up local state`);
+      recordClose(position_address, reason || "already closed");
+      _positionsCacheAt = 0;
+      // Recover PnL from the local cache snapshot — the position is gone
+      // on-chain so we can't query the live PnL API. Without this, the
+      // Telegram reply shows `+$0.00 (+0.00%)` which is misleading.
+      const cached = _positionsCache?.positions?.find((p) => p.position === position_address);
+      let pnlUsd = 0, pnlPct = 0, initialUsd = 0, finalValueUsd = 0, feesUsd = 0;
+      if (cached) {
+        pnlUsd = config.management.solMode ? Number(cached.pnl_usd || 0) : Number(cached.pnl_true_usd ?? cached.pnl_usd ?? 0);
+        feesUsd = (Number(cached.collected_fees_true_usd || 0) + Number(cached.unclaimed_fees_true_usd || 0));
+        initialUsd = tracked?.initial_value_usd || 0;
+        if (initialUsd > 0) {
+          finalValueUsd = Math.max(0, initialUsd + pnlUsd - feesUsd);
+          pnlPct = (pnlUsd / initialUsd) * 100;
+        } else {
+          finalValueUsd = Number(cached.total_value_true_usd ?? cached.total_value_usd ?? 0);
+          initialUsd = Math.max(0, finalValueUsd + feesUsd - pnlUsd);
+          pnlPct = initialUsd > 0 ? (pnlUsd / initialUsd) * 100 : (cached.pnl_pct || 0);
+        }
+      } else if (tracked) {
+        // Fall back to the last live snapshot that getMyPositions() persisted
+        // into state.json before the account disappeared on-chain.
+        const trackedPnlTrueUsd = Number(tracked.last_live_pnl_true_usd ?? tracked.last_live_pnl_usd ?? 0);
+        const trackedPnlUsd = config.management.solMode
+          ? Number(tracked.last_live_pnl_usd ?? 0)
+          : trackedPnlTrueUsd;
+        const trackedFeesUsd = Number(tracked.last_live_collected_fees_true_usd ?? 0) + Number(tracked.last_live_unclaimed_fees_true_usd ?? 0);
+        const trackedInitialUsd = Number(tracked.initial_value_usd ?? 0);
+        const trackedFinalValueUsd = Number(tracked.last_live_total_value_true_usd ?? tracked.last_live_total_value_usd ?? 0);
+        pnlUsd = trackedPnlUsd;
+        feesUsd = trackedFeesUsd;
+        initialUsd = trackedInitialUsd;
+        finalValueUsd = trackedFinalValueUsd;
+        if (initialUsd > 0 && finalValueUsd > 0) {
+          pnlUsd = finalValueUsd + feesUsd - initialUsd;
+          pnlPct = (pnlUsd / initialUsd) * 100;
+        } else if (initialUsd > 0) {
+          pnlPct = Number(tracked.last_live_pnl_pct ?? ((trackedPnlUsd / initialUsd) * 100));
+          finalValueUsd = Math.max(0, initialUsd + trackedPnlUsd - trackedFeesUsd);
+        } else {
+          pnlPct = Number(tracked.last_live_pnl_pct ?? 0);
+        }
+      }
+      return {
+        success: true,
+        position: position_address,
+        pool: poolAddress,
+        pool_name: poolMeta.name || null,
+        pnl_usd: pnlUsd,
+        pnl_pct: pnlPct,
+        initial_value_usd: initialUsd,
+        final_value_usd: finalValueUsd,
+        fees_earned_usd: feesUsd,
+        already_closed: true,
+        close_reason: reason || tracked?.close_reason || "already closed",
+        base_mint: poolMeta?.base_mint || null,
+      };
+    }
+
     if (shouldUseLpAgentRelay()) {
       let relaySubmitted = false;
       try {
@@ -1624,33 +1819,49 @@ export async function closePosition({ position_address, reason }) {
           minutesOOR = Math.floor((Date.now() - new Date(tracked.out_of_range_since).getTime()) / 60000);
         }
 
-        let pnlUsd = 0;
-        let pnlTrueUsd = 0;
-        let pnlPct = 0;
-        let finalValueUsd = 0;
-        let initialUsd = 0;
-        let feesUsd = tracked.total_fees_claimed_usd || 0;
+        // Use live PnL as primary source — authoritative before close submitted.
+        // Fall back to closed API only if live data is unavailable.
+        let feesUsd = livePosition?.unclaimed_fees_usd ?? tracked?.total_fees_claimed_usd ?? 0;
+        const liveDerived = deriveCloseMetricsFromTrackedAndLive(tracked, livePosition, feesUsd);
+        let pnlUsd = liveDerived.pnlUsd;
+        let pnlTrueUsd = liveDerived.pnlUsd;
+        let pnlPct = liveDerived.pnlPct;
+        let finalValueUsd = liveDerived.finalValueUsd;
+        let initialUsd = liveDerived.initialUsd;
+        let gotLivePnl = livePosition != null;
         try {
           const closedUrl = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${wallet.publicKey.toString()}&status=closed&pageSize=50&page=1`;
-          for (let attempt = 0; attempt < 6; attempt++) {
+          for (let attempt = 0; attempt < 3; attempt++) {
             const res = await fetch(closedUrl);
             if (res.ok) {
               const data = await res.json();
               const posEntry = (data.positions || []).find((entry) => entry.positionAddress === position_address);
               if (posEntry) {
-                pnlTrueUsd = safeNum(posEntry.pnlUsd);
-                pnlUsd = config.management.solMode ? getClosedPnlValue(posEntry, true) : pnlTrueUsd;
-                pnlPct = getClosedPnlPct(posEntry, config.management.solMode);
-                finalValueUsd = parseFloat(posEntry.allTimeWithdrawals?.total?.usd || 0);
-                initialUsd = parseFloat(posEntry.allTimeDeposits?.total?.usd || 0);
-                feesUsd = parseFloat(posEntry.allTimeFees?.total?.usd || 0) || feesUsd;
+                const closedPnlUsd = safeNum(posEntry.pnlUsd);
+                const closedPnlPct = getClosedPnlPct(posEntry, config.management.solMode);
+                const closedFinalValue = parseFloat(posEntry.allTimeWithdrawals?.total?.usd || 0);
+                const closedInitialUsd = parseFloat(posEntry.allTimeDeposits?.total?.usd || 0);
+                const closedFeesUsd = parseFloat(posEntry.allTimeFees?.total?.usd || 0);
+                // Only trust closed API when it returns non-trivial data
+                if (closedPnlUsd !== 0 || closedPnlPct !== 0 || closedFinalValue > 0) {
+                  pnlTrueUsd = closedPnlUsd;
+                  pnlUsd = config.management.solMode ? getClosedPnlValue(posEntry, true) : pnlTrueUsd;
+                  pnlPct = closedPnlPct;
+                  finalValueUsd = closedFinalValue;
+                  initialUsd = closedInitialUsd;
+                  feesUsd = closedFeesUsd || feesUsd;
+                  gotLivePnl = false;
+                }
                 break;
               }
             }
-            if (attempt < 5) await new Promise((resolve) => setTimeout(resolve, 5000));
+            if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 5000));
           }
         } catch (e) {
           log("close_warn", `Relay closed PnL fetch failed: ${e.message}`);
+        }
+        if (!gotLivePnl && (pnlUsd === 0 && pnlPct === 0)) {
+          log("close_warn", `Both live and closed PnL unavailable for ${position_address.slice(0, 12)} — reporting zero`);
         }
 
         const closeBaseMint = livePosition?.base_mint || pool.lbPair.tokenXMint.toString();
@@ -1659,6 +1870,20 @@ export async function closePosition({ position_address, reason }) {
           baseMint: closeBaseMint,
           tracked,
         });
+
+        let exitMarket = {};
+        try {
+          const exitDetail = await fetch(`https://pool-discovery-api.datapi.meteora.ag/pools?page_size=1&filter_by=pool_address=${poolAddress}&timeframe=${config.screening?.timeframe || "5m"}`).then(r => r.json()).catch(() => null);
+          const ep = exitDetail?.data?.[0];
+          if (ep) {
+            exitMarket = {
+              exit_mcap: parseFloat(ep?.token_x?.market_cap) || null,
+              exit_tvl: parseFloat(ep?.tvl ?? ep?.active_tvl) || null,
+              exit_volume: parseFloat(ep?.volume) || null,
+              exit_holders: parseFloat(ep?.token_x?.holder_count) || null,
+            };
+          }
+        } catch {}
 
         await recordPerformance({
           position: position_address,
@@ -1678,7 +1903,14 @@ export async function closePosition({ position_address, reason }) {
           minutes_in_range: minutesHeld - minutesOOR,
           minutes_held: minutesHeld,
           close_reason: reason || "agent decision",
+          deployed_at: tracked.deployed_at || null,
           signal_snapshot: signalSnapshot,
+          ml_snapshot: tracked.ml_snapshot || null,
+          entry_mcap: tracked.entry_mcap ?? null,
+          entry_tvl: tracked.entry_tvl ?? null,
+          entry_volume: tracked.entry_volume ?? null,
+          entry_holders: tracked.entry_holders ?? null,
+          ...exitMarket,
         });
 
         appendDecision({
@@ -1768,7 +2000,7 @@ export async function closePosition({ position_address, reason }) {
         });
         if (claimTxs && claimTxs.length > 0) {
           for (const tx of claimTxs) {
-            const claimHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet]);
+            const claimHash = await sendAndConfirmWithRetry(tx, [wallet], { label: "close claim-fees" });
             claimTxHashes.push(claimHash);
           }
           log("close", `Step 1 OK (claim only): ${claimTxHashes.join(", ")}`);
@@ -1807,7 +2039,7 @@ export async function closePosition({ position_address, reason }) {
       });
 
       for (const tx of Array.isArray(closeTx) ? closeTx : [closeTx]) {
-        const txHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet]);
+        const txHash = await sendAndConfirmWithRetry(tx, [wallet], { label: "close remove-liquidity" });
         closeTxHashes.push(txHash);
       }
     } else {
@@ -1816,7 +2048,7 @@ export async function closePosition({ position_address, reason }) {
         owner: wallet.publicKey,
         position: { publicKey: positionPubKey },
       });
-      const txHash = await sendAndConfirmTransaction(getConnection(), closeTx, [wallet]);
+      const txHash = await sendAndConfirmWithRetry(closeTx, [wallet], { label: "close position" });
       closeTxHashes.push(txHash);
     }
     const txHashes = [...claimTxHashes, ...closeTxHashes];
@@ -1857,16 +2089,27 @@ export async function closePosition({ position_address, reason }) {
 
     recordClose(position_address, reason || "agent decision");
 
-    // Record performance for learning
+    // Compute close PnL upfront so we can return it in the success object
+    // (the recordPerformance block also does this internally, but we hoist
+    // it so callers like the Telegram /close handler don't see null PnL).
+    let initialUsd = 0;
+    let finalValueUsd = 0;
+    let pnlUsd = 0;
+    let pnlPct = 0;
+    let feesUsd = 0;
+    let minutesHeld = 0;
+    let minutesOOR = 0;
+
     if (tracked) {
       const deployedAt = new Date(tracked.deployed_at).getTime();
-      const minutesHeld = Math.floor((Date.now() - deployedAt) / 60000);
-
-      let minutesOOR = 0;
+      minutesHeld = Math.floor((Date.now() - deployedAt) / 60000);
       if (tracked.out_of_range_since) {
         minutesOOR = Math.floor((Date.now() - new Date(tracked.out_of_range_since).getTime()) / 60000);
       }
+    }
 
+    // Record performance for learning
+    if (tracked) {
       const shouldRejectClosedPnl = (pct, closeReasonText) => {
         if (!Number.isFinite(pct)) return false;
         const reasonText = String(closeReasonText || "").toLowerCase();
@@ -1877,12 +2120,7 @@ export async function closePosition({ position_address, reason }) {
       };
 
       // Fetch closed PnL from API — authoritative source after withdrawal settles
-      let pnlUsd = 0;
       let pnlTrueUsd = 0;
-      let pnlPct = 0;
-      let finalValueUsd = 0;
-      let initialUsd = 0;
-      let feesUsd = tracked.total_fees_claimed_usd || 0;
       try {
         const closedUrl = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${wallet.publicKey.toString()}&status=closed&pageSize=50&page=1`;
         for (let attempt = 0; attempt < 6; attempt++) {
@@ -1925,16 +2163,17 @@ export async function closePosition({ position_address, reason }) {
         if (cachedPos) {
           pnlTrueUsd    = cachedPos.pnl_true_usd ?? (config.management.solMode ? 0 : cachedPos.pnl_usd) ?? 0;
           pnlUsd        = config.management.solMode ? (cachedPos.pnl_usd ?? 0) : pnlTrueUsd;
-          pnlPct        = cachedPos.pnl_pct   ?? 0;
           feesUsd       = (cachedPos.collected_fees_true_usd || 0) + (cachedPos.unclaimed_fees_true_usd || 0);
           initialUsd    = tracked.initial_value_usd || 0;
           if (initialUsd > 0) {
-            // Keep fallback internally consistent using USD-only cached metrics.
             finalValueUsd = Math.max(0, initialUsd + pnlTrueUsd - feesUsd);
-            if (!config.management.solMode) pnlPct = (pnlTrueUsd / initialUsd) * 100;
+            pnlUsd = finalValueUsd + feesUsd - initialUsd;
+            pnlTrueUsd = pnlUsd;
+            pnlPct = (pnlUsd / initialUsd) * 100;
           } else {
             finalValueUsd = cachedPos.total_value_true_usd ?? cachedPos.total_value_usd ?? 0;
             initialUsd = Math.max(0, finalValueUsd + feesUsd - pnlTrueUsd);
+            pnlPct = initialUsd > 0 ? (pnlTrueUsd / initialUsd) * 100 : (cachedPos.pnl_pct ?? 0);
           }
           log("close_warn", `Using cached pnl fallback because closed API has not settled yet`);
         }
@@ -1946,6 +2185,20 @@ export async function closePosition({ position_address, reason }) {
         baseMint: closeBaseMint,
         tracked,
       });
+
+      let exitMarket = {};
+      try {
+        const exitDetail = await fetch(`https://pool-discovery-api.datapi.meteora.ag/pools?page_size=1&filter_by=pool_address=${poolAddress}&timeframe=${config.screening?.timeframe || "5m"}`).then(r => r.json()).catch(() => null);
+        const ep = exitDetail?.data?.[0];
+        if (ep) {
+          exitMarket = {
+            exit_mcap: parseFloat(ep?.token_x?.market_cap) || null,
+            exit_tvl: parseFloat(ep?.tvl ?? ep?.active_tvl) || null,
+            exit_volume: parseFloat(ep?.volume) || null,
+            exit_holders: parseFloat(ep?.token_x?.holder_count) || null,
+          };
+        }
+      } catch {}
 
       await recordPerformance({
         position: position_address,
@@ -1966,6 +2219,11 @@ export async function closePosition({ position_address, reason }) {
         minutes_held: minutesHeld,
         close_reason: reason || "agent decision",
         signal_snapshot: signalSnapshot,
+        entry_mcap: tracked.entry_mcap ?? null,
+        entry_tvl: tracked.entry_tvl ?? null,
+        entry_volume: tracked.entry_volume ?? null,
+        entry_holders: tracked.entry_holders ?? null,
+        ...exitMarket,
       });
 
       appendDecision({
@@ -1998,6 +2256,7 @@ export async function closePosition({ position_address, reason }) {
         txs: txHashes,
         pnl_usd: pnlUsd,
         pnl_pct: pnlPct,
+        reason: reason || "agent decision",
         base_mint: closeBaseMint,
       };
     }
@@ -2021,6 +2280,12 @@ export async function closePosition({ position_address, reason }) {
       claim_txs: claimTxHashes,
       close_txs: closeTxHashes,
       txs: txHashes,
+      pnl_usd: pnlUsd,
+      pnl_pct: pnlPct,
+      reason: reason || "agent decision",
+      initial_value_usd: initialUsd,
+      final_value_usd: finalValueUsd,
+      fees_earned_usd: feesUsd,
       base_mint: pool.lbPair.tokenXMint.toString(),
     };
   } catch (error) {

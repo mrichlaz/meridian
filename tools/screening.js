@@ -5,6 +5,8 @@ import { log } from "../logger.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { confirmIndicatorPreset } from "./chart-indicators.js";
 import { getAgentMeridianBase, getAgentMeridianHeaders } from "./agent-meridian.js";
+import { discoverGmgnPools } from "./gmgn.js";
+import { scaleScreeningToTimeframe, getEffectiveWindowThresholds } from "../screening-scales.js";
 
 const DATAPI_JUP = "https://datapi.jup.ag/v1";
 
@@ -35,7 +37,82 @@ function scoreCandidate(pool) {
   const organic = Number(pool.organic_score || 0);
   const volume = Number(pool.volume_window || 0);
   const holders = Number(pool.holders || 0);
-  return feeTvl * 1000 + organic * 10 + volume / 100 + holders / 100;
+  // Bundle / sniper / top10 — accept either the OKX/Jupiter flat fields
+  // (bundle_pct, sniper_pct, top10_pct) or the GMGN-prefixed equivalents.
+  const bundlePct = Number(
+    pool.bundle_pct ?? pool.gmgn_bundler_pct ?? pool.gmgn_token_info_bundler_pct ?? 0
+  );
+  const top10Pct = Number(
+    pool.top10_pct
+      ?? pool.holder_top10_pct
+      ?? pool.gmgn_top10_holder_rate
+      ?? 0
+  );
+  const sniperPct = Number(
+    pool.sniper_pct
+      ?? pool.gmgn_sniper_count
+      ?? 0
+  );
+  const volatility = Number(pool.volatility || 0);
+  const priceVsAthPct = Number(pool.price_vs_ath_pct || 0);
+  const pvpPenalty = pool.is_pvp ? 120 : 0;
+  const volatilityPenalty = Number.isFinite(volatility) && volatility > 5 ? (volatility - 5) * 18 : 0;
+  const athPenalty = Number.isFinite(priceVsAthPct) && priceVsAthPct > 85 ? (priceVsAthPct - 85) * 2.5 : 0;
+  return (feeTvl * 1200) + (organic * 12) + (Math.log10(volume + 1) * 80) + (Math.log10(holders + 1) * 60) - (bundlePct * 8) - (top10Pct * 5) - (sniperPct * 6) - pvpPenalty - volatilityPenalty - athPenalty;
+}
+
+function hasMinimumConviction(pool) {
+  const feeTvl = Number(pool.fee_active_tvl_ratio || 0);
+  const organic = Number(pool.organic_score || 0);
+  const volume = Number(pool.volume_window || 0);
+  const holders = Number(pool.holders || 0);
+  const volatility = Number(pool.volatility || 0);
+  const smartMoneyBuy = !!pool.smart_money_buy;
+  const top10Pct = Number(pool.top10_pct || pool.holder_top10_pct || 0);
+  if (!(feeTvl >= 0.03)) return false;
+  if (!(organic >= 70)) return false;
+  if (!(volume >= 1000)) return false;
+  if (!(holders >= 700)) return false;
+  if (top10Pct && top10Pct > 50) return false;
+  if (Number.isFinite(volatility) && volatility > 8 && !smartMoneyBuy) return false;
+  return true;
+}
+
+function hasVolumePersistence(pool) {
+  const volume5m = Number(pool.volume_5m ?? pool.volume_window ?? 0);
+  const volume15m = Number(pool.volume_15m ?? 0);
+  const volume30m = Number(pool.volume_30m ?? pool.volume_window ?? 0);
+  const volume1h = Number(pool.volume_1h ?? 0);
+  const reference = volume30m > 0 ? volume30m : volume1h;
+
+  // If we have a longer-window reference but no 5m snapshot yet (cold start / upstream gap),
+  // allow if the longer-window volume is materially positive.
+  if (!(volume5m > 0)) {
+    return reference >= 500;
+  }
+  if (!(reference > 0)) return true;
+  return reference >= Math.max(volume5m * 1.5, 100);
+}
+
+export function chooseAdaptiveDeployProfile(pool, strategyConfig = {}) {
+  const ageHours = Number(pool?.token_age_hours ?? NaN);
+  const volatility = Number(pool?.volatility ?? NaN);
+  let strategy = strategyConfig.strategy || "bid_ask";
+  let binsMultiplier = 1;
+  let sizeMultiplier = 1;
+
+  if (Number.isFinite(ageHours) && ageHours < 2) {
+    return { deployable: false, reason: `token age ${ageHours.toFixed(1)}h below 2h auto-deploy floor` };
+  }
+  if (Number.isFinite(ageHours) && ageHours >= 2 && ageHours <= 12 && Number.isFinite(volatility) && volatility >= 5) {
+    strategy = "spot";
+    binsMultiplier = 1.2;
+    sizeMultiplier = 0.75;
+  } else if (Number.isFinite(ageHours) && ageHours > 12 && Number.isFinite(volatility) && volatility <= 5) {
+    strategy = strategyConfig.strategy || "bid_ask";
+  }
+
+  return { deployable: true, strategy, binsMultiplier, sizeMultiplier, ageHours, volatility };
 }
 
 function numeric(value) {
@@ -230,6 +307,10 @@ async function applyVolatilityTimeframe(rawPools, sourceTimeframe) {
     // Use longer-timeframe values as the canonical ones for filtering
     if (metrics.volatility != null) pool.volatility = metrics.volatility;
     if (metrics.volume != null) pool.volume = metrics.volume;
+
+    // Opportunistically backfill intermediate timeframes for persistence checks
+    if (!pool.volume_30m && volatilityTimeframe === "30m" && metrics.volume != null) pool.volume_30m = metrics.volume;
+    if (!pool.volume_1h && volatilityTimeframe === "1h" && metrics.volume != null) pool.volume_1h = metrics.volume;
   }
 
   return rawPools;
@@ -383,6 +464,13 @@ export async function discoverPools({
   page_size = 50,
 } = {}) {
   const s = config.screening;
+  const tf = s.timeframe || "5m";
+  const requestedWindowThresholds = getEffectiveWindowThresholds({
+    minFeeActiveTvlRatio: numeric(s.minFeeActiveTvlRatio),
+    minVolume: numeric(s.minVolume),
+  }, tf);
+  const effectiveFee = requestedWindowThresholds.minFeeActiveTvlRatio;
+  const effectiveVolume = requestedWindowThresholds.minVolume;
   const filters = [
     "base_token_has_critical_warnings=false",
     "quote_token_has_critical_warnings=false",
@@ -392,12 +480,12 @@ export async function discoverPools({
     `base_token_market_cap>=${s.minMcap}`,
     `base_token_market_cap<=${s.maxMcap}`,
     `base_token_holders>=${s.minHolders}`,
-    `volume>=${s.minVolume}`,
+    `volume>=${effectiveVolume}`,
     `tvl>=${s.minTvl}`,
     s.maxTvl != null ? `tvl<=${s.maxTvl}` : null,
     `dlmm_bin_step>=${s.minBinStep}`,
     `dlmm_bin_step<=${s.maxBinStep}`,
-    `fee_active_tvl_ratio>=${s.minFeeActiveTvlRatio}`,
+    `fee_active_tvl_ratio>=${effectiveFee}`,
     `base_token_organic_score>=${s.minOrganic}`,
     `quote_token_organic_score>=${s.minQuoteOrganic}`,
     s.minTokenAgeHours != null ? `base_token_created_at<=${Date.now() - s.minTokenAgeHours * 3_600_000}` : null,
@@ -407,14 +495,47 @@ export async function discoverPools({
       : null,
   ].filter(Boolean).join("&&");
 
-  const data = await fetchPoolDiscoveryPage({
-    page_size,
-    filters,
-    timeframe: s.timeframe,
-    category: s.category,
-  });
+  // Meteora Pool Discovery does not support 15m. Skip unsupported windows in
+  // the escalation ladder instead of failing the whole discovery cycle.
+  const ladder = ["5m", "30m", "1h", "2h", "4h", "12h", "24h"];
+  const startIdx = ladder.indexOf(s.timeframe);
+  const startFrom = startIdx >= 0 ? startIdx : 0;
+  let rawPools = [];
+  let usedTimeframe = s.timeframe;
 
-  let rawPools = Array.isArray(data.data) ? data.data : [];
+  // Walk the ladder one step at a time starting at the configured timeframe.
+  // - The initial fetch is also wrapped, so a broken upstream endpoint
+  //   (e.g. 15m returning 400) doesn't abort the whole screening cycle.
+  // - Empty windows are logged and we step up to the next timeframe.
+  for (let i = startFrom; i < ladder.length; i++) {
+    const candidate = ladder[i];
+    let data;
+    try {
+      data = await fetchPoolDiscoveryPage({
+        page_size,
+        filters,
+        timeframe: candidate,
+        category: s.category,
+      });
+    } catch (e) {
+      log("screening", `${candidate} fetch failed: ${e.message} — skipping to next timeframe if available`);
+      if (i < ladder.length - 1) continue;
+      break;
+    }
+    const candidatePools = Array.isArray(data?.data) ? data.data : [];
+    if (candidatePools.length > 0) {
+      if (candidate !== s.timeframe) {
+        log("screening", `${s.timeframe} window empty — fell back to ${candidate} (${candidatePools.length} pools)`);
+      }
+      usedTimeframe = candidate;
+      for (const pool of candidatePools) {
+        pool.discovery_timeframe = candidate;
+      }
+      rawPools = candidatePools;
+      break;
+    }
+    log("screening", `${candidate} window also empty — escalating`);
+  }
 
   if (config.screening.useDiscordSignals) {
     const signalCandidates = await fetchDiscordSignalCandidates().catch((error) => {
@@ -470,9 +591,17 @@ export async function discoverPools({
   rawPools = await applyVolatilityTimeframe(rawPools, s.timeframe);
   await enrichDiscordSignalLaunchpads(rawPools);
 
+  const effectiveS = {
+    ...s,
+    ...getEffectiveWindowThresholds({
+      minFeeActiveTvlRatio: numeric(s.minFeeActiveTvlRatio),
+      minVolume: numeric(s.minVolume),
+    }, usedTimeframe),
+  };
+
   const filteredExamples = [];
   const thresholdedRawPools = rawPools.filter((pool) => {
-    const reason = getRawPoolScreeningRejectReason(pool, s);
+    const reason = getRawPoolScreeningRejectReason(pool, effectiveS);
     if (!reason) return true;
     filteredExamples.push({ name: pool.name || pool.pool_address || "unknown pool", reason });
     if (pool.discord_signal) log("screening", `Discord signal filtered: ${pool.name || pool.pool_address} — ${reason}`);
@@ -531,7 +660,8 @@ export async function discoverPools({
   }
 
   return {
-    total: data.total,
+    total: rawPools.length,
+    discovery_timeframe: usedTimeframe,
     pools,
     filtered_examples: filteredExamples,
   };
@@ -543,11 +673,36 @@ export async function discoverPools({
  */
 export async function getTopCandidates({ limit = 10 } = {}) {
   const { config } = await import("../config.js");
-  const discovery = await discoverPools({ page_size: 50 });
-  const { pools } = discovery;
+  const source = String(config.screening.source || "meteora").toLowerCase();
+  if (!["meteora", "gmgn"].includes(source)) {
+    throw new Error(`Invalid screeningSource: ${config.screening.source}. Use meteora or gmgn.`);
+  }
+  const discovery = source === "gmgn"
+    ? await discoverGmgnPools({ limit: Math.max(limit, config.gmgn.enrichLimit || 20) })
+    : await discoverPools({ page_size: 50 });
+  let { pools } = discovery;
   const filteredOut = Array.isArray(discovery.filtered_examples) ? [...discovery.filtered_examples] : [];
 
-  // ── Bot-tracker candidate injection ──────────────────────────
+  // Token blacklist + dev blocklist (Meteora path runs these inside discoverPools; GMGN path does not)
+  if (source === "gmgn") {
+    const before = pools.length;
+    pools = pools.filter((p) => {
+      if (isBlacklisted(p.base?.mint)) {
+        log("blacklist", `Filtered blacklisted token ${p.base?.symbol} (${p.base?.mint?.slice(0, 8)})`);
+        pushFilteredReason(filteredOut, p, "blacklisted token");
+        return false;
+      }
+      if (p.dev && isDevBlocked(p.dev)) {
+        log("dev_blocklist", `Filtered blocked deployer ${p.dev?.slice(0, 8)} token ${p.base?.symbol}`);
+        pushFilteredReason(filteredOut, p, "blocked deployer");
+        return false;
+      }
+      return true;
+    });
+    if (pools.length < before) log("blacklist", `GMGN: filtered ${before - pools.length} blacklisted/blocked pool(s)`);
+  }
+
+  // ── Bot-tracker candidate injection (Meteora path only) ──────
   // Fetch top bot-traded tokens, look up their Meteora DLMM pools,
   // and inject them as candidates. All standard filters apply.
   // Stamp bot_traded on matching discovered pools too.
@@ -635,7 +790,12 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   const occupiedMints = new Set(positions.map((p) => p.base_mint).filter(Boolean));
   const minTvl = Number(config.screening.minTvl ?? 0);
   const maxTvl = config.screening.maxTvl == null ? null : Number(config.screening.maxTvl);
-  const minFeeActiveTvlRatio = Number(config.screening.minFeeActiveTvlRatio ?? 0);
+  const tf = config.screening.timeframe || "5m";
+  const effectiveWindowThresholds = getEffectiveWindowThresholds({
+    minFeeActiveTvlRatio: numeric(config.screening.minFeeActiveTvlRatio),
+    minVolume: numeric(config.screening.minVolume),
+  }, discovery.discovery_timeframe || tf);
+  const minFeeActiveTvlRatio = effectiveWindowThresholds.minFeeActiveTvlRatio;
 
   const eligible = pools
     .filter((p) => {
@@ -788,6 +948,94 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     });
     eligible.splice(0, eligible.length, ...filtered);
     if (eligible.length < before) log("dev_blocklist", `Filtered ${before - eligible.length} pool(s) via OKX creator check`);
+
+    // Jupiter free-tier enrichment — fills bundle/sniper/top10/bot/dev/etc.
+    // when OKX advanced-info is unavailable (402 paywall). Only stamps fields
+    // that OKX did not already provide, so the richer source wins.
+    if (eligible.length > 0) {
+      const jupResults = await Promise.allSettled(
+        eligible.map(async (p) => {
+          if (!p.base?.mint) return { pool: p.pool, token: null };
+          try {
+            const res = await fetch(`${DATAPI_JUP}/assets/search?query=${encodeURIComponent(p.base.mint)}`, { signal: AbortSignal.timeout(8_000) });
+            if (!res.ok) return { pool: p.pool, token: null };
+            const data = await res.json();
+            const token = Array.isArray(data) ? data[0] : data;
+            return { pool: p.pool, token: token || null };
+          } catch {
+            return { pool: p.pool, token: null };
+          }
+        })
+      );
+      let enrichedCount = 0;
+      for (const r of jupResults) {
+        if (r.status !== "fulfilled") continue;
+        const { pool: poolAddr, token } = r.value;
+        if (!token) continue;
+        const pool = eligible.find((p) => p.pool === poolAddr);
+        if (!pool) continue;
+        const audit = token.audit || {};
+        if (pool.bundle_pct == null && audit.bundlerStats?.holdingPct != null) {
+          pool.bundle_pct = Number(audit.bundlerStats.holdingPct);
+        }
+        if (pool.sniper_pct == null && audit.sniperPct != null) {
+          pool.sniper_pct = Number(audit.sniperPct);
+        }
+        if (pool.top10_pct == null && audit.topHoldersPercentage != null) {
+          pool.top10_pct = Number(audit.topHoldersPercentage);
+        }
+        if (audit.botHoldersPercentage != null) {
+          pool.bot_holders_pct = Number(audit.botHoldersPercentage);
+        }
+        if (audit.devBalancePercentage != null) {
+          pool.dev_pct = Number(audit.devBalancePercentage);
+        }
+        if (audit.devMigrations != null && pool.dev_migrations == null) {
+          pool.dev_migrations = Number(audit.devMigrations);
+        }
+        if (audit.insiderPct != null && pool.insider_pct == null) {
+          pool.insider_pct = Number(audit.insiderPct);
+        }
+        enrichedCount++;
+      }
+      if (enrichedCount > 0) log("screening", `Jupiter free enrichment: stamped ${enrichedCount} pool(s) with bundle/sniper/top10/bot/dev fields`);
+    }
+
+    // ── Risk bucket + volume profile labels (1A, 1B) ─────────────────
+    // These are ADVISORY labels only — they don't filter anyone out.
+    // The downstream `hasMinimumConviction()` and the score still do all
+    // the actual policy work; the labels just make it easier for the
+    // LLM to reason about borderline candidates and for the
+    // screening-snapshot logs to be self-explanatory.
+    for (const pool of eligible) {
+      pool.risk_bucket = classifyRiskBucket(pool);
+      pool.volume_profile = classifyVolumeProfile(pool);
+      pool.rejection_reasons = deriveRejectionReasons(pool, config);
+    }
+  }
+
+  if (eligible.length > 0) {
+    const beforePersistence = eligible.length;
+    eligible.splice(0, eligible.length, ...eligible.filter((p) => {
+      if (hasVolumePersistence(p)) return true;
+      pushFilteredReason(filteredOut, p, "volume persistence weak");
+      return false;
+    }));
+    if (eligible.length < beforePersistence) {
+      log("screening", `Volume persistence filter removed ${beforePersistence - eligible.length} candidate(s)`);
+    }
+  }
+
+  if (eligible.length > 0) {
+    const beforeConviction = eligible.length;
+    eligible.splice(0, eligible.length, ...eligible.filter((p) => {
+      if (hasMinimumConviction(p)) return true;
+      pushFilteredReason(filteredOut, p, "below conviction floor");
+      return false;
+    }));
+    if (eligible.length < beforeConviction) {
+      log("screening", `Conviction floor removed ${beforeConviction - eligible.length} candidate(s)`);
+    }
   }
 
   if (config.indicators.enabled && eligible.length > 0) {
@@ -834,6 +1082,8 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     total_eligible: eligible.length,
     total_screened: pools.length,
     filtered_examples: filteredOut.slice(0, 3),
+    discovery_timeframe: discovery.discovery_timeframe || config.screening.timeframe,
+    bot_tracked_injected: pools.some((p) => p.bot_traded),
   };
 }
 
@@ -926,6 +1176,10 @@ function condensePool(p) {
     // Bot tracker signal (carried through from injection)
     bot_traded: Boolean(p.bot_traded),
     bot_trade_count: p.bot_trade_count || null,
+    volume_5m: round(p.volume_5m ?? null),
+    volume_15m: round(p.volume_15m ?? null),
+    volume_30m: round(p.volume_30m ?? null),
+    volume_1h: round(p.volume_1h ?? null),
   };
 }
 
@@ -944,4 +1198,97 @@ function pushFilteredReason(list, pool, reason) {
     name: pool.name || `${pool.base?.symbol || "?"}-${pool.quote?.symbol || "?"}`,
     reason,
   });
+}
+
+// ─── Risk bucket + volume profile labels (1A, 1B) ───────────────────
+// These are ADVISORY labels only — they do not filter anyone out.
+// The downstream `hasMinimumConviction()` and the score still do all
+// the actual policy work; the labels just make it easier for the LLM
+// to reason about borderline candidates and for the
+// screening-snapshot logs to be self-explanatory.
+
+const HIGH_RISK_BUNDLE_PCT = 25;
+const HIGH_RISK_SNIPER_PCT = 20;
+const HIGH_RISK_TOP10_PCT = 50;
+const NEAR_ATH_PCT = 85;
+const PVP_PENALTY_BAR = 1;
+const YOUNG_TOKEN_HOURS = 6;
+const PERSISTENCE_DEAD_HOURS = 24;
+
+export function classifyRiskBucket(pool) {
+  // Hard risk — these pools still go through but the LLM should know
+  // they're exposed. If multiple high-risk markers are present, escalate.
+  const markers = [];
+  if (pool.is_wash) markers.push("wash");
+  if (pool.is_rugpull) markers.push("rugpull");
+  if (pool.bundle_pct != null && Number(pool.bundle_pct) > HIGH_RISK_BUNDLE_PCT) markers.push(`bundle>${HIGH_RISK_BUNDLE_PCT}`);
+  if (pool.sniper_pct != null && Number(pool.sniper_pct) > HIGH_RISK_SNIPER_PCT) markers.push(`sniper>${HIGH_RISK_SNIPER_PCT}`);
+  if (pool.top10_pct != null && Number(pool.top10_pct) > HIGH_RISK_TOP10_PCT) markers.push(`top10>${HIGH_RISK_TOP10_PCT}`);
+  if (pool.price_vs_ath_pct != null && Number(pool.price_vs_ath_pct) > NEAR_ATH_PCT) markers.push(`near_ath>${NEAR_ATH_PCT}`);
+  if (pool.is_pvp) markers.push("pvp");
+  if (pool.dev_migrations != null && Number(pool.dev_migrations) > 50) markers.push("dev_migrations>50");
+  if (Number(pool.token_age_hours) < YOUNG_TOKEN_HOURS) markers.push(`age<${YOUNG_TOKEN_HOURS}h`);
+  if (markers.length >= 2) return { bucket: "high_risk", markers };
+  if (markers.length === 1) return { bucket: "elevated_risk", markers };
+
+  // Preferred — clean signal, persistent volume, smart-money or KOL present
+  const preferred = [];
+  if (Number(pool.organic_score ?? 0) >= 80) preferred.push("high_organic");
+  if (pool.smart_money_buy) preferred.push("smart_money_buy");
+  if (Number(pool.token_age_hours) >= 24) preferred.push("age>=24h");
+  if (preferred.length >= 1) return { bucket: "preferred", markers: preferred };
+
+  return { bucket: "neutral", markers: [] };
+}
+
+export function classifyVolumeProfile(pool) {
+  const vol5m = Number(pool.volume_5m ?? pool.volume_window ?? 0);
+  const vol15m = Number(pool.volume_15m ?? 0);
+  const vol30m = Number(pool.volume_30m ?? 0);
+  const vol1h = Number(pool.volume_1h ?? 0);
+  const tokenAgeHours = Number(pool.token_age_hours ?? 0);
+
+  // No volume at all — likely brand new or illiquid
+  if (vol5m <= 0 && vol30m <= 0) {
+    if (tokenAgeHours > 0 && tokenAgeHours < PERSISTENCE_DEAD_HOURS) return "bootstrapping";
+    return "dead";
+  }
+
+  // 5m present but 30m is 0 or much lower — likely a single recent burst
+  if (vol5m > 0 && (vol30m === 0 || vol5m > vol30m * 2)) {
+    return "burst";
+  }
+
+  // 5m significantly lower than 30m — momentum fading
+  if (vol30m > 0 && vol5m < vol30m * 0.5) {
+    return "cooling";
+  }
+
+  // Sustained across multiple windows
+  if (vol5m > 0 && (vol30m > 0 || vol1h > 0) && (vol15m > 0 || vol30m > 0)) {
+    return "persistent";
+  }
+
+  return "neutral";
+}
+
+export function deriveRejectionReasons(pool, config) {
+  const reasons = [];
+  if (!pool) return reasons;
+  const s = (config && config.screening) || {};
+  if (Number(pool.tvl ?? 0) < Number(s.minTvl ?? 0)) reasons.push("low_tvl");
+  if (Number(pool.fee_active_tvl_ratio ?? 0) < Number(s.minFeeActiveTvlRatio ?? 0)) reasons.push("low_fee_tvl");
+  if (Number(pool.volume_window ?? 0) < Number(s.minVolume ?? 0)) reasons.push("low_volume");
+  if (Number(pool.organic_score ?? 0) < Number(s.minOrganic ?? 0)) reasons.push("low_organic");
+  if (Number(pool.holders ?? 0) < Number(s.minHolders ?? 0)) reasons.push("low_holders");
+  if (Number(pool.mcap ?? 0) < Number(s.minMcap ?? 0)) reasons.push("low_mcap");
+  if (Number(pool.mcap ?? 0) > Number(s.maxMcap ?? Infinity)) reasons.push("high_mcap");
+  if (pool.bundle_pct != null && Number(pool.bundle_pct) > Number(s.maxBundlePct ?? 100)) reasons.push("high_bundle");
+  if (pool.sniper_pct != null && Number(pool.sniper_pct) > Number(s.maxBotHoldersPct ?? 100)) reasons.push("high_sniper");
+  if (pool.bot_holders_pct != null && Number(pool.bot_holders_pct) > Number(s.maxBotHoldersPct ?? 100)) reasons.push("high_bot");
+  if (pool.top10_pct != null && Number(pool.top10_pct) > Number(s.maxTop10Pct ?? 100)) reasons.push("high_top10");
+  if (Number(pool.token_age_hours) < Number(s.minTokenAgeHours ?? Infinity)) reasons.push("too_young");
+  if (s.athFilterPct != null && Number(pool.price_vs_ath_pct ?? 0) > 100 + Number(s.athFilterPct)) reasons.push("near_ath");
+  if (Number(pool.volatility ?? 0) <= 0) reasons.push("unusable_volatility");
+  return reasons;
 }
