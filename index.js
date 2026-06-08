@@ -57,6 +57,11 @@ import {
   formatDeployResult,
   formatCloseResult,
   formatClaimResult,
+  formatCandidatesListPlain,
+  formatConfigSnapshotPlain,
+  formatThresholdsPlain,
+  formatLessonsPlain,
+  formatPerformancePlain,
   liveStage,
 } from "./utils/telegram-formatter.js";
 import { setRuntimeMode as setRuntimeModeUtil, RUNTIME_MODES, safeSetInterval, safeSetTimeout, isCli, isTelegram } from "./utils/runtime-mode.js";
@@ -1112,21 +1117,7 @@ process.on("SIGTERM", () => shutdown("SIGTERM"));
 // ═══════════════════════════════════════════
 function formatCandidates(candidates) {
   if (!candidates.length) return "  No eligible pools found right now.";
-
-  const lines = candidates.map((p, i) => {
-    const name = (p.name || "unknown").padEnd(20);
-    const ftvl = `${p.fee_active_tvl_ratio ?? p.fee_tvl_ratio}%`.padStart(8);
-    const vol = `$${((p.volume_window || 0) / 1000).toFixed(1)}k`.padStart(8);
-    const active = `${p.active_pct}%`.padStart(6);
-    const org = String(p.organic_score).padStart(4);
-    return `  [${i + 1}]  ${name}  fee/aTVL:${ftvl}  vol:${vol}  in-range:${active}  organic:${org}`;
-  });
-
-  return [
-    "  #   pool                  fee/aTVL     vol    in-range  organic",
-    "  " + "─".repeat(68),
-    ...lines,
-  ].join("\n");
+  return formatCandidatesListPlain(candidates, { title: "Top candidates" }).text;
 }
 
 function getDeterministicCloseRule(position, managementConfig) {
@@ -1222,34 +1213,14 @@ function getLatestCandidatesMeta() {
 
 function describeLatestCandidates(limit = 5) {
   if (!_latestCandidates.length) return "No cached candidates yet. Run /screen first.";
-  const lines = _latestCandidates.slice(0, limit).map((pool, i) => {
-    const feeTvl = pool.fee_active_tvl_ratio ?? pool.fee_tvl_ratio ?? "?";
-    const vol = pool.volume_window ?? pool.volume_24h ?? "?";
-    const active = pool.active_pct ?? "?";
-    const organic = pool.organic_score ?? "?";
-    return `${i + 1}. ${pool.name} | fee/aTVL ${feeTvl}% | vol $${vol} | in-range ${active}% | organic ${organic}`;
-  });
-  const age = _latestCandidatesAt ? new Date(_latestCandidatesAt).toLocaleString("en-US", { hour12: false }) : "unknown";
-  return `Latest candidates (${_latestCandidates.length}) — updated ${age}\n\n${lines.join("\n")}`;
+  const tf = _latestCandidates[0]?.discovery_timeframe || config.screening.timeframe;
+  return formatCandidatesListPlain(_latestCandidates.slice(0, limit), { title: `Latest candidates (${_latestCandidates.length})`, timeWindow: tf }).text;
 }
 
 
 
 function formatConfigSnapshot() {
-  return [
-    "Config snapshot",
-    "",
-    `Strategy: ${config.strategy.strategy} | binsBelow: ${config.strategy.minBinsBelow}-${config.strategy.maxBinsBelow} | default ${config.strategy.defaultBinsBelow}`,
-    `Deploy: ${config.management.deployAmountSol} SOL | gasReserve: ${config.management.gasReserve} | maxPositions: ${config.risk.maxPositions}`,
-    `Stop loss: ${config.management.stopLossPct}% | take profit: ${config.management.takeProfitPct}%`,
-    `Trailing: ${config.management.trailingTakeProfit ? "on" : "off"} | trigger ${config.management.trailingTriggerPct}% | drop ${config.management.trailingDropPct}%`,
-    `OOR: ${config.management.outOfRangeWaitMinutes}m | cooldown ${config.management.oorCooldownTriggerCount}x / ${config.management.oorCooldownHours}h`,
-    `Repeat deploy cooldown: ${config.management.repeatDeployCooldownEnabled ? "on" : "off"} | ${config.management.repeatDeployCooldownTriggerCount}x / ${config.management.repeatDeployCooldownHours}h | min fee earned ${config.management.repeatDeployCooldownMinFeeEarnedPct}% | ${config.management.repeatDeployCooldownScope}`,
-    `Yield floor: ${config.management.minFeePerTvl24h}% | min age ${config.management.minAgeBeforeYieldCheck}m`,
-    `Screening: ${config.screening.category} / ${config.screening.timeframe} | TVL ${config.screening.minTvl}-${config.screening.maxTvl}`,
-    `Intervals: manage ${config.schedule.managementIntervalMin}m | screen ${config.schedule.screeningIntervalMin}m`,
-    `HiveMind: ${isHiveMindEnabled() ? "enabled" : "disabled"}${config.hiveMind.agentId ? ` | ${config.hiveMind.agentId}` : ""}`,
-  ].join("\n");
+  return formatConfigSnapshotPlain(config).text;
 }
 
 function parseConfigValue(raw) {
@@ -2094,13 +2065,46 @@ async function telegramHandler(msg) {
         await sendMessage("No threshold changes needed.").catch(() => {});
       } else {
         reloadScreeningThresholds();
-        const changes = Object.entries(result.changes)
-          .map(([k, v]) => `<code>${k}</code>: ${v}`)
-          .join("\n");
-        await sendHTML(`<b>Thresholds Evolved</b>\n${changes}\n\nSaved to user-config.json.`).catch(() => {});
+        const lines = ["<b>Thresholds Evolved</b>"];
+        for (const [k, v] of Object.entries(result.changes)) {
+          lines.push(`  • <code>${k}</code>: ${v}`);
+        }
+        for (const [k, v] of Object.entries(result.rationale || {})) {
+          lines.push(`  <i>${k}: ${v}</i>`);
+        }
+        lines.push("");
+        lines.push("Saved to user-config.json and applied to live config.");
+        await sendHTML(lines.join("\n")).catch(() => {});
       }
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/ml-train") {
+    try {
+      const { trainModel } = await import("./ml/trainer.js");
+      const { getCurrentState } = await import("./ml/emotions.js");
+      const mlCfg = config?.ml || {};
+      const result = await trainModel({ config: mlCfg, emotionState: getCurrentState() });
+      if (!result.trained) {
+        await sendMessage(`ML training skipped — ${result.reason || "unknown"}\nNeed at least ${mlCfg.minSamples || 10} closed positions (have ${result.sampleCount ?? 0}).`).catch(() => {});
+        return;
+      }
+      const loss = result.finalLoss?.total?.toFixed(4) || "N/A";
+      const lines = [
+        "<b>🧠 ML Training</b>",
+        `Trained on ${result.trainSize} samples (${result.valSize} validation)`,
+        `Total samples: ${result.sampleCount}`,
+        `Final loss: ${loss}`,
+        `K-fold: ${result.kFold || "n/a"}`,
+        "",
+        "Model checkpoint saved to <code>data/ml/ml-model.json</code>.",
+      ];
+      await sendHTML(lines.join("\n")).catch(() => {});
+    } catch (e) {
+      await sendMessage(`ML training failed: ${e.message}`).catch(() => {});
     }
     return;
   }
@@ -2450,14 +2454,11 @@ Commands:
 
     if (input === "/status") {
       await runBusy(async () => {
+        const { formatWalletStatusPlain } = await import("./utils/telegram-formatter.js");
+        const { getCurrentState } = await import("./ml/emotions.js");
         const [wallet, positions] = await Promise.all([getWalletBalances(), getMyPositions({ force: true })]);
-        console.log(`\nWallet: ${wallet.sol} SOL  ($${wallet.sol_usd})`);
-        console.log(`Positions: ${positions.total_positions}`);
-        for (const p of positions.positions) {
-          const status = p.in_range ? "in-range ✓" : "OUT OF RANGE ⚠";
-          console.log(`  ${p.pair.padEnd(16)} ${status}  fees: ${config.management.solMode ? "◎" : "$"}${p.unclaimed_fees_usd}`);
-        }
-        console.log();
+        const out = formatWalletStatusPlain({ wallet, positions, ml: getCurrentState(), config, runtimeMode: "repl" });
+        console.log("\n" + out.text);
       });
       return;
     }

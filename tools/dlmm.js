@@ -1600,7 +1600,42 @@ export async function closePosition({ position_address, reason }) {
       log("close_warn", `Position ${position_address.slice(0, 12)} already closed on-chain (account gone or System Program owner) — cleaning up local state`);
       recordClose(position_address, reason || "already closed");
       _positionsCacheAt = 0;
-      return { success: true, position: position_address, pool: poolAddress, pool_name: poolMeta.name || null, pnl_usd: tracked?.last_known_pnl_usd ?? null, pnl_pct: tracked?.last_known_pnl_pct ?? null, already_closed: true };
+      // Recover PnL from the local cache snapshot — the position is gone
+      // on-chain so we can't query the live PnL API. Without this, the
+      // Telegram reply shows `+$0.00 (+0.00%)` which is misleading.
+      const cached = _positionsCache?.positions?.find((p) => p.position === position_address);
+      let pnlUsd = 0, pnlPct = 0, initialUsd = 0, finalValueUsd = 0, feesUsd = 0;
+      if (cached) {
+        pnlUsd = config.management.solMode ? Number(cached.pnl_usd || 0) : Number(cached.pnl_true_usd ?? cached.pnl_usd ?? 0);
+        feesUsd = (Number(cached.collected_fees_true_usd || 0) + Number(cached.unclaimed_fees_true_usd || 0));
+        initialUsd = tracked?.initial_value_usd || 0;
+        if (initialUsd > 0) {
+          finalValueUsd = Math.max(0, initialUsd + pnlUsd - feesUsd);
+          pnlPct = (pnlUsd / initialUsd) * 100;
+        } else {
+          finalValueUsd = Number(cached.total_value_true_usd ?? cached.total_value_usd ?? 0);
+          initialUsd = Math.max(0, finalValueUsd + feesUsd - pnlUsd);
+          pnlPct = initialUsd > 0 ? (pnlUsd / initialUsd) * 100 : (cached.pnl_pct || 0);
+        }
+      } else if (tracked) {
+        // Last-resort: no cache. Use the deploy-time value as initial and
+        // admit the PnL is unknown.
+        initialUsd = tracked.initial_value_usd || 0;
+      }
+      return {
+        success: true,
+        position: position_address,
+        pool: poolAddress,
+        pool_name: poolMeta.name || null,
+        pnl_usd: pnlUsd,
+        pnl_pct: pnlPct,
+        initial_value_usd: initialUsd,
+        final_value_usd: finalValueUsd,
+        fees_earned_usd: feesUsd,
+        already_closed: true,
+        close_reason: reason || tracked?.close_reason || "already closed",
+        base_mint: poolMeta?.base_mint || null,
+      };
     }
 
     if (shouldUseLpAgentRelay()) {

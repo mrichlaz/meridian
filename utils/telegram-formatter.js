@@ -425,17 +425,49 @@ export function formatDeployResult(result, options = {}) {
   return { text: lines.join("\n").slice(0, 3900), buttons };
 }
 
+// Maps close reason → human-readable explanation
+const CLOSE_REASON_HINTS = {
+  "stop loss": "price hit the stop-loss floor",
+  "take profit": "price reached the take-profit target",
+  "OOR": "position went out of range and stayed there past the wait window",
+  "pumped far above range": "active bin moved well above the upper bin",
+  "low yield": "fee/TVL stayed below the yield floor and trends weakened",
+  "trailing TP": "trailing take-profit triggered after a peak pullback",
+  "agent decision": "the management cycle decided to close (no specific rule fired)",
+  "rebalance": "manual rebalance via /close N",
+  "already closed": "the position was already closed on-chain (state was cleaned up)",
+  "4b": "out of range + PnL was still declining (Rule 4b)",
+};
+
+function closeReasonHint(reason) {
+  if (!reason) return null;
+  if (CLOSE_REASON_HINTS[reason]) return CLOSE_REASON_HINTS[reason];
+  const lower = String(reason).toLowerCase();
+  for (const [key, hint] of Object.entries(CLOSE_REASON_HINTS)) {
+    if (lower.includes(key.toLowerCase())) return hint;
+  }
+  return null;
+}
+
 export function formatCloseResult(result, options = {}) {
-  const { pair, reason } = options;
+  const { pair, reason, explanation } = options;
+  const closeReason = result?.close_reason || reason;
   const lines = [];
-  lines.push("🔒 " + b("Closed"));
+  const header = result?.already_closed ? "🟡 " + b("Already closed") : "🔒 " + b("Closed");
+  lines.push(header);
   lines.push("");
   if (pair) lines.push(`${b("Pair:")} ${esc(pair)}`);
   if (result?.pnl_pct != null) {
     const sign = result.pnl_pct >= 0 ? "🟢" : "🔴";
     lines.push(`${b("PnL:")} ${sign} ${formatPct(result.pnl_pct)} • ${formatUsd(result.pnl_usd)}`);
+  } else {
+    lines.push(`${b("PnL:")} <i>awaiting settlement (recently closed)</i>`);
   }
-  if (reason) lines.push(`${b("Reason:")} ${esc(reason)}`);
+  if (closeReason) {
+    lines.push(`${b("Reason:")} ${esc(closeReason)}`);
+    const hint = closeReasonHint(closeReason) || closeReasonHint(explanation);
+    if (hint) lines.push(`<i>→ ${esc(hint)}</i>`);
+  }
   if (result?.txs?.length) lines.push(`${b("Txs:")} <code>${result.txs.map((t) => truncAddr(t, 6, 4)).join(", ")}</code>`);
   if (result?.auto_swapped) lines.push(`🔁 Auto-swapped base token to SOL`);
   const buttons = ACTION_BUTTONS.status();
@@ -778,3 +810,43 @@ export {
   timeAgo,
   stripHeaderFooter,
 };
+
+// ─── Plain-text variants for REPL / CLI console ─────────────────────
+// These strip HTML tags and convert button-emoji tables to ASCII so
+// output is readable in a terminal. The data layer is identical; only
+// the rendering differs.
+
+const HTML_TAG_RE = /<\/?(?:b|i|u|s|code|pre|a)\b[^>]*>/gi;
+
+function stripHtml(s) {
+  if (!s) return "";
+  return String(s)
+    .replace(HTML_TAG_RE, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/\u00a0/g, " ");
+}
+
+function unwrap({ text, buttons }) {
+  return { text: stripHtml(text), buttons: buttons || [] };
+}
+
+export const formatWalletStatusPlain = (args) => unwrap(formatWalletStatus(args));
+export const formatPositionCardPlain = (position, options = {}) => unwrap(formatPositionCard(position, options));
+export const formatPositionPnLCardPlain = (position, options = {}) => unwrap(formatPositionPnLCard(position, options));
+export const formatCandidatesListPlain = (candidates, options = {}) => unwrap(formatCandidatesList(candidates, options));
+export const formatPoolDetailPlain = (pool, options = {}) => unwrap(formatPoolDetail(pool, options));
+export const formatBalancePlain = (wallet, options = {}) => unwrap(formatBalance(wallet, options));
+export const formatConfigSnapshotPlain = (config, options = {}) => unwrap(formatConfigSnapshot(config, options));
+export const formatThresholdsPlain = (config, options = {}) => unwrap(formatThresholds(config, options));
+export const formatLessonsPlain = (lessons, options = {}) => unwrap(formatLessons(lessons, options));
+export const formatPerformancePlain = (summary, history, options = {}) => unwrap(formatPerformance(summary, history, options));
+export const formatErrorPlain = (title, message, options = {}) => unwrap(formatError(title, message, options));
+export const formatHelpPlain = () => formatHelp();
+export const formatDeployResultPlain = (result, options = {}) => unwrap(formatDeployResult(result, options));
+export const formatCloseResultPlain = (result, options = {}) => unwrap(formatCloseResult(result, options));
+export const formatClaimResultPlain = (result, options = {}) => unwrap(formatClaimResult(result, options));
+export const formatScreeningReportPlain = (rawText, options = {}) => unwrap(formatScreeningReport(rawText, options));
+export const formatManagementReportPlain = (rawText, options = {}) => unwrap(formatManagementReport(rawText, options));
