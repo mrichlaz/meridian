@@ -784,6 +784,7 @@ STEPS:
 2. Call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
    bins_below = round(${config.strategy.minBinsBelow} + (candidate volatility/5)*(${config.strategy.maxBinsBelow - config.strategy.minBinsBelow})) clamped to [${config.strategy.minBinsBelow},${config.strategy.maxBinsBelow}].
    pass deploy_position.volatility = the candidate volatility value.
+   pass deploy_position.discovery_timeframe = the candidate discovery_timeframe value exactly as shown.
    For single-side SOL deploys, do not invent upside:
    set amount_y only, keep amount_x = 0, keep bins_above = 0, and let the upper bin stay at the active bin.
 3. Report in this exact format (no tables, no extra sections):
@@ -883,8 +884,9 @@ IMPORTANT:
       }
       // Cross-check the LLM's narrative against the actual data. If the LLM
       // cited a config threshold that doesn't match the live config, OR a
-      // pool value that doesn't match the data, flag it so the operator
-      // can spot hallucinated justifications.
+      // pool value that doesn't match the data, treat that as a false veto.
+      // In that case we proceed with a deterministic deploy of the top
+      // survivor instead of letting a hallucinated reason block execution.
       if (passing.length >= 1) {
         const llmText = stripThink(content);
         const dataMismatchWarnings = checkLlmNarrativeAgainstData(llmText, passing, config);
@@ -892,9 +894,52 @@ IMPORTANT:
           const mismatchBlock = [
             "⚠️ NARRATIVE / DATA MISMATCH (the LLM cited a number that doesn't match the live data):",
             ...dataMismatchWarnings.map((w) => `  - ${w}`),
+            "",
+            "Because this NO DEPLOY reason contradicts live data, Meridian will ignore the false veto and deploy the top survivor automatically.",
           ].join("\n");
           log("screening", `LLM narrative/data mismatches:\n${dataMismatchWarnings.join("\n")}`);
           screenReport = `${screenReport}\n\n${mismatchBlock}`;
+
+          const topSurvivor = passing[0]?.pool;
+          if (topSurvivor) {
+            const deployProfile = chooseAdaptiveDeployProfile(topSurvivor, config.strategy);
+            if (deployProfile.deployable) {
+              const deployAmountOverride = Number((deployAmount * (deployProfile.sizeMultiplier || 1)).toFixed(2));
+              const initialValueUsd = currentBalance.sol_price ? deployAmountOverride * currentBalance.sol_price : null;
+              const binsBelow = Math.max(35, Math.round(computeBinsBelow(topSurvivor.volatility) * (deployProfile.binsMultiplier || 1)));
+              const fallbackResult = await executeTool("deploy_position", {
+                pool_address: topSurvivor.pool,
+                amount_y: deployAmountOverride,
+                strategy: deployProfile.strategy,
+                bins_below: binsBelow,
+                bins_above: 0,
+                pool_name: topSurvivor.name,
+                base_mint: topSurvivor.base?.mint || topSurvivor.base_mint || null,
+                bin_step: topSurvivor.bin_step,
+                base_fee: topSurvivor.base_fee,
+                volatility: topSurvivor.volatility,
+                fee_tvl_ratio: topSurvivor.fee_active_tvl_ratio ?? topSurvivor.fee_tvl_ratio,
+                organic_score: topSurvivor.organic_score,
+                discovery_timeframe: topSurvivor.discovery_timeframe || config.screening.timeframe,
+                initial_value_usd: initialValueUsd,
+              });
+              deployAttempted = true;
+              deploySucceeded = Boolean(fallbackResult?.success && !fallbackResult?.error && !fallbackResult?.blocked);
+              if (deploySucceeded) {
+                deployPool = fallbackResult?.pool || topSurvivor.pool;
+                deployPoolName = fallbackResult?.pool_name || topSurvivor.name;
+                screenReport = [
+                  "🚀 DEPLOYED (DATA-INTEGRITY FALLBACK)",
+                  "",
+                  `${topSurvivor.name}`,
+                  `${topSurvivor.pool}`,
+                  "",
+                  `◎ ${deployAmountOverride} SOL | ${deployProfile.strategy}`,
+                  `Reason: LLM NO DEPLOY contradicted live data, so the false veto was ignored.`,
+                ].join("\n");
+              }
+            }
+          }
         }
       }
       appendDecision({
@@ -1640,6 +1685,7 @@ async function deployLatestCandidate(index) {
     volatility: candidate.volatility,
     fee_tvl_ratio: candidate.fee_active_tvl_ratio ?? candidate.fee_tvl_ratio,
     organic_score: candidate.organic_score,
+    discovery_timeframe: candidate.discovery_timeframe || config.screening.timeframe,
     initial_value_usd: initialValueUsd,
   });
   if (result?.success === false || result?.error) {

@@ -150,10 +150,13 @@ async function validateDeployPoolThresholds(args) {
   let feeActiveTvlRatio = poolDetailFeeActiveTvlRatio(detail);
   const candidateFeeActiveTvlRatio = numberOrNull(args.fee_tvl_ratio);
   const rawMinFeeActiveTvlRatio = numberOrNull(config.screening.minFeeActiveTvlRatio);
-  // Auto-scale from screening-scales if user hasn't set a custom value
-  const timeframe = config.screening.timeframe || "5m";
+  // Use the candidate's discovery timeframe when available. Custom values are
+  // treated as 5m baselines and scaled linearly to the effective window.
+  const timeframe = args.discovery_timeframe || config.screening.timeframe || "5m";
   const { minFeeActiveTvlRatio: scaledFee } = scaleScreeningToTimeframe(timeframe);
-  const minFeeActiveTvlRatio = rawMinFeeActiveTvlRatio ?? scaledFee;
+  const minFeeActiveTvlRatio = rawMinFeeActiveTvlRatio != null
+    ? (rawMinFeeActiveTvlRatio * (({ "5m": 5, "15m": 15, "30m": 30, "1h": 60, "2h": 120, "4h": 240, "12h": 720, "24h": 1440 })[timeframe] || 5) / 5)
+    : scaledFee;
 
   // Pool Discovery single-pool endpoint can lag behind the list endpoint and
   // return null or 0 for fee_active_tvl_ratio even when screening just saw a
