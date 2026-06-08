@@ -148,22 +148,31 @@ async function validateDeployPoolThresholds(args) {
   }
 
   let feeActiveTvlRatio = poolDetailFeeActiveTvlRatio(detail);
+  const candidateFeeActiveTvlRatio = numberOrNull(args.fee_tvl_ratio);
   const rawMinFeeActiveTvlRatio = numberOrNull(config.screening.minFeeActiveTvlRatio);
   // Auto-scale from screening-scales if user hasn't set a custom value
   const timeframe = config.screening.timeframe || "5m";
   const { minFeeActiveTvlRatio: scaledFee } = scaleScreeningToTimeframe(timeframe);
   const minFeeActiveTvlRatio = rawMinFeeActiveTvlRatio ?? scaledFee;
 
-  // Pool Discovery single-pool endpoint sometimes returns null for
-  // fee_active_tvl_ratio (API caching gap). Fall back to the DLMM
-  // endpoint which exposes fee_tvl_ratio as time-bucketed data.
-  if (feeActiveTvlRatio == null) {
+  // Pool Discovery single-pool endpoint can lag behind the list endpoint and
+  // return null or 0 for fee_active_tvl_ratio even when screening just saw a
+  // valid positive value. First try the DLMM fallback; if that still comes back
+  // empty/zero, trust the screened candidate snapshot carried in args.
+  if (feeActiveTvlRatio == null || feeActiveTvlRatio <= 0) {
     try {
       const dlmmPool = await fetchDlmmFallback(args.pool_address);
       if (dlmmPool) {
-        feeActiveTvlRatio = extractDlmmFeeTvlRatio(dlmmPool);
+        const dlmmFeeActiveTvlRatio = extractDlmmFeeTvlRatio(dlmmPool);
+        if (dlmmFeeActiveTvlRatio != null && dlmmFeeActiveTvlRatio > 0) {
+          feeActiveTvlRatio = dlmmFeeActiveTvlRatio;
+        }
       }
     } catch { /* non-critical — screening already validated this */ }
+  }
+  if ((feeActiveTvlRatio == null || feeActiveTvlRatio <= 0) && candidateFeeActiveTvlRatio != null && candidateFeeActiveTvlRatio > 0) {
+    log("executor_warn", `Deploy validation using screened candidate fee/active-TVL snapshot ${candidateFeeActiveTvlRatio}% for ${args.pool_address} because fresh detail returned ${feeActiveTvlRatio ?? "null"}%`);
+    feeActiveTvlRatio = candidateFeeActiveTvlRatio;
   }
 
   if (
