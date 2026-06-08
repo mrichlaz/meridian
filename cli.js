@@ -373,7 +373,14 @@ switch (subcommand) {
       await new Promise(r => setTimeout(r, 150)); // avoid 429s
     }
 
-    out({ candidates: enriched, total_screened: raw.total_screened });
+    out({
+      candidates: enriched,
+      total_screened: raw.total_screened,
+      total_eligible: raw.total_eligible,
+      discovery_timeframe: raw.discovery_timeframe,
+      bot_tracked_injected: raw.bot_tracked_injected,
+      filtered_examples: raw.filtered_examples,
+    });
     break;
   }
 

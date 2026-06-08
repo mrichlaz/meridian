@@ -71,9 +71,14 @@ function hasVolumePersistence(pool) {
   const volume30m = Number(pool.volume_30m ?? pool.volume_window ?? 0);
   const volume1h = Number(pool.volume_1h ?? 0);
   const reference = volume30m > 0 ? volume30m : volume1h;
-  if (!(volume5m > 0)) return false;
+
+  // If we have a longer-window reference but no 5m snapshot yet (cold start / upstream gap),
+  // allow if the longer-window volume is materially positive.
+  if (!(volume5m > 0)) {
+    return reference >= 500;
+  }
   if (!(reference > 0)) return true;
-  return reference >= volume5m * 2;
+  return reference >= Math.max(volume5m * 1.5, 100);
 }
 
 export function chooseAdaptiveDeployProfile(pool, strategyConfig = {}) {
@@ -474,14 +479,45 @@ export async function discoverPools({
       : null,
   ].filter(Boolean).join("&&");
 
-  const data = await fetchPoolDiscoveryPage({
-    page_size,
-    filters,
-    timeframe: s.timeframe,
-    category: s.category,
-  });
+  const ladder = ["5m", "15m", "30m", "1h", "2h", "4h", "12h", "24h"];
+  const startIdx = ladder.indexOf(s.timeframe);
+  const startFrom = startIdx >= 0 ? startIdx : 0;
+  let rawPools = [];
+  let usedTimeframe = s.timeframe;
 
-  let rawPools = Array.isArray(data.data) ? data.data : [];
+  // Walk the ladder one step at a time starting at the configured timeframe.
+  // - The initial fetch is also wrapped, so a broken upstream endpoint
+  //   (e.g. 15m returning 400) doesn't abort the whole screening cycle.
+  // - Empty windows are logged and we step up to the next timeframe.
+  for (let i = startFrom; i < ladder.length; i++) {
+    const candidate = ladder[i];
+    let data;
+    try {
+      data = await fetchPoolDiscoveryPage({
+        page_size,
+        filters,
+        timeframe: candidate,
+        category: s.category,
+      });
+    } catch (e) {
+      log("screening", `${candidate} fetch failed: ${e.message}${candidate === s.timeframe ? " — escalating" : ""}`);
+      if (candidate === s.timeframe && i < ladder.length - 1) continue;
+      break;
+    }
+    const candidatePools = Array.isArray(data?.data) ? data.data : [];
+    if (candidatePools.length > 0) {
+      if (candidate !== s.timeframe) {
+        log("screening", `${s.timeframe} window empty — fell back to ${candidate} (${candidatePools.length} pools)`);
+      }
+      usedTimeframe = candidate;
+      for (const pool of candidatePools) {
+        pool.discovery_timeframe = candidate;
+      }
+      rawPools = candidatePools;
+      break;
+    }
+    log("screening", `${candidate} window also empty — escalating`);
+  }
 
   if (config.screening.useDiscordSignals) {
     const signalCandidates = await fetchDiscordSignalCandidates().catch((error) => {
@@ -605,7 +641,8 @@ export async function discoverPools({
   }
 
   return {
-    total: data.total,
+    total: rawPools.length,
+    discovery_timeframe: usedTimeframe,
     pools,
     filtered_examples: filteredExamples,
   };
@@ -960,6 +997,8 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     total_eligible: eligible.length,
     total_screened: pools.length,
     filtered_examples: filteredOut.slice(0, 3),
+    discovery_timeframe: discovery.discovery_timeframe || config.screening.timeframe,
+    bot_tracked_injected: pools.some((p) => p.bot_traded),
   };
 }
 
