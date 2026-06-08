@@ -92,7 +92,7 @@ const trailResult = timed("updatePnlAndCheckExits() per position", async () => {
 await trailResult;
 
 // 5. Deterministic close rules
-const { getDeterministicCloseRule } = await import("../state.js");
+const { getDeterministicCloseRule } = await import("../index.js");
 const rules = timed("getDeterministicCloseRule() per position", async () => {
   if (!positions?.positions?.length) return null;
   for (const p of positions.positions) {

@@ -981,7 +981,7 @@ IMPORTANT:
     // Provider fallback: if the LLM provider dies before making a decision,
     // but screening already produced survivors, deploy the top survivor
     // deterministically instead of losing the whole cycle.
-    if ((/502|503|529|no body/i.test(errorText)) && passingForFallback.length >= 1) {
+    if ((/502|503|524|529|no body|empty response|timeout/i.test(errorText)) && passingForFallback.length >= 1) {
       try {
         const topSurvivor = passingForFallback[0]?.pool;
         if (topSurvivor) {
@@ -1255,7 +1255,7 @@ function formatCandidates(candidates) {
   return formatCandidatesListPlain(candidates, { title: "Top candidates" }).text;
 }
 
-function getDeterministicCloseRule(position, managementConfig) {
+export function getDeterministicCloseRule(position, managementConfig) {
   const tracked = getTrackedPosition(position.position);
   const pnlSuspect = (() => {
     if (position.pnl_pct == null) return false;
@@ -2597,6 +2597,11 @@ async function syncMlPersonalityFromConfig() {
 // Register restarter — when update_config changes intervals, running cron jobs get replaced
 registerCronRestarter(() => { if (cronStarted) startCronJobs(); });
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+
 // Shared candidate enrichment + filter pipeline. Used by:
 //  - runScreeningCycle() (cron path, builds LLM context)
 //  - runDeterministicScreen() (manual /screen, fills latestCandidates cache)
@@ -2615,32 +2620,66 @@ async function enrichAndFilterCandidates({ limit = 10, liveMessage = null } = {}
   await liveStage(liveMessage, "enriching");
   const allCandidates = [];
   const BATCH_SIZE = 2;
-  const STAGGER_MS = 200;
+  const STAGGER_MS = 120;
+  const BATCH_PAUSE_MS = 120;
+  const SMART_WALLET_TIMEOUT_MS = 1200;
+  const NARRATIVE_TIMEOUT_MS = 1500;
+  const TOKEN_INFO_TIMEOUT_MS = 2000;
+  const STUDY_TIMEOUT_MS = 900;
   for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
     const batch = candidates.slice(i, i + BATCH_SIZE);
     const batchResults = await Promise.all(
       batch.map(async (pool, j) => {
-        if (j > 0) await new Promise(r => setTimeout(r, STAGGER_MS));
+        if (j > 0) await sleep(STAGGER_MS);
         const mint = pool.base?.mint;
         const [smartWallets, narrative, tokenInfo, study] = await Promise.allSettled([
-          checkSmartWalletsOnPool({ pool_address: pool.pool }),
-          mint ? getTokenNarrative({ mint }) : Promise.resolve(null),
-          mint ? getTokenInfo({ query: mint }) : Promise.resolve(null),
-          studyTopLPers({ pool_address: pool.pool, limit: 3 }).catch(() => null),
+          withTimeout(
+            checkSmartWalletsOnPool({ pool_address: pool.pool }).catch(() => null),
+            SMART_WALLET_TIMEOUT_MS,
+          ),
+          mint
+            ? withTimeout(getTokenNarrative({ mint }).catch(() => null), NARRATIVE_TIMEOUT_MS)
+            : Promise.resolve(null),
+          mint
+            ? withTimeout(getTokenInfo({ query: mint }).catch(() => null), TOKEN_INFO_TIMEOUT_MS)
+            : Promise.resolve(null),
+          withTimeout(
+            studyTopLPers({ pool_address: pool.pool, limit: 3 }).catch(() => null),
+            STUDY_TIMEOUT_MS,
+          ),
         ]);
+
+        const swValue = smartWallets.status === "fulfilled" ? smartWallets.value : null;
+        const narrativeValue = narrative.status === "fulfilled" ? narrative.value : null;
+        const tokenInfoValue = tokenInfo.status === "fulfilled" ? tokenInfo.value : null;
+        const studyValue = study.status === "fulfilled" ? study.value : null;
+
+        if (study.status === "fulfilled" && study.value == null) {
+          log("screening", `Study timeout: ${pool.name} exceeded ${STUDY_TIMEOUT_MS}ms — continuing without LP study`);
+        }
+        if (tokenInfo.status === "fulfilled" && tokenInfo.value == null) {
+          log("screening", `Token info timeout: ${pool.name} exceeded ${TOKEN_INFO_TIMEOUT_MS}ms — continuing with partial data`);
+        }
+        if (narrative.status === "fulfilled" && narrative.value == null) {
+          log("screening", `Narrative timeout: ${pool.name} exceeded ${NARRATIVE_TIMEOUT_MS}ms — continuing without narrative`);
+        }
+        if (smartWallets.status === "fulfilled" && smartWallets.value == null) {
+          log("screening", `Smart-wallet timeout: ${pool.name} exceeded ${SMART_WALLET_TIMEOUT_MS}ms — continuing without smart-wallet signal`);
+        }
+
         return {
           pool,
-          sw: smartWallets.status === "fulfilled" ? smartWallets.value : null,
-          n: narrative.status === "fulfilled" ? narrative.value : null,
-          ti: tokenInfo.status === "fulfilled" ? tokenInfo.value?.results?.[0] : null,
+          sw: swValue,
+          n: narrativeValue,
+          ti: tokenInfoValue?.results?.[0] || null,
           mem: recallForPool(pool.pool),
-          study: study.status === "fulfilled" ? study.value : null,
+          study: studyValue,
         };
       })
     );
     allCandidates.push(...batchResults);
     if (i + BATCH_SIZE < candidates.length) {
-      await new Promise(r => setTimeout(r, 300));
+      await sleep(BATCH_PAUSE_MS);
     }
   }
 

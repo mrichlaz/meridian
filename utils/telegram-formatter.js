@@ -699,6 +699,30 @@ export function formatError(title, message, options = {}) {
 
 // ─── Help / cycle reports ────────────────────────────────────────
 
+export function formatStart({ wallet, positions, config } = {}) {
+  const lines = [];
+  lines.push("🤖 " + b("Welcome to Meridian"));
+  lines.push("");
+  lines.push("Autonomous Meteora DLMM screening and position management.");
+  if (wallet) {
+    lines.push("");
+    lines.push(`${b("Wallet:")} ${formatSol(wallet.sol)} • ${formatUsd(wallet.sol_usd)} • ${b("Total:")} ${formatUsd(wallet.total_usd)}`);
+  }
+  if (positions) {
+    lines.push(`${b("Open positions:")} ${positions.total_positions ?? positions.positions?.length ?? 0}`);
+  }
+  if (config?.management && config?.schedule) {
+    lines.push(`${b("Deploy:")} ${config.management.deployAmountSol} SOL • ${b("Manage:")} ${config.schedule.managementIntervalMin}m • ${b("Screen:")} ${config.schedule.screeningIntervalMin}m`);
+  }
+  lines.push("");
+  lines.push(b("Try:"));
+  lines.push("  /status — wallet and positions snapshot");
+  lines.push("  /screen — refresh candidate list");
+  lines.push("  /positions — inspect open positions");
+  lines.push("  /help — full command list");
+  return { text: lines.join("\n").slice(0, 3900), buttons: ACTION_BUTTONS.screening() };
+}
+
 export function formatHelp() {
   return [
     "📋 " + b("Meridian Commands"),

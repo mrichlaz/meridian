@@ -181,6 +181,21 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
   // These lock after first attempt regardless of success — retrying them is always wrong
   const NO_RETRY_TOOLS = new Set(["deploy_position"]);
   const firedOnce = new Set();
+  // Reversible central guard: block exact duplicate tool calls in the same
+  // agent run unless the tool is explicitly allowed to repeat. This does NOT
+  // remove tools or change strategy logic; it only prevents wasted turns from
+  // re-asking the exact same question or re-attempting the exact same action.
+  // Delete/trim this block if you want the old behavior back.
+  const repeatedToolCalls = new Set();
+  const lastToolCallByName = new Map();
+  const REPEATABLE_BUT_NOT_IDENTICAL = new Set([
+    "get_top_candidates",
+    "search_pools",
+    "get_my_positions",
+    "get_wallet_balance",
+    "get_position_pnl",
+    "get_wallet_positions",
+  ]);
   const mustUseRealTool = shouldRequireRealToolUse(goal, agentType, interactive);
   let sawToolCall = false;
   let noToolRetryCount = 0;
@@ -188,18 +203,20 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
   let omitToolChoice = false;
 
   let emptyStreak = 0;
+  let lastUsefulToolSummary = null;
+  let forcedModel = null;
+  let disableToolsForRetry = false;
   for (let step = 0; step < maxSteps; step++) {
     log("agent", `Step ${step + 1}/${maxSteps}`);
 
     try {
-      const activeModel = model || DEFAULT_MODEL;
+      const activeModel = forcedModel || model || DEFAULT_MODEL;
 
       // Retry up to 3 times on transient provider errors (502, 503, 529)
       const FALLBACK_MODEL = "stepfun/step-3.5-flash:free";
       const EMPTY_RESPONSE_FALLBACK = "nvidia/openai/gpt-oss-120b";
       let response;
       let usedModel = activeModel;
-      let emptyResponseCount = 0;
       // Force a tool call on step 0 for action intents — prevents the model from inventing deploy/close outcomes
       const ACTION_INTENTS = /\b(deploy|open|add liquidity|close|exit|withdraw|claim|swap|block|unblock)\b/i;
       let toolChoice = (step === 0 && (ACTION_INTENTS.test(goal) || mustUseRealTool)) ? "required" : "auto";
@@ -209,11 +226,12 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           const reqParams = {
             model: usedModel,
             messages,
-            tools: getToolsForRole(agentType, goal),
+            tools: disableToolsForRetry ? undefined : getToolsForRole(agentType, goal),
             temperature: config.llm.temperature,
             max_tokens: maxOutputTokens ?? config.llm.maxTokens,
           };
-          if (!omitToolChoice) reqParams.tool_choice = toolChoice;
+          if (disableToolsForRetry) delete reqParams.tools;
+          if (!omitToolChoice && !disableToolsForRetry) reqParams.tool_choice = toolChoice;
           response = await client.chat.completions.create(reqParams);
         } catch (error) {
           if (providerMode === "system" && isSystemRoleError(error)) {
@@ -294,20 +312,60 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
         // Hermes / reasoning models sometimes return null content
         if (!msg.content) {
           messages.pop();
-          emptyResponseCount += 1;
-          log("agent", `Empty response (${emptyResponseCount}/3), retrying...`);
-          
-          // Switch to fallback model after 2 empty responses
-          if (emptyResponseCount >= 2 && usedModel !== EMPTY_RESPONSE_FALLBACK) {
+          emptyStreak += 1;
+          log("agent", `Empty response (${emptyStreak}/3), retrying...`);
+
+          // Screening decisions matter. Do not accept a blank model answer.
+          // Retry ladder:
+          // 1) empty #1: retry with tools still enabled + stronger reminder
+          // 2) empty #2: retry with tools still enabled + fallback model
+          // 3) empty #3: retry once without tools, asking for a textual decision
+          // 4) empty #4: fail fast so runScreeningCycle uses deterministic fallback
+          if (agentType === "SCREENER") {
+            if (emptyStreak <= 3 && step < maxSteps - 1) {
+              if (emptyStreak === 2) forcedModel = EMPTY_RESPONSE_FALLBACK;
+              if (emptyStreak === 3) {
+                forcedModel = EMPTY_RESPONSE_FALLBACK;
+                omitToolChoice = true;
+                disableToolsForRetry = true;
+              }
+              const stillUseTools = emptyStreak < 3;
+              messages.push({
+                role: providerMode === "system" ? "system" : "user",
+                content: providerMode === "system"
+                  ? [
+                      `The previous screener response was empty (attempt ${emptyStreak}). Never return blank content.`,
+                      stillUseTools
+                        ? "Tools are still available and required if deploying: call deploy_position for the best survivor, or return a compact NO DEPLOY report with specific data-grounded reasons."
+                        : "Tool calling is being disabled for this retry because prior responses were empty. Return a compact textual DEPLOY recommendation or NO DEPLOY report using the candidate data already in context. Do not call tools. Do not return blank content.",
+                    ].join("\n")
+                  : [
+                      `[SYSTEM REMINDER] Previous screener response was empty (attempt ${emptyStreak}). Never return blank content.`,
+                      stillUseTools
+                        ? "Tools are still available and required if deploying: call deploy_position for the best survivor, or return a compact NO DEPLOY report with specific data-grounded reasons."
+                        : "Tool calling is being disabled for this retry because prior responses were empty. Return a compact textual DEPLOY recommendation or NO DEPLOY report using the candidate data already in context. Do not call tools. Do not return blank content.",
+                    ].join("\n"),
+              });
+              log("agent", `Empty screener response — retry ${emptyStreak}/3 (${stillUseTools ? "tools enabled" : "tools disabled"}${forcedModel ? `, model ${forcedModel}` : ""})`);
+              continue;
+            }
+            throw new Error("LLM empty response after nudged retries");
+          }
+
+          if (emptyStreak >= 2 && usedModel !== EMPTY_RESPONSE_FALLBACK) {
             usedModel = EMPTY_RESPONSE_FALLBACK;
             log("agent", `Switching to empty-response fallback model ${EMPTY_RESPONSE_FALLBACK}`);
           }
-          
-          if (emptyResponseCount >= 3) {
-            return {
-              content: "I couldn't get a valid response from the LLM after multiple retries. Please check your model configuration.",
-              userMessage: goal,
-            };
+
+          // Do not return an empty/max-steps answer on the last allowed step.
+          // Some fast providers occasionally return null content for trivial
+          // one-step prompts; surface a useful deterministic fallback instead.
+          if (emptyStreak >= 3 || step >= maxSteps - 1) {
+            const fallback = lastUsefulToolSummary
+              ? `The model returned an empty final response, but tool execution completed. Latest tool result:\n${lastUsefulToolSummary}`
+              : "The model returned an empty response. No final answer was produced by the provider, but the agent remained responsive. Try again or use a different model if this repeats.";
+            log("agent", fallback);
+            return { content: fallback, userMessage: goal };
           }
           continue;
         }
@@ -376,6 +434,37 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           }
         }
 
+        const toolSignature = `${functionName}:${JSON.stringify(functionArgs || {})}`;
+        const previousSignatureForName = lastToolCallByName.get(functionName);
+
+        // Reversible central guard: block exact duplicate tool calls across all
+        // agent roles unless the tool is explicitly allowed to repeat.
+        // Role-specific feedback helps the model recover without changing logic.
+        if (
+          !ONCE_PER_SESSION.has(functionName) &&
+          !REPEATABLE_BUT_NOT_IDENTICAL.has(functionName) &&
+          (repeatedToolCalls.has(toolSignature) || previousSignatureForName === toolSignature)
+        ) {
+          const repeatReason = agentType === "SCREENER"
+            ? `${functionName} with the same arguments was already called in this screening run. Use the existing result, choose a different tool, or make a final decision now.`
+            : agentType === "MANAGER"
+              ? `${functionName} with the same arguments was already called in this management run. Use the existing result and decide the next action instead of repeating the same check.`
+              : `${functionName} with the same arguments was already called in this agent run. Use the existing result or choose a different next step.`;
+          log("agent", `Blocked duplicate tool call: ${toolSignature}`);
+          await onToolFinish?.({
+            name: functionName,
+            args: functionArgs,
+            result: { blocked: true, reason: repeatReason },
+            success: false,
+            step,
+          });
+          return {
+            role: "tool",
+            tool_call_id: toolCall.id,
+            content: JSON.stringify({ blocked: true, reason: repeatReason }),
+          };
+        }
+
         // Block once-per-session tools from firing a second time
         if (ONCE_PER_SESSION.has(functionName) && firedOnce.has(functionName)) {
           log("agent", `Blocked duplicate ${functionName} call — already executed this session`);
@@ -395,6 +484,8 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
 
         await onToolStart?.({ name: functionName, args: functionArgs, step });
         const result = await executeTool(functionName, functionArgs);
+        repeatedToolCalls.add(toolSignature);
+        lastToolCallByName.set(functionName, toolSignature);
         await onToolFinish?.({
           name: functionName,
           args: functionArgs,
@@ -415,6 +506,21 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
         };
       }));
 
+      const successfulTool = toolResults.find((entry) => {
+        try {
+          const parsed = JSON.parse(entry.content || "{}");
+          return parsed?.ok !== false && parsed?.result != null;
+        } catch {
+          return false;
+        }
+      });
+      if (successfulTool) {
+        try {
+          const parsed = JSON.parse(successfulTool.content);
+          lastUsefulToolSummary = JSON.stringify(parsed.result).slice(0, 1200);
+        } catch {}
+      }
+
       messages.push(...toolResults);
     } catch (error) {
       log("error", `Agent loop error at step ${step}: ${error.message}`);
@@ -432,7 +538,10 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
   }
 
   log("agent", "Max steps reached without final answer");
-  return { content: "Max steps reached. Review logs for partial progress.", userMessage: goal };
+  const fallback = lastUsefulToolSummary
+    ? `Max steps reached before a final model answer, but tool execution completed. Latest tool result:\n${lastUsefulToolSummary}`
+    : "Max steps reached before a final model answer. No tool result was available.";
+  return { content: fallback, userMessage: goal };
 }
 
 function sleep(ms) {
