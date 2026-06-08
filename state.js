@@ -201,6 +201,27 @@ export function recordClose(position_address, reason) {
 }
 
 /**
+ * Persist the latest live accounting snapshot for a tracked position.
+ * Used as a fallback when a position is already closed on-chain before we can
+ * fetch its closed-position PnL from Meteora.
+ */
+export function updatePositionLiveSnapshot(position_address, snapshot = {}) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed) return false;
+  pos.last_live_pnl_usd = snapshot.last_live_pnl_usd ?? pos.last_live_pnl_usd ?? null;
+  pos.last_live_pnl_true_usd = snapshot.last_live_pnl_true_usd ?? pos.last_live_pnl_true_usd ?? null;
+  pos.last_live_pnl_pct = snapshot.last_live_pnl_pct ?? pos.last_live_pnl_pct ?? null;
+  pos.last_live_total_value_usd = snapshot.last_live_total_value_usd ?? pos.last_live_total_value_usd ?? null;
+  pos.last_live_total_value_true_usd = snapshot.last_live_total_value_true_usd ?? pos.last_live_total_value_true_usd ?? null;
+  pos.last_live_collected_fees_true_usd = snapshot.last_live_collected_fees_true_usd ?? pos.last_live_collected_fees_true_usd ?? null;
+  pos.last_live_unclaimed_fees_true_usd = snapshot.last_live_unclaimed_fees_true_usd ?? pos.last_live_unclaimed_fees_true_usd ?? null;
+  pos.last_live_seen_at = new Date().toISOString();
+  save(state);
+  return true;
+}
+
+/**
  * Set a persistent instruction for a position (e.g. "hold until 5% profit").
  * Overwrites any previous instruction. Pass null to clear.
  */

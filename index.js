@@ -774,11 +774,13 @@ ${candidateBlocks.join("\n\n")}
 RULES — read carefully:
 1. Every candidate above has ALREADY passed: (a) hard screening thresholds (config values listed in CONFIG), (b) launchpad allow/block filters, (c) bot-holder concentration check, (d) adaptive deploy profile (token age + volatility guard), and (e) lone-candidate narrative/smart-wallet guard. You are NOT supposed to re-veto pools that passed these checks. Your only job is to pick the best one of ${passing.length} survivor(s).
 2. DO NOT invent thresholds, percentages, or requirements not in the CONFIG section above. If a number in the pool data does not match a CONFIG threshold, the verdict block will say so explicitly.
-3. If you decide no pool qualifies, your reason MUST reference specific data from the pool blocks or the verdict blocks (e.g. "LIFE-SOL: pool block shows fee/aTVL 0.04% which is below CONFIG minFeeActiveTvlRatio 0.015%" — but note this is impossible because the verdict would have rejected it before this point, so if it appears here, the data passed).
-4. If 0 candidates passed (passing.length = 0), use the ⛔ NO DEPLOY format. Otherwise, you should almost always DEPLOY the top-ranked survivor unless there is a strong, data-grounded reason not to.
+3. If you decide no pool qualifies, your reason MUST reference specific data from the pool blocks or the verdict blocks. Never cite a threshold or percentage unless you copy the EXACT number from CONFIG or the pool block.
+4. IMPORTANT on units: if CONFIG says minFeeActiveTvlRatio = 0.015%, that means exactly 0.015%. Do NOT restate it as 2%, 1.5%, or "effectively zero".
+5. IMPORTANT on survivors: every pool shown here already passed the hard threshold checks. That means you must NOT use threshold-failure language like "fee/aTVL below CONFIG minimum", "organic below minimum", or similar for these survivors. If you choose NO DEPLOY anyway, the reason must be qualitative or comparative, not a hard-threshold failure.
+6. If 0 candidates passed (passing.length = 0), use the ⛔ NO DEPLOY format. Otherwise, you should almost always DEPLOY the top-ranked survivor unless there is a strong, data-grounded reason not to.
 
 STEPS:
-1. If passing.length >= 1, deploy the top survivor (the one with the highest fee/aTVL × organic × smart-wallet score). If you have a strong data-grounded reason to skip it, name the pool and cite the specific data point.
+1. If passing.length >= 1, deploy the top survivor (the one with the highest fee/aTVL × organic × smart-wallet score). If you have a strong data-grounded reason to skip it, name the pool and cite the specific qualitative or comparative data point exactly as shown.
 2. Call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
    bins_below = round(${config.strategy.minBinsBelow} + (candidate volatility/5)*(${config.strategy.maxBinsBelow - config.strategy.minBinsBelow})) clamped to [${config.strategy.minBinsBelow},${config.strategy.maxBinsBelow}].
    pass deploy_position.volatility = the candidate volatility value.
@@ -832,10 +834,10 @@ STEPS:
    <name or none>
 
    WHY SKIPPED
-   <must cite a specific data point from the pool/verdict blocks above, e.g. "fee/aTVL 0.04% below CONFIG minFeeActiveTvlRatio 0.015%" or "lone-candidate guard flagged: no narrative AND no smart wallets">
+   <must cite a specific comparative or qualitative data point from the pool/verdict blocks above. Do NOT claim that a shown survivor failed CONFIG minimums, because shown survivors already passed those hard checks. Good examples: "no smart-wallet confirmation while the other survivor had strong confirmation", "narrative is materially weaker than the other survivor", "momentum/volume persistence is weaker than the alternative despite passing minimums"> 
 
    REJECTED
-   <short flat list of top candidate names and the SPECIFIC data point that disqualified each>
+   <short flat list of top candidate names and the SPECIFIC qualitative/comparative reason each was skipped>
 IMPORTANT:
 - Never write "unknown" for OKX. Use real values, omit missing fields, or write exactly "OKX: unavailable".
 - Keep the whole report compact and highly scannable for Telegram.
@@ -2346,38 +2348,36 @@ function formatHardFilterVerdict({ pool, sw, n, ti } = {}) {
 //   - "Cited threshold 2% but config minFeeActiveTvlRatio is 0.015%"
 //   - "Cited pool fee/aTVL 0% but pool block shows 0.04%"
 function checkLlmNarrativeAgainstData(llmText, passing, cfg) {
-  const warnings = [];
-  if (!llmText || !passing?.length) return warnings;
-  // Collect all numbers the LLM cited, mapped to the field name
+  const warnings = new Set();
+  if (!llmText || !passing?.length) return [];
   const feeTvlCitations = findPercentCitations(llmText, "fee");
-  const top10Citations = findPercentCitations(llmText, "top10|top 10|concentration");
-  const botCitations = findPercentCitations(llmText, "bot");
-  // Check threshold citations (e.g. "minimum of 2%")
   const thresholdCitation = llmText.match(/minimum[^.\n]{0,40}?(\d+(?:\.\d+)?)\s*%/i)
     || llmText.match(/threshold[^.\n]{0,40}?(\d+(?:\.\d+)?)\s*%/i)
     || llmText.match(/required[^.\n]{0,40}?(\d+(?:\.\d+)?)\s*%/i);
+
   if (thresholdCitation) {
     const cited = Number(thresholdCitation[1]);
-    if (Number.isFinite(cited) && Math.abs(cited - cfg.screening.minFeeActiveTvlRatio) > 0.001) {
-      warnings.push(`Cited fee/TVL threshold ${cited}% but config minFeeActiveTvlRatio is ${cfg.screening.minFeeActiveTvlRatio}%`);
+    const actual = Number(cfg.screening.minFeeActiveTvlRatio);
+    if (Number.isFinite(cited) && Number.isFinite(actual) && Math.abs(cited - actual) > 0.001) {
+      warnings.add(`Cited fee/TVL threshold ${cited}% but config minFeeActiveTvlRatio is ${actual}%`);
     }
   }
-  // Check pool value citations (e.g. "fee-to-CTVL ratio is effectively 0%")
-  for (const { value, fieldContext } of feeTvlCitations) {
+
+  for (const { value } of feeTvlCitations) {
     const cited = Number(value);
     if (!Number.isFinite(cited)) continue;
     if (cited === 0) {
-      // LLM said 0% — check if any pool's actual value is >0
       const nonzero = passing.find((e) => {
         const v = e.pool?.fee_active_tvl_ratio ?? e.pool?.fee_tvl_ratio;
         return Number.isFinite(v) && v > 0;
       });
       if (nonzero) {
-        warnings.push(`Cited fee/aTVL ${cited}% for ${nonzero.pool.name} but pool block shows ${nonzero.pool.fee_active_tvl_ratio ?? nonzero.pool.fee_tvl_ratio}%`);
+        warnings.add(`Cited fee/aTVL 0% for ${nonzero.pool.name} but pool block shows ${nonzero.pool.fee_active_tvl_ratio ?? nonzero.pool.fee_tvl_ratio}%`);
       }
     }
   }
-  return warnings;
+
+  return [...warnings];
 }
 
 // Find percent citations in the LLM text. Looks for "field context ... 0.04%" patterns.

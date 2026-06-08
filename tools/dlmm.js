@@ -22,6 +22,7 @@ import {
   getTrackedPosition,
   minutesOutOfRange,
   syncOpenPositions,
+  updatePositionLiveSnapshot,
 } from "../state.js";
 import { recordPerformance } from "../lessons.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
@@ -1326,6 +1327,57 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
           log("positions_warn", `Suspicious pnl_pct for ${positionAddress.slice(0, 8)}: reported=${reportedPnlPct.toFixed(2)} derived=${derivedPnlPct.toFixed(2)} diff=${pnlPctDiff.toFixed(2)}`);
         }
 
+        const liveSnapshot = {
+          last_live_pnl_usd: lpData
+            ? Math.round((
+                config.management.solMode
+                  ? safeNum(lpData.pnl?.valueNative)
+                  : safeNum(lpData.pnl?.value)
+              ) * 10000) / 10000
+            : binData
+            ? Math.round(parseFloat(config.management.solMode ? (binData.pnlSol || 0) : (binData.pnlUsd || 0)) * 10000) / 10000
+            : null,
+          last_live_pnl_true_usd: lpData
+            ? Math.round(safeNum(lpData.pnl?.value) * 10000) / 10000
+            : binData
+            ? Math.round(parseFloat(binData.pnlUsd || 0) * 10000) / 10000
+            : null,
+          last_live_pnl_pct: (lpData || binData)
+            ? Math.round(reportedPnlPct * 100) / 100
+            : null,
+          last_live_total_value_usd: lpData
+            ? Math.round((
+                config.management.solMode
+                  ? safeNum(lpData.valueNative)
+                  : safeNum(lpData.value)
+              ) * 10000) / 10000
+            : binData
+            ? Math.round((
+                config.management.solMode
+                  ? parseFloat(binData.unrealizedPnl?.balancesSol || 0)
+                  : parseFloat(binData.unrealizedPnl?.balances || 0)
+              ) * 10000) / 10000
+            : null,
+          last_live_total_value_true_usd: lpData
+            ? Math.round(safeNum(lpData.value) * 10000) / 10000
+            : binData
+            ? Math.round(parseFloat(binData.unrealizedPnl?.balances || 0) * 10000) / 10000
+            : null,
+          last_live_collected_fees_true_usd: lpData
+            ? Math.round(safeNum(lpData.collectedFee) * 10000) / 10000
+            : binData
+            ? Math.round(parseFloat(binData.allTimeFees?.total?.usd || 0) * 10000) / 10000
+            : null,
+          last_live_unclaimed_fees_true_usd: lpData
+            ? Math.round(safeNum(lpData.unCollectedFee) * 10000) / 10000
+            : binData
+            ? Math.round((parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenX?.usd || 0) + parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenY?.usd || 0)) * 10000) / 10000
+            : null,
+        };
+        if (useLocalWallet && tracked?.position && !tracked?.closed) {
+          updatePositionLiveSnapshot(positionAddress, liveSnapshot);
+        }
+
         positions.push({
           position:           positionAddress,
           pool:               pool.poolAddress,
@@ -1618,9 +1670,28 @@ export async function closePosition({ position_address, reason }) {
           pnlPct = initialUsd > 0 ? (pnlUsd / initialUsd) * 100 : (cached.pnl_pct || 0);
         }
       } else if (tracked) {
-        // Last-resort: no cache. Use the deploy-time value as initial and
-        // admit the PnL is unknown.
-        initialUsd = tracked.initial_value_usd || 0;
+        // Fall back to the last live snapshot that getMyPositions() persisted
+        // into state.json before the account disappeared on-chain.
+        const trackedPnlTrueUsd = Number(tracked.last_live_pnl_true_usd ?? tracked.last_live_pnl_usd ?? 0);
+        const trackedPnlUsd = config.management.solMode
+          ? Number(tracked.last_live_pnl_usd ?? 0)
+          : trackedPnlTrueUsd;
+        const trackedFeesUsd = Number(tracked.last_live_collected_fees_true_usd ?? 0) + Number(tracked.last_live_unclaimed_fees_true_usd ?? 0);
+        const trackedInitialUsd = Number(tracked.initial_value_usd ?? 0);
+        const trackedFinalValueUsd = Number(tracked.last_live_total_value_true_usd ?? tracked.last_live_total_value_usd ?? 0);
+        pnlUsd = trackedPnlUsd;
+        feesUsd = trackedFeesUsd;
+        initialUsd = trackedInitialUsd;
+        finalValueUsd = trackedFinalValueUsd;
+        if (initialUsd > 0 && finalValueUsd > 0) {
+          pnlUsd = finalValueUsd + feesUsd - initialUsd;
+          pnlPct = (pnlUsd / initialUsd) * 100;
+        } else if (initialUsd > 0) {
+          pnlPct = Number(tracked.last_live_pnl_pct ?? ((trackedPnlUsd / initialUsd) * 100));
+          finalValueUsd = Math.max(0, initialUsd + trackedPnlUsd - trackedFeesUsd);
+        } else {
+          pnlPct = Number(tracked.last_live_pnl_pct ?? 0);
+        }
       }
       return {
         success: true,
