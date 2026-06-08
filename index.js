@@ -1646,6 +1646,10 @@ function formatHelpText() {
 }
 
 async function runDeterministicScreen(limit = 5) {
+  const { total_positions } = await getMyPositions({ force: true });
+  if (total_positions >= config.risk.maxPositions) {
+    throw new Error(`Max positions reached (${total_positions}/${config.risk.maxPositions})`);
+  }
   // Use the same enrichment + filter pipeline as the cron path, so /screen
   // and the auto screening cycle always see the same surviving pool set.
   const pipeline = await enrichAndFilterCandidates({ limit: 10 });
@@ -1684,6 +1688,10 @@ async function runDeterministicScreen(limit = 5) {
 }
 
 async function deployLatestCandidate(index) {
+  const { total_positions } = await getMyPositions({ force: true });
+  if (total_positions >= config.risk.maxPositions) {
+    throw new Error(`Max positions reached (${total_positions}/${config.risk.maxPositions})`);
+  }
   const candidate = _latestCandidates[index];
   if (!candidate) {
     throw new Error("Invalid candidate index. Run /screen first.");
