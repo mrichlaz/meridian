@@ -1082,7 +1082,8 @@ export function getPerformanceHistory({ hours = 24, limit = 50 } = {}) {
 
   const filtered = p
     .filter((r) => r.recorded_at >= cutoff)
-    .slice(-limit)
+    .sort((a, b) => String(b.recorded_at || "").localeCompare(String(a.recorded_at || "")))
+    .slice(0, limit)
     .map((r) => ({
       pool_name: r.pool_name,
       pool: r.pool,
