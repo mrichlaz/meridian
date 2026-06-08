@@ -115,14 +115,15 @@ export async function mlTrain(config, args) {
   }
 
   const lines = [];
-  lines.push(`Trained on ${result.trainSize} samples (${result.valSize} validation)`);
-  lines.push(`Samples: ${result.sampleCount} total`);
+  lines.push(`Trained on ${result.sampleCount} samples`);
   if (result.finalLoss != null) {
     const finalLossValue = result.finalLoss.loss ?? result.finalLoss.total ?? result.finalLoss.totalLoss ?? result.finalLoss;
     lines.push(`Final loss: ${finalLossValue != null ? Number(finalLossValue).toFixed(4) : "N/A"}`);
   }
-  if (result.validation) {
-    lines.push(`Validation: Spearman=${result.validation.spearman?.toFixed(3) || "N/A"} DirectionAcc=${result.validation.directionAccuracy?.toFixed(1) || "N/A"}%`);
+  lines.push(`K-fold: ${result.folds || result.cv?.foldCount || "n/a"}`);
+  if (result.cv) {
+    lines.push(`CV accuracy: ${result.cv.accuracy ?? "N/A"}%`);
+    lines.push(`CV F1: ${result.cv.f1 ?? "N/A"}`);
   }
 
   return lines.join("\n");

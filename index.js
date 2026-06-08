@@ -2289,13 +2289,17 @@ async function telegramHandler(msg) {
         await sendMessage(`ML training skipped — ${result.reason || "unknown"}\nNeed at least ${mlCfg.minSamples || 10} closed positions (have ${result.sampleCount ?? sampleCount ?? 0}).`).catch(() => {});
         return;
       }
-      const loss = result.finalLoss?.total?.toFixed(4) || "N/A";
+      const finalLossValue = result.finalLoss?.loss ?? result.finalLoss?.total ?? result.finalLoss?.totalLoss ?? result.finalLoss;
+      const loss = finalLossValue != null && Number.isFinite(Number(finalLossValue)) ? Number(finalLossValue).toFixed(4) : "N/A";
+      const cvAcc = result.cv?.accuracy != null ? `${result.cv.accuracy}%` : "n/a";
+      const cvF1 = result.cv?.f1 != null ? result.cv.f1 : "n/a";
       const lines = [
         "<b>🧠 ML Training</b>",
-        `Trained on ${result.trainSize} samples (${result.valSize} validation)`,
-        `Total samples: ${result.sampleCount}`,
+        `Trained on ${result.sampleCount} samples`,
         `Final loss: ${loss}`,
-        `K-fold: ${result.kFold || "n/a"}`,
+        `K-fold: ${result.folds || result.cv?.foldCount || "n/a"}`,
+        `CV accuracy: ${cvAcc}`,
+        `CV F1: ${cvF1}`,
         "",
         "Model checkpoint saved to <code>data/ml/ml-model.json</code>.",
       ];
