@@ -630,8 +630,8 @@ export function formatThresholds(config, options = {}) {
   lines.push(b("🛡 Risk"));
   lines.push(`${b("TP / SL:")} ${m.takeProfitPct}% / ${m.stopLossPct}%`);
   if (m.trailingTakeProfit) lines.push(`${b("Trailing TP:")} trigger ${m.trailingTriggerPct}%, drop ${m.trailingDropPct}%`);
-  lines.push(`${b("OOR wait:")} ${m.outOfRangeWaitMinutes}m, close when > ${m.outOfRangeBinsToClose} bins above range`);
-  lines.push(`${b("Low yield close:")} fee/TVL 24h < ${m.minFeePerTvl24h}% after ${m.minAgeBeforeYieldCheck}m`);
+  lines.push(`${b("OOR wait:")} ${m.outOfRangeWaitMinutes}m, close when &gt; ${m.outOfRangeBinsToClose} bins above range`);
+  lines.push(`${b("Low yield close:")} fee/TVL 24h &lt; ${m.minFeePerTvl24h}% after ${m.minAgeBeforeYieldCheck}m`);
   lines.push(`${b("Claim threshold:")} ≥ ${formatUsd(m.minClaimAmount, 2)}`);
   return { text: lines.join("\n").slice(0, 3900), buttons: ACTION_BUTTONS.status() };
 }
