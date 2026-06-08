@@ -500,7 +500,11 @@ function derivLesson(perf) {
 export function evolveThresholds(perfData, config) {
   if (!perfData || perfData.length < MIN_EVOLVE_POSITIONS) return null;
 
+  // Use robust subsets/statistics instead of fragile edge values (e.g. min
+  // winner pnl = 0.0%). This keeps evolution from ratcheting thresholds lower
+  // just because one tiny/noisy winner or one odd TVL record exists.
   const winners = perfData.filter((p) => p.pnl_pct > 0);
+  const meaningfulWinners = perfData.filter((p) => Number(p.pnl_pct) >= 1);
   const losers  = perfData.filter((p) => p.pnl_pct < -5);
 
   // Need at least some signal in both directions before adjusting
@@ -509,6 +513,18 @@ export function evolveThresholds(perfData, config) {
 
   const changes   = {};
   const rationale = {};
+
+  const quantile = (values, q) => {
+    const sorted = values.filter(isFiniteNum).map(Number).sort((a, b) => a - b);
+    if (!sorted.length) return null;
+    if (sorted.length === 1) return sorted[0];
+    const pos = (sorted.length - 1) * q;
+    const base = Math.floor(pos);
+    const rest = pos - base;
+    return sorted[base + 1] !== undefined
+      ? sorted[base] + rest * (sorted[base + 1] - sorted[base])
+      : sorted[base];
+  };
 
   // ── 1. minFeeActiveTvlRatio ────────────────────────────────────
   // Raise the floor if low-fee pools consistently underperform. Lower the
@@ -522,31 +538,31 @@ export function evolveThresholds(perfData, config) {
 
       if (current != null && Number.isFinite(Number(current))) {
         // Tighten — losers cluster at low fees
-        if (loserFees.length >= 2) {
-          const maxLoserFee = Math.max(...loserFees);
-          if (maxLoserFee < Number(current) * 1.5) {
-            const target = maxLoserFee * 1.2;
+        if (loserFees.length >= 3) {
+          const loserFeeP75 = quantile(loserFees, 0.75);
+          if (loserFeeP75 != null && loserFeeP75 < Number(current) * 1.35) {
+            const target = loserFeeP75 * 1.15;
             const proposed = clamp(nudge(Number(current), target, spec.step), spec.min, spec.max);
             const rounded = Number(proposed.toFixed(spec.decimals));
             if (rounded > Number(current)) {
               changes.minFeeActiveTvlRatio = rounded;
               rationale.minFeeActiveTvlRatio =
-                `Losers had fee/aTVL<=${maxLoserFee.toFixed(4)} — raised floor from ${current} → ${rounded}`;
+                `Loser fee/aTVL 75th percentile was ${loserFeeP75.toFixed(4)} — raised floor from ${current} → ${rounded}`;
             }
           }
         }
 
         // Relax — winners span comfortably above the current floor
-        if (winnerFees.length >= 2) {
-          const minWinnerFee = Math.min(...winnerFees);
-          if (minWinnerFee > Number(current) * 1.5) {
-            const target = minWinnerFee * 0.85;
+        if (winnerFees.length >= 3) {
+          const winnerFeeP25 = quantile(winnerFees, 0.25);
+          if (winnerFeeP25 != null && winnerFeeP25 > Number(current) * 1.6) {
+            const target = winnerFeeP25 * 0.9;
             const proposed = clamp(nudge(Number(current), target, spec.step), spec.min, spec.max);
             const rounded = Number(proposed.toFixed(spec.decimals));
             if (rounded < Number(current) && !changes.minFeeActiveTvlRatio) {
               changes.minFeeActiveTvlRatio = rounded;
               rationale.minFeeActiveTvlRatio =
-                `Lowest winner fee/aTVL=${minWinnerFee.toFixed(4)} — relaxed floor from ${current} → ${rounded}`;
+                `Winner fee/aTVL 25th percentile was ${winnerFeeP25.toFixed(4)} — relaxed floor from ${current} → ${rounded}`;
             }
           }
         }
@@ -568,14 +584,16 @@ export function evolveThresholds(perfData, config) {
         const avgLoserOrganic  = avg(loserOrganics);
         const avgWinnerOrganic = avg(winnerOrganics);
         if (avgWinnerOrganic - avgLoserOrganic >= 10) {
-          const minWinnerOrganic = Math.min(...winnerOrganics);
-          const target = Math.max(minWinnerOrganic - 3, Number(current));
-          const proposed = clamp(nudge(Number(current), target, spec.step), spec.min, spec.max);
-          const rounded = Math.round(proposed);
-          if (rounded > Number(current)) {
-            changes.minOrganic = rounded;
-            rationale.minOrganic =
-              `Winner avg organic ${avgWinnerOrganic.toFixed(0)} vs loser avg ${avgLoserOrganic.toFixed(0)} — raised from ${current} → ${rounded}`;
+          const winnerOrganicP25 = quantile(winnerOrganics, 0.25);
+          if (winnerOrganicP25 != null) {
+            const target = Math.max(winnerOrganicP25 - 3, Number(current));
+            const proposed = clamp(nudge(Number(current), target, spec.step), spec.min, spec.max);
+            const rounded = Math.round(proposed);
+            if (rounded > Number(current)) {
+              changes.minOrganic = rounded;
+              rationale.minOrganic =
+                `Winner organic 25th percentile ${winnerOrganicP25.toFixed(0)} vs loser avg ${avgLoserOrganic.toFixed(0)} — raised from ${current} → ${rounded}`;
+            }
           }
         }
       }
@@ -593,27 +611,27 @@ export function evolveThresholds(perfData, config) {
       const loserTvls  = losers.map((p) => Number(p.entry_tvl ?? p.tvl)).filter(isFiniteNum);
       const current    = config[minSpec.section][minSpec.field];
       if (current != null && Number.isFinite(Number(current))) {
-        if (loserTvls.length >= 2) {
-          const maxLoserTvl = Math.max(...loserTvls);
-          if (maxLoserTvl < Number(current)) {
-            const target = maxLoserTvl * 1.1;
+        if (loserTvls.length >= 3) {
+          const loserTvlP75 = quantile(loserTvls, 0.75);
+          if (loserTvlP75 != null && loserTvlP75 < Number(current)) {
+            const target = loserTvlP75 * 1.1;
             const proposed = clamp(nudge(Number(current), target, minSpec.step), minSpec.min, minSpec.max);
             const rounded = Math.round(proposed);
             if (rounded > Number(current)) {
               changes.minTvl = rounded;
-              rationale.minTvl = `Losers clustered at TVL<=$${maxLoserTvl.toFixed(0)} — raised from $${current} → $${rounded}`;
+              rationale.minTvl = `Loser TVL 75th percentile was $${loserTvlP75.toFixed(0)} — raised from $${current} → $${rounded}`;
             }
           }
         }
         if (winnerTvls.length >= 3 && !changes.minTvl) {
-          const minWinnerTvl = Math.min(...winnerTvls);
-          if (minWinnerTvl > Number(current) * 1.5) {
-            const target = minWinnerTvl * 0.9;
+          const winnerTvlP25 = quantile(winnerTvls, 0.25);
+          if (winnerTvlP25 != null && winnerTvlP25 > Number(current) * 1.5) {
+            const target = winnerTvlP25 * 0.9;
             const proposed = clamp(nudge(Number(current), target, minSpec.step), minSpec.min, minSpec.max);
             const rounded = Math.round(proposed);
             if (rounded < Number(current)) {
               changes.minTvl = rounded;
-              rationale.minTvl = `Lowest winner TVL=$${minWinnerTvl.toFixed(0)} — relaxed from $${current} → $${rounded}`;
+              rationale.minTvl = `Winner TVL 25th percentile was $${winnerTvlP25.toFixed(0)} — relaxed from $${current} → $${rounded}`;
             }
           }
         }
@@ -624,27 +642,27 @@ export function evolveThresholds(perfData, config) {
       const loserTvls  = losers.map((p) => Number(p.entry_tvl ?? p.tvl)).filter(isFiniteNum);
       const current    = config[maxSpec.section][maxSpec.field];
       if (current != null && Number.isFinite(Number(current))) {
-        if (loserTvls.length >= 2) {
-          const maxLoserTvl = Math.max(...loserTvls);
-          if (maxLoserTvl > Number(current)) {
-            const target = maxLoserTvl * 1.05;
+        if (loserTvls.length >= 3) {
+          const loserTvlP90 = quantile(loserTvls, 0.9);
+          if (loserTvlP90 != null && loserTvlP90 > Number(current)) {
+            const target = loserTvlP90 * 1.05;
             const proposed = clamp(nudge(Number(current), target, maxSpec.step), maxSpec.min, maxSpec.max);
             const rounded = Math.round(proposed);
             if (rounded > Number(current)) {
               changes.maxTvl = rounded;
-              rationale.maxTvl = `Loser TVL was as high as $${maxLoserTvl.toFixed(0)} — raised ceiling from $${current} → $${rounded}`;
+              rationale.maxTvl = `Loser TVL 90th percentile was $${loserTvlP90.toFixed(0)} — raised ceiling from $${current} → $${rounded}`;
             }
           }
         }
         if (winnerTvls.length >= 3 && !changes.maxTvl) {
-          const minWinnerTvl = Math.min(...winnerTvls);
-          if (minWinnerTvl < Number(current) * 0.6) {
-            const target = minWinnerTvl * 1.1;
+          const winnerTvlP90 = quantile(winnerTvls, 0.9);
+          if (winnerTvlP90 != null && winnerTvlP90 < Number(current) * 0.6) {
+            const target = winnerTvlP90 * 1.15;
             const proposed = clamp(nudge(Number(current), target, maxSpec.step), maxSpec.min, maxSpec.max);
             const rounded = Math.round(proposed);
             if (rounded < Number(current)) {
               changes.maxTvl = rounded;
-              rationale.maxTvl = `Winner TVL comfortable at $${minWinnerTvl.toFixed(0)} — lowered ceiling from $${current} → $${rounded}`;
+              rationale.maxTvl = `Winner TVL 90th percentile was $${winnerTvlP90.toFixed(0)} — lowered ceiling from $${current} → $${rounded}`;
             }
           }
         }
@@ -659,20 +677,20 @@ export function evolveThresholds(perfData, config) {
   {
     const tpSpec = getThresholdSpec("takeProfitPct");
     if (tpSpec) {
-      const tpValues = perfData
+      const tpValues = meaningfulWinners
         .map((p) => Number(p.pnl_pct))
         .filter(isFiniteNum)
-        .filter((v) => v > 0);
+        .filter((v) => v >= 1);
       const current = config[tpSpec.section][tpSpec.field];
       if (current != null && tpValues.length >= 3) {
-        const tpMin = Math.min(...tpValues);
-        if (tpMin < Number(current) * 0.5) {
-          const target = Math.max(tpMin * 0.9, 1);
+        const tpP25 = quantile(tpValues, 0.25);
+        if (tpP25 != null && tpP25 < Number(current) * 0.6) {
+          const target = Math.max(tpP25 * 0.9, 1.5);
           const proposed = clamp(nudge(Number(current), target, tpSpec.step), tpSpec.min, tpSpec.max);
           const rounded = Number(proposed.toFixed(tpSpec.decimals));
           if (rounded < Number(current)) {
             changes.takeProfitPct = rounded;
-            rationale.takeProfitPct = `Winners were realized at ${tpMin.toFixed(1)}% — lowered TP from ${current}% → ${rounded}%`;
+            rationale.takeProfitPct = `Winner PnL 25th percentile was ${tpP25.toFixed(1)}% — lowered TP from ${current}% → ${rounded}%`;
           }
         }
       }
@@ -685,14 +703,14 @@ export function evolveThresholds(perfData, config) {
         .filter((v) => v < 0);
       const current = config[slSpec.section][slSpec.field];
       if (current != null && slValues.length >= 3) {
-        const slMax = Math.max(...slValues); // closest to 0 (least bad)
-        if (slMax > Number(current) + 5) {
-          const target = slMax * 0.9;
+        const slP75 = quantile(slValues, 0.75); // closer-to-zero loser cluster, but robust
+        if (slP75 != null && slP75 > Number(current) + 5) {
+          const target = slP75 * 0.9;
           const proposed = clamp(nudge(Number(current), target, slSpec.step), slSpec.min, slSpec.max);
           const rounded = Number(proposed.toFixed(slSpec.decimals));
           if (rounded > Number(current)) {
             changes.stopLossPct = rounded;
-            rationale.stopLossPct = `Losers exited at ${slMax.toFixed(1)}% — widened SL from ${current}% → ${rounded}%`;
+            rationale.stopLossPct = `Loser PnL 75th percentile was ${slP75.toFixed(1)}% — widened SL from ${current}% → ${rounded}%`;
           }
         }
       }
@@ -708,20 +726,20 @@ export function evolveThresholds(perfData, config) {
       persistedKey === "maxTop10Pct" ? "entry_top10_pct" :
       persistedKey === "maxBundlePct" ? "entry_bundle_pct" :
       "entry_bot_holders_pct";
-    const values = perfData
+    const values = losers
       .map((p) => Number(p[perfField]))
       .filter((v) => Number.isFinite(v) && v > 0);
     if (values.length < 3) continue;
     const current = config[spec.section][spec.field];
     if (current == null) continue;
-    const maxSeen = Math.max(...values);
-    if (maxSeen < Number(current) * 0.7) {
-      const target = maxSeen * 1.1;
+    const loserP90 = quantile(values, 0.9);
+    if (loserP90 != null && loserP90 < Number(current) * 0.7) {
+      const target = loserP90 * 1.1;
       const proposed = clamp(nudge(Number(current), target, spec.step), spec.min, spec.max);
       const rounded = Math.round(proposed);
       if (rounded < Number(current) && !changes[persistedKey]) {
         changes[persistedKey] = rounded;
-        rationale[persistedKey] = `Max observed ${maxSeen.toFixed(1)}% — tightened from ${current}% → ${rounded}%`;
+        rationale[persistedKey] = `Loser ${persistedKey} 90th percentile was ${loserP90.toFixed(1)}% — tightened from ${current}% → ${rounded}%`;
       }
     }
   }

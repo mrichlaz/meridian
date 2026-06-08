@@ -2256,6 +2256,7 @@ export async function closePosition({ position_address, reason }) {
         txs: txHashes,
         pnl_usd: pnlUsd,
         pnl_pct: pnlPct,
+        reason: reason || "agent decision",
         base_mint: closeBaseMint,
       };
     }
@@ -2281,6 +2282,7 @@ export async function closePosition({ position_address, reason }) {
       txs: txHashes,
       pnl_usd: pnlUsd,
       pnl_pct: pnlPct,
+      reason: reason || "agent decision",
       initial_value_usd: initialUsd,
       final_value_usd: finalValueUsd,
       fees_earned_usd: feesUsd,
