@@ -258,6 +258,7 @@ function normalizeConfigValue(key, value) {
     "trailingTakeProfit",
     "solMode",
     "darwinEnabled",
+    "mlEnabled",
     "lpAgentRelayEnabled",
   ]);
   const arrayKeys = new Set(["allowedLaunchpads", "blockedLaunchpads"]);
@@ -471,6 +472,22 @@ const toolMap = {
       publicApiKey: ["api", "publicApiKey"],
       agentMeridianApiUrl: ["api", "url"],
       lpAgentRelayEnabled: ["api", "lpAgentRelayEnabled"],
+      // ml / darwin
+      mlEnabled: ["ml", "enabled", ["mlEnabled"]],
+      mlTrainEvery: ["ml", "trainEvery", ["mlTrainEvery"]],
+      mlMinSamples: ["ml", "minSamples", ["mlMinSamples"]],
+      mlBatchSize: ["ml", "batchSize", ["mlBatchSize"]],
+      mlEpochs: ["ml", "epochs", ["mlEpochs"]],
+      mlLearningRate: ["ml", "learningRate", ["mlLearningRate"]],
+      mlPersonality: ["ml", "personality", ["mlPersonality"]],
+      darwinEnabled: ["darwin", "enabled", ["darwinEnabled"]],
+      darwinWindowDays: ["darwin", "windowDays", ["darwinWindowDays"]],
+      darwinRecalcEvery: ["darwin", "recalcEvery", ["darwinRecalcEvery"]],
+      darwinBoost: ["darwin", "boostFactor", ["darwinBoost"]],
+      darwinDecay: ["darwin", "decayFactor", ["darwinDecay"]],
+      darwinFloor: ["darwin", "weightFloor", ["darwinFloor"]],
+      darwinCeiling: ["darwin", "weightCeiling", ["darwinCeiling"]],
+      darwinMinSamples: ["darwin", "minSamples", ["darwinMinSamples"]],
       // chart indicators
       chartIndicatorsEnabled: ["indicators", "enabled", ["chartIndicators", "enabled"]],
       indicatorEntryPreset: ["indicators", "entryPreset", ["chartIndicators", "entryPreset"]],
