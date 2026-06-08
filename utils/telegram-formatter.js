@@ -73,6 +73,11 @@ function timeAgo(iso) {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
+function solscanAccountLink(address, label) {
+  if (!address) return esc(label || "—");
+  return `<a href="${SOLSCAN_URL}/account/${address}">${esc(label || address)}</a>`;
+}
+
 // ─── Reusable button presets ─────────────────────────────────────
 
 const ACTION_BUTTONS = {
@@ -309,7 +314,7 @@ export function formatPositionCard(position, options = {}) {
 
   const lines = [];
   lines.push(b(`📊 ${position.pair || "Position"}`) + `  ${inRange}`);
-  lines.push(`<code>${truncAddr(position.pool, 8, 4)}</code>  pos <code>${truncAddr(position.position, 8, 4)}</code>`);
+  lines.push(`${solscanAccountLink(position.pool, truncAddr(position.pool, 8, 4))}  •  pos ${solscanAccountLink(position.position, truncAddr(position.position, 8, 4))}`);
   lines.push(`Bins: ${bins}  ${active}  |  Age: ${age}`);
   lines.push(`PnL: ${pnl}  •  Value: ${val}  •  Fees: ${fees}  •  Yield: ${yield_}`);
   if (position.instruction) lines.push(`Note: "${esc(position.instruction)}"`);
@@ -725,8 +730,11 @@ export function formatHelp() {
     "  /thresholds — see /thresholds above",
     "  /evolve — run threshold evolution",
     "  /performance — win rate / avg PnL / total fees",
+    "  /screening-stats — screening funnel stats",
     "  /hive — HiveMind sync status",
     "  /ml-status — model generation, blend λ, emotion state, personality",
+    "  /ml-train — force an ML training pass",
+    "  /mlpersonality <name> — switch ML personality preset",
     "",
     b("Lifecycle"),
     "  /pause, /resume — pause / resume cron cycles",

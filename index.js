@@ -1942,7 +1942,7 @@ async function telegramHandler(msg) {
   }
 
   if (text === "/help") {
-    await sendMessage(formatHelp()).catch(() => {});
+    await sendHTML(formatHelp()).catch(() => {});
     return;
   }
 
@@ -2061,6 +2061,7 @@ async function telegramHandler(msg) {
         changes: { [key]: value },
         reason: "Telegram slash command /setcfg",
       });
+      if (key === "mlPersonality") syncMlPersonalityFromConfig();
       if (!result?.success) {
         await sendMessage(`Config update failed.\nUnknown: ${(result?.unknown || []).join(", ") || "none"}`).catch(() => {});
         return;
@@ -2194,6 +2195,7 @@ async function telegramHandler(msg) {
   }
 
   if (text === "/ml-status" || text === "/mlstatus" || text === "/ml") {
+    syncMlPersonalityFromConfig();
     try {
       const { mlStatus } = await import("./ml/cli.js");
       const text = mlStatus(config);
@@ -2230,6 +2232,22 @@ async function telegramHandler(msg) {
         lines.push("Saved to user-config.json and applied to live config.");
         await sendHTML(lines.join("\n")).catch(() => {});
       }
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  if (/^\/mlpersonality\s+/i.test(text)) {
+    try {
+      const desired = text.replace(/^\/mlpersonality\s+/i, "").trim().toLowerCase();
+      const { setActive, list } = await import("./ml/personalities.js");
+      setActive(desired);
+      await executeTool("update_config", {
+        changes: { mlPersonality: desired },
+        reason: "Telegram slash command /mlpersonality",
+      });
+      await sendMessage(`✅ ML personality set to ${desired}. Available: ${list().join(", ")}`).catch(() => {});
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
@@ -2536,6 +2554,20 @@ function computeBinsBelow(volatility) {
   const lo = config.strategy.minBinsBelow;
   const hi = config.strategy.maxBinsBelow;
   return Math.max(lo, Math.min(hi, Math.round(lo + (parsedVolatility / 5) * (hi - lo))));
+}
+
+function syncMlPersonalityFromConfig() {
+  try {
+    const desired = config?.ml?.personality;
+    if (!desired) return false;
+    const { getActive, setActive } = require("./ml/personalities.js");
+    const active = getActive();
+    if (active?.name !== desired) {
+      setActive(desired);
+      return true;
+    }
+  } catch {}
+  return false;
 }
 
 // Register restarter — when update_config changes intervals, running cron jobs get replaced

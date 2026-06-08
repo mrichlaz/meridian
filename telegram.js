@@ -434,6 +434,7 @@ const BOT_COMMANDS = [
   { command: "screeningstats", description: "Show screening funnel stats" },
   { command: "mlstatus",   description: "Show ML model and emotion state" },
   { command: "mltrain",    description: "Force an ML training pass" },
+  { command: "mlpersonality", description: "Set ML personality preset" },
   { command: "evolve",     description: "Trigger threshold evolution from data" },
   { command: "pause",      description: "Stop cron cycles" },
   { command: "resume",     description: "Start cron cycles again" },
