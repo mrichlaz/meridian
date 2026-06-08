@@ -727,6 +727,33 @@ export async function runScreeningCycle({ silent = false } = {}) {
       mlEmotionContext = getEmotionalPromptContext();
     } catch {}
 
+    // Build a CONFIG section with the actual current config values, so the
+    // LLM never has to guess or invent thresholds.
+    const configBlock = [
+      "CONFIG (current values from user-config.json — use these EXACT numbers, do not invent):",
+      `  minFeeActiveTvlRatio: ${config.screening.minFeeActiveTvlRatio}%`,
+      `  minTvl / maxTvl: $${config.screening.minTvl} / $${config.screening.maxTvl}`,
+      `  minVolume: $${config.screening.minVolume}`,
+      `  minOrganic: ${config.screening.minOrganic}`,
+      `  minHolders: ${config.screening.minHolders}`,
+      `  minMcap / maxMcap: $${config.screening.minMcap} / $${config.screening.maxMcap}`,
+      `  maxBotHoldersPct: ${config.screening.maxBotHoldersPct}%`,
+      `  maxTop10Pct: ${config.screening.maxTop10Pct}%`,
+      `  minTokenFeesSol: ${config.screening.minTokenFeesSol} SOL`,
+      `  maxBinStep: ${config.screening.maxBinStep}`,
+      `  minTokenAgeHours: ${config.screening.minTokenAgeHours ?? "(none)"}`,
+      `  blockedLaunchpads: ${JSON.stringify(config.screening.blockedLaunchpads)}`,
+      `  allowedLaunchpads: ${JSON.stringify(config.screening.allowedLaunchpads)}`,
+    ].join("\n");
+
+    // Build a per-pool hard-filter verdict block. The LLM gets to see, for
+    // each surviving pool, which checks passed and which failed (none should
+    // have failed if it's in `passing`, but show it for transparency).
+    const verdictBlock = passing.map((entry, i) => {
+      const v = formatHardFilterVerdict(entry);
+      return `--- Hard-filter verdict for #${i + 1} ---\n${v}`;
+    }).join("\n\n");
+
     deployAttempted = false;
     deploySucceeded = false;
     deployPool = null;
@@ -736,18 +763,28 @@ SCREENING CYCLE
 ${strategyBlock}
 Positions: ${prePositions.total_positions}/${config.risk.maxPositions} | SOL: ${currentBalance.sol.toFixed(3)} | Deploy: ${deployAmount} SOL
 ${mlEmotionContext ? "\n" + mlEmotionContext + "\n" : ""}
+${configBlock}
+
+${passing.length} candidate(s) survived every hard check below. Their per-pool hard-filter verdicts are:
+${verdictBlock}
+
 PRE-LOADED CANDIDATES (${passing.length} pools):
 ${candidateBlocks.join("\n\n")}
 
+RULES — read carefully:
+1. Every candidate above has ALREADY passed: (a) hard screening thresholds (config values listed in CONFIG), (b) launchpad allow/block filters, (c) bot-holder concentration check, (d) adaptive deploy profile (token age + volatility guard), and (e) lone-candidate narrative/smart-wallet guard. You are NOT supposed to re-veto pools that passed these checks. Your only job is to pick the best one of ${passing.length} survivor(s).
+2. DO NOT invent thresholds, percentages, or requirements not in the CONFIG section above. If a number in the pool data does not match a CONFIG threshold, the verdict block will say so explicitly.
+3. If you decide no pool qualifies, your reason MUST reference specific data from the pool blocks or the verdict blocks (e.g. "LIFE-SOL: pool block shows fee/aTVL 0.04% which is below CONFIG minFeeActiveTvlRatio 0.015%" — but note this is impossible because the verdict would have rejected it before this point, so if it appears here, the data passed).
+4. If 0 candidates passed (passing.length = 0), use the ⛔ NO DEPLOY format. Otherwise, you should almost always DEPLOY the top-ranked survivor unless there is a strong, data-grounded reason not to.
+
 STEPS:
-1. Every candidate below has ALREADY passed: (a) hard screening thresholds, (b) launchpad allow/block filters, (c) bot-holder concentration check, (d) adaptive deploy profile (token age + volatility guard), and (e) lone-candidate narrative/smart-wallet guard. You are NOT supposed to re-veto pools that passed these checks. Your only job is to pick the best one of ${passing.length} survivor(s).
-2. Pick the best candidate based on narrative quality, smart wallets, and pool metrics.
-3. Call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
+1. If passing.length >= 1, deploy the top survivor (the one with the highest fee/aTVL × organic × smart-wallet score). If you have a strong data-grounded reason to skip it, name the pool and cite the specific data point.
+2. Call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
    bins_below = round(${config.strategy.minBinsBelow} + (candidate volatility/5)*(${config.strategy.maxBinsBelow - config.strategy.minBinsBelow})) clamped to [${config.strategy.minBinsBelow},${config.strategy.maxBinsBelow}].
    pass deploy_position.volatility = the candidate volatility value.
    For single-side SOL deploys, do not invent upside:
    set amount_y only, keep amount_x = 0, keep bins_above = 0, and let the upper bin stay at the active bin.
-4. Report in this exact format (no tables, no extra sections):
+3. Report in this exact format (no tables, no extra sections):
    🚀 DEPLOYED
 
    <pool name>
@@ -786,7 +823,7 @@ STEPS:
 
    WHY THIS WON
    <2-4 concise sentences on why this pool won, key risks, and why it still beat the alternatives>
-5. If no pool qualifies, report in this exact format instead:
+4. Only use the ⛔ NO DEPLOY format below if you have a strong, data-grounded reason. Use the format:
    ⛔ NO DEPLOY
 
    Cycle finished with no valid entry.
@@ -795,13 +832,14 @@ STEPS:
    <name or none>
 
    WHY SKIPPED
-   <2-4 concise sentences explaining why nothing was good enough>
+   <must cite a specific data point from the pool/verdict blocks above, e.g. "fee/aTVL 0.04% below CONFIG minFeeActiveTvlRatio 0.015%" or "lone-candidate guard flagged: no narrative AND no smart wallets">
 
    REJECTED
-   <short flat list of top candidate names and why they were skipped>
+   <short flat list of top candidate names and the SPECIFIC data point that disqualified each>
 IMPORTANT:
 - Never write "unknown" for OKX. Use real values, omit missing fields, or write exactly "OKX: unavailable".
 - Keep the whole report compact and highly scannable for Telegram.
+- If you cite a CONFIG threshold, copy the EXACT number from the CONFIG section above. Do not paraphrase.
       `, config.llm.maxSteps, [], "SCREENER", config.llm.screeningModel, 2048, {
         onToolStart: async ({ name }) => {
           if (name === "deploy_position") deployAttempted = true;
@@ -821,6 +859,42 @@ IMPORTANT:
       });
     screenReport = content;
     if (/⛔\s*NO DEPLOY/i.test(content)) {
+      // Data-anchored audit: when the LLM chose no deploy, surface the actual
+      // hard-filter verdict on the top survivor alongside the LLM's narrative.
+      // The LLM's judgment is respected, but the operator gets to see whether
+      // the LLM's reason matches the data. This is informational, not an
+      // override — the LLM remains the final decision-maker.
+      if (passing.length >= 1) {
+        const topSurvivor = passing[0];
+        const hardFilterVerdict = formatHardFilterVerdict(topSurvivor);
+        const auditBlock = [
+          "DATA AUDIT (operator visibility only — LLM's decision stands)",
+          `Top survivor: ${topSurvivor.pool?.name || "unknown"} — passed all hard checks above.`,
+          "The LLM declined to deploy. Reasons may be qualitative (narrative, smart-wallet timing) or may not match the data. Use /deploy 1 to force-deploy this pool if you disagree.",
+          "",
+          "Hard-filter verdict on the top survivor:",
+          hardFilterVerdict,
+        ].join("\n");
+        log("screening", `LLM no-deploy audit (${passing.length} hard-filter survivors)\n${hardFilterVerdict}`);
+        // Append the audit to the LLM's narrative so the operator sees both side by side.
+        screenReport = `${content}\n\n${auditBlock}`;
+      }
+      // Cross-check the LLM's narrative against the actual data. If the LLM
+      // cited a config threshold that doesn't match the live config, OR a
+      // pool value that doesn't match the data, flag it so the operator
+      // can spot hallucinated justifications.
+      if (passing.length >= 1) {
+        const llmText = stripThink(content);
+        const dataMismatchWarnings = checkLlmNarrativeAgainstData(llmText, passing, config);
+        if (dataMismatchWarnings.length > 0) {
+          const mismatchBlock = [
+            "⚠️ NARRATIVE / DATA MISMATCH (the LLM cited a number that doesn't match the live data):",
+            ...dataMismatchWarnings.map((w) => `  - ${w}`),
+          ].join("\n");
+          log("screening", `LLM narrative/data mismatches:\n${dataMismatchWarnings.join("\n")}`);
+          screenReport = `${screenReport}\n\n${mismatchBlock}`;
+        }
+      }
       appendDecision({
         type: "no_deploy",
         actor: "SCREENER",
@@ -2230,6 +2304,91 @@ function buildGmgnFunnelReport(stageCounts, allFiltered = [], { fromStage = 1 } 
     .map(([key, items]) => `${stageLabels[key] || key}:\n${items.map(r => `  • ${r}`).join("\n")}`)
     .join("\n");
   return details ? `${funnel}\n\n${details}` : funnel;
+}
+
+// Data-anchored verdict for a single candidate. Used to surface the real
+// hard-filter state alongside the LLM's narrative so the operator can
+// spot when the LLM invents a reason that doesn't match the config.
+function formatHardFilterVerdict({ pool, sw, n, ti } = {}) {
+  if (!pool) return "(no pool data)";
+  const feeTvl = pool.fee_active_tvl_ratio ?? pool.fee_tvl_ratio;
+  const feeTvlPass = Number.isFinite(feeTvl) && feeTvl >= config.screening.minFeeActiveTvlRatio;
+  const tvl = pool.tvl ?? pool.active_tvl;
+  const tvlPass = Number.isFinite(tvl) && tvl >= config.screening.minTvl && tvl <= config.screening.maxTvl;
+  const organic = pool.organic_score;
+  const organicPass = Number.isFinite(organic) && organic >= config.screening.minOrganic;
+  const botPct = ti?.audit?.bot_holders_pct;
+  const botPass = botPct == null || botPct <= config.screening.maxBotHoldersPct;
+  const top10Pct = ti?.audit?.top_holders_pct;
+  const top10Pass = top10Pct == null || top10Pct <= config.screening.maxTop10Pct;
+  const swCount = sw?.in_pool?.length ?? pool.gmgn_smart_wallets ?? 0;
+  const hasNarrative = !!n?.narrative;
+  const launchpad = ti?.launchpad;
+  const launchpadPass = launchpad == null
+    || (config.screening.allowedLaunchpads?.length === 0 || config.screening.allowedLaunchpads.includes(launchpad))
+    || (config.screening.blockedLaunchpads?.length === 0 || !config.screening.blockedLaunchpads.includes(launchpad));
+  const rows = [
+    ["name", pool.name, true],
+    ["fee/aTVL", `${feeTvl ?? "?"}% (min ${config.screening.minFeeActiveTvlRatio}%)`, feeTvlPass],
+    ["tvl", `$${tvl ?? "?"} (range $${config.screening.minTvl}-$${config.screening.maxTvl})`, tvlPass],
+    ["organic", `${organic ?? "?"} (min ${config.screening.minOrganic})`, organicPass],
+    ["bot holders", `${botPct ?? "?"}% (max ${config.screening.maxBotHoldersPct}%)`, botPass],
+    ["top10", `${top10Pct ?? "?"}% (max ${config.screening.maxTop10Pct}%)`, top10Pass],
+    ["launchpad", launchpad ?? "(none)", launchpadPass],
+    ["smart wallets", String(swCount), swCount > 0 || hasNarrative],
+    ["narrative", n?.narrative?.slice(0, 80) || "(none)", hasNarrative],
+  ];
+  return rows.map(([k, v, ok]) => `  ${ok ? "✓" : "✗"} ${k}: ${v}`).join("\n");
+}
+
+// Cross-check the LLM's NO DEPLOY narrative against the actual data + config.
+// Returns a list of human-readable warnings, e.g.:
+//   - "Cited threshold 2% but config minFeeActiveTvlRatio is 0.015%"
+//   - "Cited pool fee/aTVL 0% but pool block shows 0.04%"
+function checkLlmNarrativeAgainstData(llmText, passing, cfg) {
+  const warnings = [];
+  if (!llmText || !passing?.length) return warnings;
+  // Collect all numbers the LLM cited, mapped to the field name
+  const feeTvlCitations = findPercentCitations(llmText, "fee");
+  const top10Citations = findPercentCitations(llmText, "top10|top 10|concentration");
+  const botCitations = findPercentCitations(llmText, "bot");
+  // Check threshold citations (e.g. "minimum of 2%")
+  const thresholdCitation = llmText.match(/minimum[^.\n]{0,40}?(\d+(?:\.\d+)?)\s*%/i)
+    || llmText.match(/threshold[^.\n]{0,40}?(\d+(?:\.\d+)?)\s*%/i)
+    || llmText.match(/required[^.\n]{0,40}?(\d+(?:\.\d+)?)\s*%/i);
+  if (thresholdCitation) {
+    const cited = Number(thresholdCitation[1]);
+    if (Number.isFinite(cited) && Math.abs(cited - cfg.screening.minFeeActiveTvlRatio) > 0.001) {
+      warnings.push(`Cited fee/TVL threshold ${cited}% but config minFeeActiveTvlRatio is ${cfg.screening.minFeeActiveTvlRatio}%`);
+    }
+  }
+  // Check pool value citations (e.g. "fee-to-CTVL ratio is effectively 0%")
+  for (const { value, fieldContext } of feeTvlCitations) {
+    const cited = Number(value);
+    if (!Number.isFinite(cited)) continue;
+    if (cited === 0) {
+      // LLM said 0% — check if any pool's actual value is >0
+      const nonzero = passing.find((e) => {
+        const v = e.pool?.fee_active_tvl_ratio ?? e.pool?.fee_tvl_ratio;
+        return Number.isFinite(v) && v > 0;
+      });
+      if (nonzero) {
+        warnings.push(`Cited fee/aTVL ${cited}% for ${nonzero.pool.name} but pool block shows ${nonzero.pool.fee_active_tvl_ratio ?? nonzero.pool.fee_tvl_ratio}%`);
+      }
+    }
+  }
+  return warnings;
+}
+
+// Find percent citations in the LLM text. Looks for "field context ... 0.04%" patterns.
+function findPercentCitations(text, fieldRegex) {
+  const citations = [];
+  const re = new RegExp(`(${fieldRegex})[^.\n]{0,60}?(\\d+(?:\\.\\d+)?)\\s*%`, "gi");
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    citations.push({ value: m[2], fieldContext: m[1] });
+  }
+  return citations;
 }
 
 function getLoneCandidateSkipReason({ pool, sw, n, ti } = {}) {
