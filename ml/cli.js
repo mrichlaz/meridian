@@ -47,7 +47,7 @@ export async function handleMlCommand(args, config) {
 
 // ─── Commands ───────────────────────────────────────────────────
 
-function mlStatus(config) {
+export function mlStatus(config) {
   const model = LogisticRegression.load();
   const emo = getCurrentState();
   const personality = getActive();
@@ -104,7 +104,7 @@ function mlStatus(config) {
   return lines.join("\n");
 }
 
-async function mlTrain(config, args) {
+export async function mlTrain(config, args) {
   const mlCfg = config?.ml || {};
   const emotionState = getCurrentState();
   const result = await trainModel({ config: mlCfg, emotionState });

@@ -49,29 +49,38 @@ const DEFAULT_CONFIG = {
 // ─── Data loading ───────────────────────────────────────────────
 
 function loadTrainingData() {
-  const lessonsFile = PATHS.lessons;
-  if (!existsSync(lessonsFile)) {
-    log("ml_trainer", "No lessons.json found");
-    return [];
+  const lessonFiles = [PATHS.lessons, join(PATHS.root, "data", "lessons.json")];
+  const perfEntries = [];
+  const seen = new Set();
+
+  for (const lessonsFile of lessonFiles) {
+    if (!lessonsFile || !existsSync(lessonsFile)) continue;
+    let raw;
+    try {
+      raw = JSON.parse(readFileSync(lessonsFile, "utf8"));
+    } catch {
+      continue;
+    }
+    const perf = Array.isArray(raw.performance) ? raw.performance : [];
+    for (const entry of perf) {
+      const key = `${entry?.position || "?"}:${entry?.recorded_at || entry?.closed_at || entry?.pool_name || "?"}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      perfEntries.push(entry);
+    }
   }
 
-  let raw;
-  try {
-    raw = JSON.parse(readFileSync(lessonsFile, "utf8"));
-  } catch {
-    return [];
+  if (perfEntries.length === 0) {
+    log("ml_trainer", "No performance records found in lessons stores");
   }
 
-  const perf = Array.isArray(raw.performance) ? raw.performance : [];
   const samples = [];
-
-  for (const entry of perf) {
+  for (const entry of perfEntries) {
     if (typeof entry.pnl_pct !== "number") continue;
     if (!entry.signal_snapshot && typeof entry.fee_tvl_ratio !== "number") continue;
 
     try {
       const features = extractFromPerformance(entry);
-      // Binary label: profitable (1) or not (0)
       const label = entry.pnl_pct > 0 ? 1 : 0;
       samples.push({ features, label, pnl_pct: entry.pnl_pct });
     } catch {
@@ -129,9 +138,9 @@ function computeValidationMetric(model, features, labels) {
  * For each fold, trains a fresh model on k-1 folds, evaluates on held-out fold.
  * Returns averaged metrics across all folds.
  */
-export async function trainModel({ config: mlConfig } = {}) {
+export async function trainModel({ config: mlConfig, force = false } = {}) {
   const cfg = { ...DEFAULT_CONFIG, ...mlConfig };
-  if (!cfg.enabled) {
+  if (!cfg.enabled && !force) {
     return { trained: false, reason: "disabled" };
   }
 

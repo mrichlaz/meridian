@@ -491,10 +491,15 @@ export async function runScreeningCycle({ silent = false } = {}) {
   let deploySucceeded = false;
   let deployPool = null;
   let deployPoolName = null;
+  let screeningBalance = preBalance;
+  let screeningDeployAmount = 0;
+  let passingForFallback = [];
   try {
     // Reuse pre-fetched balance — no extra RPC call needed
     const currentBalance = preBalance;
+    screeningBalance = currentBalance;
     const deployAmount = computeDeployAmount(currentBalance.sol);
+    screeningDeployAmount = deployAmount;
     log("cron", `Computed deploy amount: ${deployAmount} SOL (wallet: ${currentBalance.sol} SOL)`);
 
     // Load active strategy
@@ -512,6 +517,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
       return screenReport;
     }
     const { passing, filteredOut, gmgnStageCounts, gmgnAllFiltered, topCandidates, allCandidates } = pipeline;
+    passingForFallback = passing;
     const earlyFilteredExamples = topCandidates?.filtered_examples || [];
     // Stash the full top-level result for the screening-snapshot log
     _lastScreeningResult = topCandidates || {};
@@ -967,8 +973,68 @@ IMPORTANT:
       });
     }
   } catch (error) {
-    log("cron_error", `Screening cycle failed: ${error.message}`);
-    screenReport = `Screening cycle failed: ${error.message}`;
+    const errorText = String(error?.message || error || "unknown error");
+    // Provider fallback: if the LLM provider dies before making a decision,
+    // but screening already produced survivors, deploy the top survivor
+    // deterministically instead of losing the whole cycle.
+    if ((/502|503|529|no body/i.test(errorText)) && passingForFallback.length >= 1) {
+      try {
+        const topSurvivor = passingForFallback[0]?.pool;
+        if (topSurvivor) {
+          const deployProfile = chooseAdaptiveDeployProfile(topSurvivor, config.strategy);
+          if (deployProfile.deployable) {
+            const deployAmountOverride = Number((screeningDeployAmount * (deployProfile.sizeMultiplier || 1)).toFixed(2));
+            const initialValueUsd = screeningBalance?.sol_price ? deployAmountOverride * screeningBalance.sol_price : null;
+            const binsBelow = Math.max(35, Math.round(computeBinsBelow(topSurvivor.volatility) * (deployProfile.binsMultiplier || 1)));
+            const fallbackResult = await executeTool("deploy_position", {
+              pool_address: topSurvivor.pool,
+              amount_y: deployAmountOverride,
+              strategy: deployProfile.strategy,
+              bins_below: binsBelow,
+              bins_above: 0,
+              pool_name: topSurvivor.name,
+              base_mint: topSurvivor.base?.mint || topSurvivor.base_mint || null,
+              bin_step: topSurvivor.bin_step,
+              base_fee: topSurvivor.base_fee,
+              volatility: topSurvivor.volatility,
+              fee_tvl_ratio: topSurvivor.fee_active_tvl_ratio ?? topSurvivor.fee_tvl_ratio,
+              organic_score: topSurvivor.organic_score,
+              discovery_timeframe: topSurvivor.discovery_timeframe || config.screening.timeframe,
+              initial_value_usd: initialValueUsd,
+            });
+            deployAttempted = true;
+            deploySucceeded = Boolean(fallbackResult?.success && !fallbackResult?.error && !fallbackResult?.blocked);
+            if (deploySucceeded) {
+              deployPool = fallbackResult?.pool || topSurvivor.pool;
+              deployPoolName = fallbackResult?.pool_name || topSurvivor.name;
+              screenReport = [
+                "🚀 DEPLOYED (PROVIDER FALLBACK)",
+                "",
+                `${topSurvivor.name}`,
+                `${topSurvivor.pool}`,
+                "",
+                `◎ ${deployAmountOverride} SOL | ${deployProfile.strategy}`,
+                `Reason: LLM provider failed (${errorText}), so Meridian deployed the top screened survivor deterministically.`,
+              ].join("\n");
+              log("screening", `Provider failure fallback deployed ${topSurvivor.name} after LLM error: ${errorText}`);
+            } else {
+              log("cron_error", `Provider fallback deploy failed after screening error: ${fallbackResult?.error || fallbackResult?.reason || errorText}`);
+              screenReport = `Screening cycle failed: ${errorText}`;
+            }
+          } else {
+            screenReport = `Screening cycle failed: ${errorText}`;
+          }
+        } else {
+          screenReport = `Screening cycle failed: ${errorText}`;
+        }
+      } catch (fallbackError) {
+        log("cron_error", `Provider fallback path failed: ${fallbackError.message}`);
+        screenReport = `Screening cycle failed: ${errorText}`;
+      }
+    } else {
+      log("cron_error", `Screening cycle failed: ${errorText}`);
+      screenReport = `Screening cycle failed: ${errorText}`;
+    }
   } finally {
     // Update ML emotions based on screening outcome
     try {
@@ -2172,12 +2238,13 @@ async function telegramHandler(msg) {
 
   if (text === "/ml-train") {
     try {
-      const { trainModel } = await import("./ml/trainer.js");
+      const { trainModel, loadTrainingData } = await import("./ml/trainer.js");
       const { getCurrentState } = await import("./ml/emotions.js");
       const mlCfg = config?.ml || {};
-      const result = await trainModel({ config: mlCfg, emotionState: getCurrentState() });
+      const sampleCount = loadTrainingData().length;
+      const result = await trainModel({ config: mlCfg, emotionState: getCurrentState(), force: true });
       if (!result.trained) {
-        await sendMessage(`ML training skipped — ${result.reason || "unknown"}\nNeed at least ${mlCfg.minSamples || 10} closed positions (have ${result.sampleCount ?? 0}).`).catch(() => {});
+        await sendMessage(`ML training skipped — ${result.reason || "unknown"}\nNeed at least ${mlCfg.minSamples || 10} closed positions (have ${result.sampleCount ?? sampleCount ?? 0}).`).catch(() => {});
         return;
       }
       const loss = result.finalLoss?.total?.toFixed(4) || "N/A";
