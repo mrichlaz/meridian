@@ -47,7 +47,7 @@ const ACTION_BUTTONS = {
   screening() {
     return [
       [
-        { text: "🔄 Force Screen", callback_data: "cmd:/screen" },
+        { text: "👥 Refresh Candidates", callback_data: "cmd:/candidates" },
         { text: "📊 Status", callback_data: "cmd:/status" },
       ],
       [
@@ -65,7 +65,7 @@ const ACTION_BUTTONS = {
         { text: "📋 Positions", callback_data: "cmd:/positions" },
       ],
       [
-        { text: "🔄 Screen", callback_data: "cmd:/screen" },
+        { text: "👥 Candidates", callback_data: "cmd:/candidates" },
         { text: "⚙️ Settings", callback_data: "cmd:/settings" },
       ],
     ];
@@ -75,7 +75,7 @@ const ACTION_BUTTONS = {
   status() {
     return [
       [
-        { text: "🔄 Screen", callback_data: "cmd:/screen" },
+        { text: "👥 Candidates", callback_data: "cmd:/candidates" },
         { text: "📋 Positions", callback_data: "cmd:/positions" },
         { text: "⚙️ Settings", callback_data: "cmd:/settings" },
       ],

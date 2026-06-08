@@ -7,7 +7,7 @@ import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
-import { getTopCandidates } from "./tools/screening.js";
+import { getTopCandidates, chooseAdaptiveDeployProfile } from "./tools/screening.js";
 import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
@@ -201,7 +201,7 @@ function stopCronJobs() {
   _cronTasks = [];
 }
 
-export async function runManagementCycle({ silent = false } = {}) {
+export async function runManagementCycle({ silent = false, triggerScreening = true } = {}) {
   if (_managementBusy) return null;
   _managementBusy = true;
   timers.managementLastRun = Date.now();
@@ -221,7 +221,9 @@ export async function runManagementCycle({ silent = false } = {}) {
     if (positions.length === 0) {
       log("cron", "No open positions — triggering screening cycle");
       mgmtReport = "No open positions. Triggering screening cycle.";
-      runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));
+      if (triggerScreening) {
+        runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));
+      }
       return mgmtReport;
     }
 
@@ -366,7 +368,7 @@ After executing, write a brief one-line result per position.
     // Trigger screening after management
     const afterPositions = await getMyPositions({ force: true }).catch(() => null);
     const afterCount = afterPositions?.positions?.length ?? 0;
-    if (afterCount < config.risk.maxPositions && Date.now() - _screeningLastTriggered > screeningCooldownMs) {
+    if (triggerScreening && afterCount < config.risk.maxPositions && Date.now() - _screeningLastTriggered > screeningCooldownMs) {
       log("cron", `Post-management: ${afterCount}/${config.risk.maxPositions} positions — triggering screening`);
       runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));
     }
@@ -551,6 +553,11 @@ export async function runScreeningCycle({ silent = false } = {}) {
         summary: "No candidates available",
         reason: funnelBlock || combinedExamples || "All candidates filtered before deploy",
         rejected: combined.slice(0, 5).map((entry) => `${entry.name}: ${entry.reason}`),
+        metrics: {
+          screened_candidates: Array.isArray(combined) ? combined.length : 0,
+          positions_open: prePositions.total_positions,
+          wallet_sol: currentBalance.sol,
+        },
       });
       return screenReport;
     }
@@ -587,6 +594,15 @@ export async function runScreeningCycle({ silent = false } = {}) {
           reason: skipReason,
           pool: passing[0].pool?.pool,
           pool_name: candidateName,
+          metrics: {
+            fee_tvl_ratio: passing[0].pool?.fee_active_tvl_ratio ?? null,
+            volume: passing[0].pool?.volume_window ?? null,
+            organic: passing[0].pool?.organic_score ?? null,
+            holders: passing[0].pool?.holders ?? null,
+            concentration_top10: passing[0].ti?.audit?.top_holders_pct ?? null,
+            volatility: passing[0].pool?.volatility ?? null,
+            token_age_hours: passing[0].pool?.token_age_hours ?? null,
+          },
         });
         return screenReport;
       }
@@ -824,6 +840,11 @@ IMPORTANT:
         actor: "SCREENER",
         summary: "LLM chose no deploy",
         reason: stripThink(content).slice(0, 500),
+        metrics: {
+          passing_candidates: passing.length,
+          positions_open: prePositions.total_positions,
+          deploy_amount_sol: deployAmount,
+        },
       });
     } else if (!deploySucceeded) {
       appendDecision({
@@ -831,6 +852,11 @@ IMPORTANT:
         actor: "SCREENER",
         summary: deployAttempted ? "Deploy attempt did not succeed" : "No successful deploy in screening cycle",
         reason: stripThink(content).slice(0, 500),
+        metrics: {
+          passing_candidates: passing.length,
+          deploy_attempted: deployAttempted,
+          deploy_succeeded: deploySucceeded,
+        },
       });
     }
   } catch (error) {
@@ -1088,7 +1114,18 @@ function getDeterministicCloseRule(position, managementConfig) {
     position.fee_per_tvl_24h < managementConfig.minFeePerTvl24h &&
     (position.age_minutes ?? 0) >= 60
   ) {
-    return { action: "CLOSE", rule: 5, reason: "low yield" };
+    const memory = recallForPool(position.pool);
+    const snapshots = Array.isArray(memory?.snapshots) ? memory.snapshots : [];
+    const recent = snapshots.filter((s) => s.position === position.position).slice(-2);
+    const feeGrowthFlat = recent.length >= 2
+      ? Math.abs(Number(recent[1].unclaimed_fees_usd || 0) - Number(recent[0].unclaimed_fees_usd || 0)) < 0.02
+      : false;
+    const valueDriftingDown = recent.length >= 2
+      ? Number(recent[1].pnl_pct || 0) <= Number(recent[0].pnl_pct || 0)
+      : false;
+    if (feeGrowthFlat || valueDriftingDown) {
+      return { action: "CLOSE", rule: 5, reason: "low yield" };
+    }
   }
   return null;
 }
@@ -1429,7 +1466,7 @@ function formatHelpText() {
     "/settings — button menu for common config",
     "/setcfg <key> <value> — update persisted config",
     "/screen — refresh deterministic candidate list",
-    "/candidates — show latest cached candidates",
+    "/candidates — refresh/show deterministic candidate list",
     "/deploy <n> — deploy candidate by cached index",
     "/briefing — morning briefing",
     "/hive — HiveMind sync status",
@@ -1491,16 +1528,43 @@ async function deployLatestCandidate(index) {
         reason: skipReason,
         pool: candidate.pool,
         pool_name: candidate.name,
+        metrics: {
+          fee_tvl_ratio: candidate.fee_active_tvl_ratio ?? candidate.fee_tvl_ratio ?? null,
+          volume: candidate.volume_window ?? null,
+          organic: candidate.organic_score ?? null,
+          holders: candidate.holders ?? null,
+          volatility: candidate.volatility ?? null,
+          token_age_hours: candidate.token_age_hours ?? null,
+        },
       });
       throw new Error(`NO DEPLOY: only cached candidate ${candidate.name} is not worth deploying — ${skipReason}`);
     }
   }
-  const deployAmount = computeDeployAmount((await getWalletBalances()).sol);
-  const binsBelow = computeBinsBelow(candidate.volatility);
+  const wallet = await getWalletBalances();
+  const deployProfile = chooseAdaptiveDeployProfile(candidate, config.strategy);
+  if (!deployProfile.deployable) {
+    appendDecision({
+      type: "no_deploy",
+      actor: "SCREENER",
+      summary: "Adaptive deploy guard blocked candidate",
+      reason: deployProfile.reason,
+      pool: candidate.pool,
+      pool_name: candidate.name,
+      metrics: {
+        volatility: candidate.volatility ?? null,
+        token_age_hours: candidate.token_age_hours ?? null,
+      },
+    });
+    throw new Error(`NO DEPLOY: ${candidate.name} — ${deployProfile.reason}`);
+  }
+  const baseDeployAmount = computeDeployAmount(wallet.sol);
+  const deployAmount = Number((baseDeployAmount * (deployProfile.sizeMultiplier || 1)).toFixed(2));
+  const initialValueUsd = wallet.sol_price ? deployAmount * wallet.sol_price : null;
+  const binsBelow = Math.max(35, Math.round(computeBinsBelow(candidate.volatility) * (deployProfile.binsMultiplier || 1)));
   const result = await executeTool("deploy_position", {
     pool_address: candidate.pool,
     amount_y: deployAmount,
-    strategy: config.strategy.strategy,
+    strategy: deployProfile.strategy,
     bins_below: binsBelow,
     bins_above: 0,
     pool_name: candidate.name,
@@ -1510,12 +1574,12 @@ async function deployLatestCandidate(index) {
     volatility: candidate.volatility,
     fee_tvl_ratio: candidate.fee_active_tvl_ratio ?? candidate.fee_tvl_ratio,
     organic_score: candidate.organic_score,
-    initial_value_usd: candidate.tvl ?? candidate.active_tvl ?? null,
+    initial_value_usd: initialValueUsd,
   });
   if (result?.success === false || result?.error) {
     throw new Error(result.error || "Deploy failed");
   }
-  return { result, candidate, deployAmount, binsBelow };
+  return { result, candidate, deployAmount, binsBelow, deployProfile };
 }
 
 function appendHistory(userMsg, assistantMsg) {
@@ -1558,7 +1622,20 @@ async function telegramHandler(msg) {
     if (data.startsWith("cmd:")) {
       const cmd = data.slice(4);
       await answerCallbackQuery(msg.callbackQueryId).catch(() => {});
-      if (cmd === "/screen") { await runScreeningCycle().catch(() => {}); return; }
+      if (cmd === "/screen" || cmd === "/candidates") {
+        try {
+          const { ACTION_BUTTONS, esc } = await import("./utils/telegram-formatter.js");
+          const sent = await sendHTML("🔍 <i>Scanning pools…</i>").catch(() => null);
+          const msgId = sent?.result?.message_id;
+          const report = await runDeterministicScreen(5);
+          if (msgId) {
+            await editMessageWithButtons(esc(report), msgId, ACTION_BUTTONS.screening()).catch(() => {});
+          } else {
+            await sendMessageWithButtons(esc(report), ACTION_BUTTONS.screening()).catch(() => {});
+          }
+        } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+        return;
+      }
       if (cmd === "/status" || cmd === "/wallet") {
         try {
           const [wallet, positions] = await Promise.all([getWalletBalances(), getMyPositions({ force: true })]);
@@ -1579,11 +1656,6 @@ async function telegramHandler(msg) {
             await sendMessageWithButtons(cardText, cardBtns).catch(() => {});
           }
         } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
-        return;
-      }
-      if (cmd === "/candidates") {
-        const lines = describeLatestCandidates(5);
-        await sendMessage(lines).catch(() => {});
         return;
       }
       if (cmd === "/settings") {
@@ -1785,7 +1857,6 @@ async function telegramHandler(msg) {
   if (text === "/screen") {
     try {
       const { ACTION_BUTTONS, esc } = await import("./utils/telegram-formatter.js");
-      const { editMessageWithButtons, sendHTML } = await import("./telegram.js");
       const sent = await sendHTML("🔍 <i>Scanning pools…</i>").catch(() => null);
       const msgId = sent?.result?.message_id;
       const report = await runDeterministicScreen(5);
@@ -2158,7 +2229,8 @@ Commands:
   1 / 2 / 3 ...  Deploy ${DEPLOY} SOL into that pool
   auto           Let the agent pick and deploy automatically
   /status        Refresh wallet + positions
-  /candidates    Refresh top pool list
+  /screen        Refresh deterministic candidate list
+  /candidates    Refresh deterministic candidate list
   /briefing      Show morning briefing (last 24h)
   /learn         Study top LPers from the best current pool and save lessons
   /learn <addr>  Study top LPers from a specific pool address

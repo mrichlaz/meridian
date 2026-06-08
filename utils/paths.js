@@ -3,8 +3,9 @@ import fs from "fs";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.resolve(__dirname, "..");
 
-// Use /data on EasyPanel (or any platform with persistent volume), fallback to project dir
+// Use /data on EasyPanel (or any platform with persistent volume), fallback to repo root
 function ensureDir(dir) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
@@ -16,7 +17,7 @@ function resolveDataRoot() {
     catch { /* DATA_DIR path not writable locally — fall back to project dir */ }
   }
   if (fs.existsSync("/data")) return "/data";
-  return __dirname;
+  return REPO_ROOT;
 }
 
 const DATA_ROOT = resolveDataRoot();

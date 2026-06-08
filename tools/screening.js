@@ -37,7 +37,64 @@ function scoreCandidate(pool) {
   const organic = Number(pool.organic_score || 0);
   const volume = Number(pool.volume_window || 0);
   const holders = Number(pool.holders || 0);
-  return feeTvl * 1000 + organic * 10 + volume / 100 + holders / 100;
+  const bundlePct = Number(pool.bundle_pct || 0);
+  const top10Pct = Number(pool.top10_pct || pool.holder_top10_pct || 0);
+  const sniperPct = Number(pool.sniper_pct || 0);
+  const volatility = Number(pool.volatility || 0);
+  const priceVsAthPct = Number(pool.price_vs_ath_pct || 0);
+  const pvpPenalty = pool.is_pvp ? 120 : 0;
+  const volatilityPenalty = Number.isFinite(volatility) && volatility > 5 ? (volatility - 5) * 18 : 0;
+  const athPenalty = Number.isFinite(priceVsAthPct) && priceVsAthPct > 85 ? (priceVsAthPct - 85) * 2.5 : 0;
+  return (feeTvl * 1200) + (organic * 12) + (Math.log10(volume + 1) * 80) + (Math.log10(holders + 1) * 60) - (bundlePct * 8) - (top10Pct * 5) - (sniperPct * 6) - pvpPenalty - volatilityPenalty - athPenalty;
+}
+
+function hasMinimumConviction(pool) {
+  const feeTvl = Number(pool.fee_active_tvl_ratio || 0);
+  const organic = Number(pool.organic_score || 0);
+  const volume = Number(pool.volume_window || 0);
+  const holders = Number(pool.holders || 0);
+  const volatility = Number(pool.volatility || 0);
+  const smartMoneyBuy = !!pool.smart_money_buy;
+  const top10Pct = Number(pool.top10_pct || pool.holder_top10_pct || 0);
+  if (!(feeTvl >= 0.03)) return false;
+  if (!(organic >= 70)) return false;
+  if (!(volume >= 1000)) return false;
+  if (!(holders >= 700)) return false;
+  if (top10Pct && top10Pct > 50) return false;
+  if (Number.isFinite(volatility) && volatility > 8 && !smartMoneyBuy) return false;
+  return true;
+}
+
+function hasVolumePersistence(pool) {
+  const volume5m = Number(pool.volume_5m ?? pool.volume_window ?? 0);
+  const volume15m = Number(pool.volume_15m ?? 0);
+  const volume30m = Number(pool.volume_30m ?? pool.volume_window ?? 0);
+  const volume1h = Number(pool.volume_1h ?? 0);
+  const reference = volume30m > 0 ? volume30m : volume1h;
+  if (!(volume5m > 0)) return false;
+  if (!(reference > 0)) return true;
+  return reference >= volume5m * 2;
+}
+
+export function chooseAdaptiveDeployProfile(pool, strategyConfig = {}) {
+  const ageHours = Number(pool?.token_age_hours ?? NaN);
+  const volatility = Number(pool?.volatility ?? NaN);
+  let strategy = strategyConfig.strategy || "bid_ask";
+  let binsMultiplier = 1;
+  let sizeMultiplier = 1;
+
+  if (Number.isFinite(ageHours) && ageHours < 2) {
+    return { deployable: false, reason: `token age ${ageHours.toFixed(1)}h below 2h auto-deploy floor` };
+  }
+  if (Number.isFinite(ageHours) && ageHours >= 2 && ageHours <= 12 && Number.isFinite(volatility) && volatility >= 5) {
+    strategy = "spot";
+    binsMultiplier = 1.2;
+    sizeMultiplier = 0.75;
+  } else if (Number.isFinite(ageHours) && ageHours > 12 && Number.isFinite(volatility) && volatility <= 5) {
+    strategy = strategyConfig.strategy || "bid_ask";
+  }
+
+  return { deployable: true, strategy, binsMultiplier, sizeMultiplier, ageHours, volatility };
 }
 
 function numeric(value) {
@@ -232,6 +289,10 @@ async function applyVolatilityTimeframe(rawPools, sourceTimeframe) {
     // Use longer-timeframe values as the canonical ones for filtering
     if (metrics.volatility != null) pool.volatility = metrics.volatility;
     if (metrics.volume != null) pool.volume = metrics.volume;
+
+    // Opportunistically backfill intermediate timeframes for persistence checks
+    if (!pool.volume_30m && volatilityTimeframe === "30m" && metrics.volume != null) pool.volume_30m = metrics.volume;
+    if (!pool.volume_1h && volatilityTimeframe === "1h" && metrics.volume != null) pool.volume_1h = metrics.volume;
   }
 
   return rawPools;
@@ -831,6 +892,30 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     if (eligible.length < before) log("dev_blocklist", `Filtered ${before - eligible.length} pool(s) via OKX creator check`);
   }
 
+  if (eligible.length > 0) {
+    const beforePersistence = eligible.length;
+    eligible.splice(0, eligible.length, ...eligible.filter((p) => {
+      if (hasVolumePersistence(p)) return true;
+      pushFilteredReason(filteredOut, p, "volume persistence weak");
+      return false;
+    }));
+    if (eligible.length < beforePersistence) {
+      log("screening", `Volume persistence filter removed ${beforePersistence - eligible.length} candidate(s)`);
+    }
+  }
+
+  if (eligible.length > 0) {
+    const beforeConviction = eligible.length;
+    eligible.splice(0, eligible.length, ...eligible.filter((p) => {
+      if (hasMinimumConviction(p)) return true;
+      pushFilteredReason(filteredOut, p, "below conviction floor");
+      return false;
+    }));
+    if (eligible.length < beforeConviction) {
+      log("screening", `Conviction floor removed ${beforeConviction - eligible.length} candidate(s)`);
+    }
+  }
+
   if (config.indicators.enabled && eligible.length > 0) {
     const confirmations = await Promise.all(
       eligible.map(async (pool) => {
@@ -967,6 +1052,10 @@ function condensePool(p) {
     // Bot tracker signal (carried through from injection)
     bot_traded: Boolean(p.bot_traded),
     bot_trade_count: p.bot_trade_count || null,
+    volume_5m: round(p.volume_5m ?? null),
+    volume_15m: round(p.volume_15m ?? null),
+    volume_30m: round(p.volume_30m ?? null),
+    volume_1h: round(p.volume_1h ?? null),
   };
 }
 

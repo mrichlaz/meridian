@@ -228,7 +228,7 @@ export const config = {
 
   // ─── Deep Learning / ML ────────────────
   ml: {
-    enabled:            u.mlEnabled            ?? true,
+    enabled:            u.mlEnabled            ?? false,
     trainEvery:         u.mlTrainEvery         ?? 5,     // retrain every N closes
     minSamples:         u.mlMinSamples         ?? 10,    // min positions before training
     batchSize:          u.mlBatchSize          ?? 16,
@@ -307,8 +307,9 @@ export const config = {
 export function computeDeployAmount(walletSol) {
   const reserve  = config.management.gasReserve      ?? 0.2;
   const pct      = config.management.positionSizePct ?? 0.35;
-  const floor    = config.management.deployAmountSol;
+  const configuredFloor = config.management.deployAmountSol;
   const ceil     = config.risk.maxDeployAmount;
+  const floor    = Math.min(configuredFloor, ceil);
   const deployable = Math.max(0, walletSol - reserve);
   const dynamic    = deployable * pct;
   const result     = Math.min(ceil, Math.max(floor, dynamic));

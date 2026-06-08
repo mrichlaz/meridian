@@ -76,6 +76,65 @@ async function getDLMM() {
 // ─── Shared RPC pool (round-robin across multiple API keys) ───
 import { getConnection, getPrimaryConnection } from "../utils/rpc-pool.js";
 
+function isRpcRateLimitError(error) {
+  const msg = String(error?.message || error || "");
+  return /429|too many requests|rate limit/i.test(msg);
+}
+
+function isRetryableRpcError(error) {
+  const msg = String(error?.message || error || "");
+  return isRpcRateLimitError(error) || /blockhash not found|node is behind|timed out|timeout|socket hang up|fetch failed/i.test(msg);
+}
+
+async function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function sendAndConfirmWithRetry(tx, signers, { label = "transaction", maxAttempts = 4 } = {}) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await sendAndConfirmTransaction(getPrimaryConnection(), tx, signers);
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableRpcError(error) || attempt >= maxAttempts) break;
+      const delayMs = Math.min(1500 * (2 ** (attempt - 1)), 8000);
+      log("rpc_retry", `${label} attempt ${attempt}/${maxAttempts} failed: ${error.message}. Retrying in ${delayMs}ms`);
+      await sleep(delayMs);
+    }
+  }
+  if (isRpcRateLimitError(lastError)) {
+    throw new Error(`${label} blocked by RPC 429 Too Many Requests after retries. Add more RPC capacity or wait before retrying.`);
+  }
+  throw lastError;
+}
+
+function deriveCloseMetricsFromTrackedAndLive(tracked, livePosition, feesUsd = 0) {
+  const initialUsd = Number(tracked?.initial_value_usd ?? 0);
+  const liveValueUsd = Number(livePosition?.total_value_true_usd ?? livePosition?.total_value_usd ?? 0);
+  const livePnlUsd = Number(livePosition?.pnl_true_usd ?? livePosition?.pnl_usd ?? 0);
+  const normalizedFeesUsd = Number.isFinite(Number(feesUsd)) ? Number(feesUsd) : 0;
+
+  let finalValueUsd = liveValueUsd;
+  let pnlUsd = livePnlUsd;
+  let pnlPct = Number(livePosition?.pnl_pct ?? 0);
+
+  if (initialUsd > 0 && finalValueUsd <= 0 && (livePnlUsd !== 0 || normalizedFeesUsd > 0)) {
+    finalValueUsd = Math.max(0, initialUsd + livePnlUsd - normalizedFeesUsd);
+  }
+  if (initialUsd > 0 && finalValueUsd > 0) {
+    pnlUsd = finalValueUsd + normalizedFeesUsd - initialUsd;
+    pnlPct = (pnlUsd / initialUsd) * 100;
+  }
+
+  return {
+    initialUsd,
+    finalValueUsd,
+    pnlUsd,
+    pnlPct,
+  };
+}
+
 // ─── Lazy wallet init ────────────────────────────────────────
 let _wallet = null;
 
@@ -392,8 +451,10 @@ async function getPool(poolAddress) {
   return poolCache.get(key);
 }
 
-setInterval(() => poolCache.clear(), 5 * 60 * 1000);
-setInterval(() => poolMetadataCache.clear(), 15 * 60 * 1000);
+const poolCacheTimer = setInterval(() => poolCache.clear(), 5 * 60 * 1000);
+const poolMetadataCacheTimer = setInterval(() => poolMetadataCache.clear(), 15 * 60 * 1000);
+poolCacheTimer.unref?.();
+poolMetadataCacheTimer.unref?.();
 
 async function getPoolMetadata(poolAddress) {
   const key = String(poolAddress);
@@ -791,7 +852,7 @@ export async function deployPosition({
       const createTxArray = Array.isArray(createTxs) ? createTxs : [createTxs];
       for (let i = 0; i < createTxArray.length; i++) {
         const signers = i === 0 ? [wallet, newPosition] : [wallet];
-        const txHash = await sendAndConfirmTransaction(getPrimaryConnection(), createTxArray[i], signers);
+        const txHash = await sendAndConfirmWithRetry(createTxArray[i], signers, { label: `deploy create tx ${i + 1}` });
         txHashes.push(txHash);
         log("deploy", `Create tx ${i + 1}/${createTxArray.length}: ${txHash}`);
       }
@@ -807,7 +868,7 @@ export async function deployPosition({
       });
       const addTxArray = Array.isArray(addTxs) ? addTxs : [addTxs];
       for (let i = 0; i < addTxArray.length; i++) {
-        const txHash = await sendAndConfirmTransaction(getPrimaryConnection(), addTxArray[i], [wallet]);
+        const txHash = await sendAndConfirmWithRetry(addTxArray[i], [wallet], { label: `deploy add-liquidity tx ${i + 1}` });
         txHashes.push(txHash);
         log("deploy", `Add liquidity tx ${i + 1}/${addTxArray.length}: ${txHash}`);
       }
@@ -821,7 +882,7 @@ export async function deployPosition({
         strategy: { maxBinId, minBinId, strategyType },
         slippage: 1000, // 10% in bps
       });
-      const txHash = await sendAndConfirmTransaction(getPrimaryConnection(), tx, [wallet, newPosition]);
+      const txHash = await sendAndConfirmWithRetry(tx, [wallet, newPosition], { label: "deploy initialize+add-liquidity" });
       txHashes.push(txHash);
     }
 
@@ -1501,7 +1562,7 @@ export async function claimFees({ position_address }) {
 
     const txHashes = [];
     for (const tx of txs) {
-      const txHash = await sendAndConfirmTransaction(getPrimaryConnection(), tx, [wallet]);
+      const txHash = await sendAndConfirmWithRetry(tx, [wallet], { label: "claim fees" });
       txHashes.push(txHash);
     }
     log("claim", `SUCCESS txs: ${txHashes.join(", ")}`);
@@ -1536,7 +1597,7 @@ export async function closePosition({ position_address, reason }) {
       log("close_warn", `Position ${position_address.slice(0, 12)} already closed on-chain (account gone or System Program owner) — cleaning up local state`);
       recordClose(position_address, reason || "already closed");
       _positionsCacheAt = 0;
-      return { success: true, position: position_address, pool: poolAddress, pool_name: poolMeta.name || null, pnl_usd: 0, pnl_pct: 0, already_closed: true };
+      return { success: true, position: position_address, pool: poolAddress, pool_name: poolMeta.name || null, pnl_usd: tracked?.last_known_pnl_usd ?? null, pnl_pct: tracked?.last_known_pnl_pct ?? null, already_closed: true };
     }
 
     if (shouldUseLpAgentRelay()) {
@@ -1651,12 +1712,13 @@ export async function closePosition({ position_address, reason }) {
 
         // Use live PnL as primary source — authoritative before close submitted.
         // Fall back to closed API only if live data is unavailable.
-        let pnlUsd = livePosition?.pnl_usd ?? 0;
-        let pnlTrueUsd = livePosition?.pnl_usd ?? 0;
-        let pnlPct = livePosition?.pnl_pct ?? 0;
-        let finalValueUsd = livePosition?.total_value_usd ?? 0;
-        let initialUsd = 0;
         let feesUsd = livePosition?.unclaimed_fees_usd ?? tracked?.total_fees_claimed_usd ?? 0;
+        const liveDerived = deriveCloseMetricsFromTrackedAndLive(tracked, livePosition, feesUsd);
+        let pnlUsd = liveDerived.pnlUsd;
+        let pnlTrueUsd = liveDerived.pnlUsd;
+        let pnlPct = liveDerived.pnlPct;
+        let finalValueUsd = liveDerived.finalValueUsd;
+        let initialUsd = liveDerived.initialUsd;
         let gotLivePnl = livePosition != null;
         try {
           const closedUrl = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${wallet.publicKey.toString()}&status=closed&pageSize=50&page=1`;
@@ -1829,7 +1891,7 @@ export async function closePosition({ position_address, reason }) {
         });
         if (claimTxs && claimTxs.length > 0) {
           for (const tx of claimTxs) {
-            const claimHash = await sendAndConfirmTransaction(getPrimaryConnection(), tx, [wallet]);
+            const claimHash = await sendAndConfirmWithRetry(tx, [wallet], { label: "close claim-fees" });
             claimTxHashes.push(claimHash);
           }
           log("close", `Step 1 OK (claim only): ${claimTxHashes.join(", ")}`);
@@ -1868,7 +1930,7 @@ export async function closePosition({ position_address, reason }) {
       });
 
       for (const tx of Array.isArray(closeTx) ? closeTx : [closeTx]) {
-        const txHash = await sendAndConfirmTransaction(getPrimaryConnection(), tx, [wallet]);
+        const txHash = await sendAndConfirmWithRetry(tx, [wallet], { label: "close remove-liquidity" });
         closeTxHashes.push(txHash);
       }
     } else {
@@ -1877,7 +1939,7 @@ export async function closePosition({ position_address, reason }) {
         owner: wallet.publicKey,
         position: { publicKey: positionPubKey },
       });
-      const txHash = await sendAndConfirmTransaction(getPrimaryConnection(), closeTx, [wallet]);
+      const txHash = await sendAndConfirmWithRetry(closeTx, [wallet], { label: "close position" });
       closeTxHashes.push(txHash);
     }
     const txHashes = [...claimTxHashes, ...closeTxHashes];
@@ -1986,16 +2048,17 @@ export async function closePosition({ position_address, reason }) {
         if (cachedPos) {
           pnlTrueUsd    = cachedPos.pnl_true_usd ?? (config.management.solMode ? 0 : cachedPos.pnl_usd) ?? 0;
           pnlUsd        = config.management.solMode ? (cachedPos.pnl_usd ?? 0) : pnlTrueUsd;
-          pnlPct        = cachedPos.pnl_pct   ?? 0;
           feesUsd       = (cachedPos.collected_fees_true_usd || 0) + (cachedPos.unclaimed_fees_true_usd || 0);
           initialUsd    = tracked.initial_value_usd || 0;
           if (initialUsd > 0) {
-            // Keep fallback internally consistent using USD-only cached metrics.
             finalValueUsd = Math.max(0, initialUsd + pnlTrueUsd - feesUsd);
-            if (!config.management.solMode) pnlPct = (pnlTrueUsd / initialUsd) * 100;
+            pnlUsd = finalValueUsd + feesUsd - initialUsd;
+            pnlTrueUsd = pnlUsd;
+            pnlPct = (pnlUsd / initialUsd) * 100;
           } else {
             finalValueUsd = cachedPos.total_value_true_usd ?? cachedPos.total_value_usd ?? 0;
             initialUsd = Math.max(0, finalValueUsd + feesUsd - pnlTrueUsd);
+            pnlPct = initialUsd > 0 ? (pnlTrueUsd / initialUsd) * 100 : (cachedPos.pnl_pct ?? 0);
           }
           log("close_warn", `Using cached pnl fallback because closed API has not settled yet`);
         }
