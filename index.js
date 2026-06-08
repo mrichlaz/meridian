@@ -503,79 +503,23 @@ export async function runScreeningCycle({ silent = false } = {}) {
       ? `ACTIVE STRATEGY: ${activeStrategy.name} — LP: ${activeStrategy.lp_strategy} | bins_above: ${activeStrategy.range?.bins_above ?? 0} (FIXED — never change) | deposit: ${activeStrategy.entry?.single_side === "sol" ? "SOL only (amount_y, amount_x=0)" : "dual-sided"} | best for: ${activeStrategy.best_for}`
       : `No active strategy — use default bid_ask, bins_above: 0, SOL only.`;
 
-    // Fetch top candidates, then recon each sequentially with a small delay to avoid 429s
-    const topCandidates = await getTopCandidates({ limit: 10 }).catch((e) => ({ _error: e.message }));
-    if (topCandidates?._error) {
-      screenReport = `Screening failed: ${topCandidates._error}`;
+    // Fetch + enrich + filter candidates via the shared pipeline. This is
+    // the same pipeline the manual /screen path uses, so both surfaces
+    // (auto cron and manual /deploy N) see the same surviving pool set.
+    const pipeline = await enrichAndFilterCandidates({ limit: 10 });
+    if (pipeline?.error) {
+      screenReport = `Screening failed: ${pipeline.error}`;
       return screenReport;
     }
-    const candidates = (topCandidates?.candidates || topCandidates?.pools || []).slice(0, 10);
+    const { passing, filteredOut, gmgnStageCounts, gmgnAllFiltered, topCandidates, allCandidates } = pipeline;
     const earlyFilteredExamples = topCandidates?.filtered_examples || [];
-    const gmgnStageCounts = topCandidates?.stage_counts ?? null;
-    const gmgnAllFiltered = topCandidates?.all_filtered ?? [];
     // Stash the full top-level result for the screening-snapshot log
     _lastScreeningResult = topCandidates || {};
-
-    const allCandidates = [];
-    // Enrich in small staggered batches to avoid RPC 429 floods.
-    // Each pool fires 4 parallel calls (smart wallets, narrative, token info, study).
-    // Smart wallet checks internally batch at 3 concurrent per pool.
-    const BATCH_SIZE = 2;
-    const STAGGER_MS = 200;
-    for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
-      const batch = candidates.slice(i, i + BATCH_SIZE);
-      const batchResults = await Promise.all(
-        batch.map(async (pool, j) => {
-          // Stagger launches within the batch to avoid simultaneous RPC spikes
-          if (j > 0) await new Promise(r => setTimeout(r, STAGGER_MS));
-          const mint = pool.base?.mint;
-          const [smartWallets, narrative, tokenInfo, study] = await Promise.allSettled([
-            checkSmartWalletsOnPool({ pool_address: pool.pool }),
-            mint ? getTokenNarrative({ mint }) : Promise.resolve(null),
-            mint ? getTokenInfo({ query: mint }) : Promise.resolve(null),
-            studyTopLPers({ pool_address: pool.pool, limit: 3 }).catch(() => null),
-          ]);
-          return {
-            pool,
-            sw: smartWallets.status === "fulfilled" ? smartWallets.value : null,
-            n: narrative.status === "fulfilled" ? narrative.value : null,
-            ti: tokenInfo.status === "fulfilled" ? tokenInfo.value?.results?.[0] : null,
-            mem: recallForPool(pool.pool),
-            study: study.status === "fulfilled" ? study.value : null,
-          };
-        })
-      );
-      allCandidates.push(...batchResults);
-      if (i + BATCH_SIZE < candidates.length) {
-        await new Promise(r => setTimeout(r, 300));
-      }
-    }
-
-    // Hard filters after token recon — block launchpads and excessive Jupiter bot holders
-    // GMGN candidates skip this layer: platforms/bundlers/bots already filtered upstream
-    const filteredOut = [];
-    const passing = allCandidates.filter(({ pool, ti }) => {
-      if (pool.gmgn) return true;
-      const launchpad = ti?.launchpad ?? null;
-      if (launchpad && config.screening.allowedLaunchpads?.length > 0 && !config.screening.allowedLaunchpads.includes(launchpad)) {
-        log("screening", `Skipping ${pool.name} — launchpad ${launchpad} not in allow-list`);
-        filteredOut.push({ name: pool.name, reason: `launchpad ${launchpad} not in allow-list` });
-        return false;
-      }
-      if (launchpad && config.screening.blockedLaunchpads.includes(launchpad)) {
-        log("screening", `Skipping ${pool.name} — blocked launchpad (${launchpad})`);
-        filteredOut.push({ name: pool.name, reason: `blocked launchpad (${launchpad})` });
-        return false;
-      }
-      const botPct = ti?.audit?.bot_holders_pct;
-      const maxBotHoldersPct = config.screening.maxBotHoldersPct;
-      if (botPct != null && maxBotHoldersPct != null && botPct > maxBotHoldersPct) {
-        log("screening", `Bot-holder filter: dropped ${pool.name} — bots ${botPct}% > ${maxBotHoldersPct}%`);
-        filteredOut.push({ name: pool.name, reason: `bot holders ${botPct}% > ${maxBotHoldersPct}%` });
-        return false;
-      }
-      return true;
-    });
+    // Stash the surviving pools + enriched context for /deploy N consistency.
+    // The manual /screen path does the same thing, so the cached list always
+    // matches what the cron saw.
+    setLatestCandidates(passing.map(({ pool }) => pool));
+    _latestCandidatesEnriched = new Map(passing.map((entry) => [entry.pool.pool, entry]));
 
     if (passing.length === 0) {
       const combined = filteredOut.length > 0 ? filteredOut : earlyFilteredExamples;
@@ -796,7 +740,7 @@ PRE-LOADED CANDIDATES (${passing.length} pools):
 ${candidateBlocks.join("\n\n")}
 
 STEPS:
-1. Decide if any candidate is actually worth deploying. One surviving candidate is not automatically good enough.
+1. Every candidate below has ALREADY passed: (a) hard screening thresholds, (b) launchpad allow/block filters, (c) bot-holder concentration check, (d) adaptive deploy profile (token age + volatility guard), and (e) lone-candidate narrative/smart-wallet guard. You are NOT supposed to re-veto pools that passed these checks. Your only job is to pick the best one of ${passing.length} survivor(s).
 2. Pick the best candidate based on narrative quality, smart wallets, and pool metrics.
 3. Call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
    bins_below = round(${config.strategy.minBinsBelow} + (candidate volatility/5)*(${config.strategy.maxBinsBelow - config.strategy.minBinsBelow})) clamped to [${config.strategy.minBinsBelow},${config.strategy.maxBinsBelow}].
@@ -1196,11 +1140,16 @@ const MAX_HISTORY = 20;    // keep last 20 messages (10 exchanges)
 let _ttyInterface = null;
 let _latestCandidates = [];
 let _latestCandidatesAt = null;
+let _latestCandidatesEnriched = new Map(); // pool_address -> {pool, sw, n, ti, mem, study}
 let _lastScreeningResult = null;
 
 function setLatestCandidates(candidates = []) {
   _latestCandidates = Array.isArray(candidates) ? candidates : [];
   _latestCandidatesAt = new Date().toISOString();
+  // Don't clear _latestCandidatesEnriched unconditionally — runDeterministicScreen
+  // calls setLatestCandidates after populating the enriched map. External callers
+  // (tests, REPL commands) that go through this helper should also re-enrich if
+  // they want consistent deploy checks.
 }
 
 function getLatestCandidatesMeta() {
@@ -1506,18 +1455,36 @@ function formatHelpText() {
 }
 
 async function runDeterministicScreen(limit = 5) {
-  const top = await getTopCandidates({ limit });
-  const candidates = (top?.candidates || top?.pools || []).slice(0, limit);
-  setLatestCandidates(candidates);
-  if (candidates.length > 0) {
-    const lines = candidates.map((pool, i) => {
+  // Use the same enrichment + filter pipeline as the cron path, so /screen
+  // and the auto screening cycle always see the same surviving pool set.
+  const pipeline = await enrichAndFilterCandidates({ limit: 10 });
+  if (pipeline?.error) {
+    return `Screening failed: ${pipeline.error}`;
+  }
+  const { passing, filteredOut } = pipeline;
+  const display = passing.slice(0, limit);
+
+  // Stash the surviving pools (not the raw unfiltered universe) so /deploy N
+  // operates on data that has already passed hard filters.
+  setLatestCandidates(display.map(({ pool }) => pool));
+  // Also stash the enriched data so deployLatestCandidate can reuse it.
+  _latestCandidatesEnriched = new Map(display.map((entry) => [entry.pool.pool, entry]));
+
+  if (display.length > 0) {
+    const lines = display.map((entry, i) => {
+      const { pool, ti } = entry;
       const feeTvl = pool.fee_active_tvl_ratio ?? pool.fee_tvl_ratio ?? "?";
       const vol = pool.volume_window ?? pool.volume_24h ?? "?";
-      return `${i + 1}. ${pool.name} | ${pool.pool}\n   fee/aTVL ${feeTvl}% | vol $${vol} | organic ${pool.organic_score ?? "?"}`;
+      const botPct = ti?.audit?.bot_holders_pct ?? "?";
+      const top10Pct = ti?.audit?.top_holders_pct ?? "?";
+      return `${i + 1}. ${pool.name} | ${pool.pool}\n   fee/aTVL ${feeTvl}% | vol $${vol} | organic ${pool.organic_score ?? "?"} | top10 ${top10Pct}% | bots ${botPct}%`;
     });
-    return `Top candidates (${candidates.length})\n\n${lines.join("\n")}`;
+    const filteredLine = filteredOut.length > 0
+      ? `\n\nFiltered out (${filteredOut.length}):\n${filteredOut.slice(0, 3).map((e) => `- ${e.name}: ${e.reason}`).join("\n")}`
+      : "";
+    return `Top candidates (${display.length} of ${passing.length} passing, ${filteredOut.length} filtered)${filteredLine}\n\n${lines.join("\n")}`;
   }
-  const examples = (top?.filtered_examples || []).slice(0, 3)
+  const examples = (filteredOut || []).slice(0, 3)
     .map((entry) => `- ${entry.name}: ${entry.reason}`)
     .join("\n");
   return examples
@@ -1530,19 +1497,18 @@ async function deployLatestCandidate(index) {
   if (!candidate) {
     throw new Error("Invalid candidate index. Run /screen first.");
   }
+  // Use the enriched context that /screen stashed, so we don't re-fetch RPC.
+  // This is the same data the LLM would have seen if it had picked this candidate.
+  const enriched = _latestCandidatesEnriched?.get(candidate.pool);
+  const context = enriched
+    ? { pool: enriched.pool, sw: enriched.sw, n: enriched.n, ti: enriched.ti, mem: enriched.mem, study: enriched.study }
+    : { pool: candidate };
+
+  // Lone-candidate guard. We use the displayed candidate count (after the
+  // shared pipeline's hard filters), so the same pool that would be flagged
+  // on the auto path is flagged here. The enriched cache is rebuilt by every
+  // /screen call, so this is always up to date.
   if (_latestCandidates.length === 1) {
-    const mint = candidate.base?.mint || candidate.base_mint || null;
-    const [smartWallets, narrative, tokenInfo] = await Promise.allSettled([
-      checkSmartWalletsOnPool({ pool_address: candidate.pool }),
-      mint ? getTokenNarrative({ mint }) : Promise.resolve(null),
-      mint ? getTokenInfo({ query: mint }) : Promise.resolve(null),
-    ]);
-    const context = {
-      pool: candidate,
-      sw: smartWallets.status === "fulfilled" ? smartWallets.value : null,
-      n: narrative.status === "fulfilled" ? narrative.value : null,
-      ti: tokenInfo.status === "fulfilled" ? tokenInfo.value?.results?.[0] : null,
-    };
     const skipReason = getLoneCandidateSkipReason(context);
     if (skipReason) {
       appendDecision({
@@ -2302,6 +2268,79 @@ function computeBinsBelow(volatility) {
 
 // Register restarter — when update_config changes intervals, running cron jobs get replaced
 registerCronRestarter(() => { if (cronStarted) startCronJobs(); });
+
+// Shared candidate enrichment + filter pipeline. Used by:
+//  - runScreeningCycle() (cron path, builds LLM context)
+//  - runDeterministicScreen() (manual /screen, fills latestCandidates cache)
+// Returns { passing, filteredOut, gmgnStageCounts, gmgnAllFiltered, topCandidates, candidates, allCandidates }.
+// `passing` is the list of {pool, sw, n, ti, mem, study} blocks that survived all hard filters.
+async function enrichAndFilterCandidates({ limit = 10 } = {}) {
+  const topCandidates = await getTopCandidates({ limit }).catch((e) => ({ _error: e.message }));
+  if (topCandidates?._error) {
+    return { error: topCandidates._error };
+  }
+  const candidates = (topCandidates?.candidates || topCandidates?.pools || []).slice(0, limit);
+  const gmgnStageCounts = topCandidates?.stage_counts ?? null;
+  const gmgnAllFiltered = topCandidates?.all_filtered ?? [];
+
+  const allCandidates = [];
+  const BATCH_SIZE = 2;
+  const STAGGER_MS = 200;
+  for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
+    const batch = candidates.slice(i, i + BATCH_SIZE);
+    const batchResults = await Promise.all(
+      batch.map(async (pool, j) => {
+        if (j > 0) await new Promise(r => setTimeout(r, STAGGER_MS));
+        const mint = pool.base?.mint;
+        const [smartWallets, narrative, tokenInfo, study] = await Promise.allSettled([
+          checkSmartWalletsOnPool({ pool_address: pool.pool }),
+          mint ? getTokenNarrative({ mint }) : Promise.resolve(null),
+          mint ? getTokenInfo({ query: mint }) : Promise.resolve(null),
+          studyTopLPers({ pool_address: pool.pool, limit: 3 }).catch(() => null),
+        ]);
+        return {
+          pool,
+          sw: smartWallets.status === "fulfilled" ? smartWallets.value : null,
+          n: narrative.status === "fulfilled" ? narrative.value : null,
+          ti: tokenInfo.status === "fulfilled" ? tokenInfo.value?.results?.[0] : null,
+          mem: recallForPool(pool.pool),
+          study: study.status === "fulfilled" ? study.value : null,
+        };
+      })
+    );
+    allCandidates.push(...batchResults);
+    if (i + BATCH_SIZE < candidates.length) {
+      await new Promise(r => setTimeout(r, 300));
+    }
+  }
+
+  // Hard filters after token recon — block launchpads and excessive Jupiter bot holders
+  const filteredOut = [];
+  const passing = allCandidates.filter(({ pool, ti }) => {
+    if (pool.gmgn) return true;
+    const launchpad = ti?.launchpad ?? null;
+    if (launchpad && config.screening.allowedLaunchpads?.length > 0 && !config.screening.allowedLaunchpads.includes(launchpad)) {
+      log("screening", `Skipping ${pool.name} — launchpad ${launchpad} not in allow-list`);
+      filteredOut.push({ name: pool.name, reason: `launchpad ${launchpad} not in allow-list` });
+      return false;
+    }
+    if (launchpad && config.screening.blockedLaunchpads.includes(launchpad)) {
+      log("screening", `Skipping ${pool.name} — blocked launchpad (${launchpad})`);
+      filteredOut.push({ name: pool.name, reason: `blocked launchpad (${launchpad})` });
+      return false;
+    }
+    const botPct = ti?.audit?.bot_holders_pct;
+    const maxBotHoldersPct = config.screening.maxBotHoldersPct;
+    if (botPct != null && maxBotHoldersPct != null && botPct > maxBotHoldersPct) {
+      log("screening", `Bot-holder filter: dropped ${pool.name} — bots ${botPct}% > ${maxBotHoldersPct}%`);
+      filteredOut.push({ name: pool.name, reason: `bot holders ${botPct}% > ${maxBotHoldersPct}%` });
+      return false;
+    }
+    return true;
+  });
+
+  return { passing, filteredOut, gmgnStageCounts, gmgnAllFiltered, topCandidates, candidates, allCandidates };
+}
 
 if (isMain && isTTY) {
   const rl = readline.createInterface({
