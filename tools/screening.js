@@ -567,8 +567,10 @@ export async function discoverPools({
 
     if (config.screening.discordSignalMode === "only") {
       rawPools = signalPools;
-      // Refresh all signal pools with live data since discovery_pool is a stale snapshot
-      await refreshDiscordOnlyPools(rawPools, s.timeframe);
+      // Refresh all signal pools with live data since discovery_pool is a stale snapshot.
+      // Use the effective discovery timeframe so refreshed metrics stay aligned
+      // with the thresholds used later in the cycle.
+      await refreshDiscordOnlyPools(rawPools, usedTimeframe);
     } else if (signalPools.length > 0) {
       const byPool = new Map(rawPools.map((pool) => [pool.pool_address, pool]));
       const discordOnlyPools = [];
@@ -589,9 +591,11 @@ export async function discoverPools({
       }
       rawPools = Array.from(byPool.values());
       // Refresh discord-only pools with live data — their discovery_pool is a stale snapshot
-      // so volume/volatility/fee may be 0 even when the pool is active right now
+      // so volume/volatility/fee may be 0 even when the pool is active right now.
+      // Use the effective discovery timeframe so refreshed metrics stay aligned
+      // with the thresholds used later in the cycle.
       if (discordOnlyPools.length > 0) {
-        await refreshDiscordOnlyPools(discordOnlyPools, s.timeframe);
+        await refreshDiscordOnlyPools(discordOnlyPools, usedTimeframe);
       }
     }
   }
@@ -732,8 +736,10 @@ export async function getTopCandidates({ limit = 10 } = {}) {
         }
       }
 
-      // Look up each bot token mint on Meteora search API + fetch pool detail
-      const timeframe = config.screening?.timeframe || "30m";
+      // Look up each bot token mint on Meteora search API + fetch pool detail.
+      // Use the same effective discovery timeframe as the main candidate set so
+      // fee/TVL and volume are compared against matching scaled thresholds.
+      const timeframe = discovery.discovery_timeframe || config.screening?.timeframe || "30m";
       for (const t of botData.tokens) {
         try {
           const res = await fetch(`https://dlmm.datapi.meteora.ag/pools?query=${t.mint}&limit=1`, { signal: AbortSignal.timeout(8000) });
