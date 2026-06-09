@@ -704,13 +704,25 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       limit: 20,
     }).catch(() => ({ pools: [], filtered_examples: [] }));
     const [gmgnDiscovery, botTrackerDiscovery] = await Promise.all([gmgnPromise, botTrackerPromise]);
+    const mergedPools = mergeCandidatePools({
+      meteoraPools: meteoraDiscovery.pools || [],
+      gmgnPools: gmgnDiscovery.pools || [],
+      botTrackerPools: botTrackerDiscovery.pools || [],
+    });
+    const overlapCounts = mergedPools.reduce((acc, pool) => {
+      const m = !!pool.sources?.meteora;
+      const g = !!pool.sources?.gmgn;
+      const b = !!pool.sources?.bot_tracker;
+      if (m && g && b) acc.all3 += 1;
+      else if (m && g) acc.meteora_gmgn += 1;
+      else if (m && b) acc.meteora_bot += 1;
+      else if (g && b) acc.gmgn_bot += 1;
+      return acc;
+    }, { all3: 0, meteora_gmgn: 0, meteora_bot: 0, gmgn_bot: 0 });
+    log("screening", `Merge mode: meteora=${(meteoraDiscovery.pools || []).length}, gmgn=${(gmgnDiscovery.pools || []).length}, bot_tracker=${(botTrackerDiscovery.pools || []).length}, merged_unique=${mergedPools.length}, overlaps(all3=${overlapCounts.all3}, meteora+gmgn=${overlapCounts.meteora_gmgn}, meteora+bot=${overlapCounts.meteora_bot}, gmgn+bot=${overlapCounts.gmgn_bot})`);
     discovery = {
       total: (meteoraDiscovery.total || 0) + (gmgnDiscovery.total || 0) + (botTrackerDiscovery.pools?.length || 0),
-      pools: mergeCandidatePools({
-        meteoraPools: meteoraDiscovery.pools || [],
-        gmgnPools: gmgnDiscovery.pools || [],
-        botTrackerPools: botTrackerDiscovery.pools || [],
-      }),
+      pools: mergedPools,
       filtered_examples: [
         ...(Array.isArray(meteoraDiscovery.filtered_examples) ? meteoraDiscovery.filtered_examples : []),
         ...(Array.isArray(gmgnDiscovery.filtered_examples) ? gmgnDiscovery.filtered_examples : []),
