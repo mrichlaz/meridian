@@ -42,8 +42,6 @@ export const THRESHOLD_SCALING_RULES = {
 
   // Power-law scale: sublinear scaling for rate-like metrics
   minFeeActiveTvlRatio: "power",
-  minVolatility: "power",
-  minPriceChange: "power",
   maxSpread: "power",
   maxPriceImpact: "power",
   minBuyPressure: "power",
@@ -59,6 +57,8 @@ export const THRESHOLD_SCALING_RULES = {
   minLiquidity: "none",
   minHolderCount: "none",
   minMarketCap: "none",
+  minVolatility: "none",
+  minPriceChange: "none",
 };
 
 export function normalizeTimeframe(timeframe) {
