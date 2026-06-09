@@ -196,6 +196,23 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
     "get_position_pnl",
     "get_wallet_positions",
   ]);
+  // Screener run-state: this is explicit session discipline layered on top of
+  // the raw message history. It does not change strategy logic; it only helps
+  // the loop understand when enough evidence already exists and when it should
+  // stop wandering and produce a final decision.
+  const SCREENER_RESEARCH_TOOLS = new Set([
+    "check_smart_wallets_on_pool",
+    "get_token_holders",
+    "get_token_narrative",
+    "get_token_info",
+    "get_pool_memory",
+    "search_pools",
+    "get_crypto_bot_tokens",
+    "get_active_bin",
+  ]);
+  let screenerTopCandidatesLoaded = false;
+  let screenerCandidateCount = null;
+  const screenerDistinctResearchCalls = new Set();
   const mustUseRealTool = shouldRequireRealToolUse(goal, agentType, interactive);
   let sawToolCall = false;
   let noToolRetryCount = 0;
@@ -369,6 +386,15 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           }
           continue;
         }
+        if (
+          agentType === "SCREENER" &&
+          screenerTopCandidatesLoaded &&
+          /\bNO DEPLOY\b/i.test(String(msg.content || ""))
+        ) {
+          log("agent", "Accepted screener NO DEPLOY final answer after candidate review");
+          log("agent", msg.content);
+          return { content: msg.content, userMessage: goal };
+        }
         if (mustUseRealTool && !sawToolCall) {
           noToolRetryCount += 1;
           messages.pop();
@@ -382,8 +408,12 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           messages.push({
             role: providerMode === "system" ? "system" : "user",
             content: providerMode === "system"
-              ? "You have not used any tool yet. This request requires real tool execution or live tool-backed data. Do not answer from memory or inference. Call the appropriate tool first, then report only the real result."
-              : "[SYSTEM REMINDER]\nYou have not used any tool yet. This request requires real tool execution or live tool-backed data. Do not answer from memory or inference. Call the appropriate tool first, then report only the real result.",
+              ? (agentType === "SCREENER" && screenerTopCandidatesLoaded
+                  ? `You already have the screened candidate set${screenerCandidateCount != null ? ` (${screenerCandidateCount} candidate(s))` : ""}. Do not answer vaguely. Do exactly one of the following now: (1) call deploy_position for the best survivor, (2) return a final NO DEPLOY decision with specific evidence from the candidate data, or (3) call one new distinct research tool only if it will directly change DEPLOY vs NO DEPLOY.`
+                  : "You have not used any tool yet. This request requires real tool execution or live tool-backed data. Do not answer from memory or inference. Call the appropriate tool first, then report only the real result.")
+              : (agentType === "SCREENER" && screenerTopCandidatesLoaded
+                  ? `[SYSTEM REMINDER]\nYou already have the screened candidate set${screenerCandidateCount != null ? ` (${screenerCandidateCount} candidate(s))` : ""}. Do not answer vaguely. Do exactly one of the following now: (1) call deploy_position for the best survivor, (2) return a final NO DEPLOY decision with specific evidence from the candidate data, or (3) call one new distinct research tool only if it will directly change DEPLOY vs NO DEPLOY.`
+                  : "[SYSTEM REMINDER]\nYou have not used any tool yet. This request requires real tool execution or live tool-backed data. Do not answer from memory or inference. Call the appropriate tool first, then report only the real result."),
           });
           continue;
         }
@@ -437,6 +467,33 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
         const toolSignature = `${functionName}:${JSON.stringify(functionArgs || {})}`;
         const previousSignatureForName = lastToolCallByName.get(functionName);
 
+        // Screener closure guard: once get_top_candidates has already loaded
+        // the candidate set, allow at most two distinct follow-up research
+        // tools before forcing a decision. This preserves the same logic and
+        // toolset, but stops indefinite exploration loops.
+        if (
+          agentType === "SCREENER" &&
+          screenerTopCandidatesLoaded &&
+          SCREENER_RESEARCH_TOOLS.has(functionName) &&
+          !screenerDistinctResearchCalls.has(toolSignature) &&
+          screenerDistinctResearchCalls.size >= 2
+        ) {
+          const reason = `Candidate set is already loaded and ${screenerDistinctResearchCalls.size} distinct follow-up research call(s) have already been used. Make a final DEPLOY/NO DEPLOY decision now instead of requesting more research.`;
+          log("agent", `Blocked extra screener research call: ${toolSignature}`);
+          await onToolFinish?.({
+            name: functionName,
+            args: functionArgs,
+            result: { blocked: true, reason },
+            success: false,
+            step,
+          });
+          return {
+            role: "tool",
+            tool_call_id: toolCall.id,
+            content: JSON.stringify({ blocked: true, reason }),
+          };
+        }
+
         // Reversible central guard: block exact duplicate tool calls across all
         // agent roles unless the tool is explicitly allowed to repeat.
         // Role-specific feedback helps the model recover without changing logic.
@@ -486,6 +543,14 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
         const result = await executeTool(functionName, functionArgs);
         repeatedToolCalls.add(toolSignature);
         lastToolCallByName.set(functionName, toolSignature);
+        if (agentType === "SCREENER" && functionName === "get_top_candidates" && result) {
+          const candidates = result.candidates || result.pools || [];
+          screenerTopCandidatesLoaded = true;
+          screenerCandidateCount = Array.isArray(candidates) ? candidates.length : null;
+        }
+        if (agentType === "SCREENER" && screenerTopCandidatesLoaded && SCREENER_RESEARCH_TOOLS.has(functionName)) {
+          screenerDistinctResearchCalls.add(toolSignature);
+        }
         await onToolFinish?.({
           name: functionName,
           args: functionArgs,
