@@ -183,13 +183,21 @@ function getRawPoolScreeningRejectReason(pool, s) {
   if (mcap == null || mcap < s.minMcap) return `mcap ${mcap ?? "unknown"} below minMcap ${s.minMcap}`;
   if (mcap > s.maxMcap) return `mcap ${mcap} above maxMcap ${s.maxMcap}`;
   if (holders == null || holders < s.minHolders) return `holders ${holders ?? "unknown"} below minHolders ${s.minHolders}`;
-  if (volume == null || volume < s.minVolume) return `volume ${volume ?? "unknown"} below minVolume ${s.minVolume}`;
+  if (volume == null || volume < s.minVolume) {
+    const volumeFloor = s._baseMinVolume != null && s._timeframe && s._baseMinVolume !== s.minVolume
+      ? `${s.minVolume} at ${s._timeframe} (scaled from base ${s._baseMinVolume})`
+      : `${s.minVolume}`;
+    return `volume ${volume ?? "unknown"} below minVolume ${volumeFloor}`;
+  }
   if (tvl == null || tvl < s.minTvl) return `TVL ${tvl ?? "unknown"} below minTvl ${s.minTvl}`;
   if (s.maxTvl != null && tvl > s.maxTvl) return `TVL ${tvl} above maxTvl ${s.maxTvl}`;
   if (binStep == null || binStep < s.minBinStep) return `bin_step ${binStep ?? "unknown"} below minBinStep ${s.minBinStep}`;
   if (binStep > s.maxBinStep) return `bin_step ${binStep} above maxBinStep ${s.maxBinStep}`;
   if (feeActiveTvlRatio == null || feeActiveTvlRatio < s.minFeeActiveTvlRatio) {
-    return `fee/active-TVL ${feeActiveTvlRatio ?? "unknown"} below minFeeActiveTvlRatio ${s.minFeeActiveTvlRatio}`;
+    const feeFloor = s._baseMinFeeActiveTvlRatio != null && s._timeframe && s._baseMinFeeActiveTvlRatio !== s.minFeeActiveTvlRatio
+      ? `${s.minFeeActiveTvlRatio} at ${s._timeframe} (scaled from base ${s._baseMinFeeActiveTvlRatio})`
+      : `${s.minFeeActiveTvlRatio}`;
+    return `fee/active-TVL ${feeActiveTvlRatio ?? "unknown"} below minFeeActiveTvlRatio ${feeFloor}`;
   }
   if (!isUsableVolatility(volatility)) {
     return `volatility ${volatility ?? "unknown"} is unusable`;
@@ -597,6 +605,9 @@ export async function discoverPools({
       minFeeActiveTvlRatio: numeric(s.minFeeActiveTvlRatio),
       minVolume: numeric(s.minVolume),
     }, usedTimeframe),
+    _baseMinFeeActiveTvlRatio: numeric(s.minFeeActiveTvlRatio),
+    _baseMinVolume: numeric(s.minVolume),
+    _timeframe: usedTimeframe,
   };
 
   const filteredExamples = [];
@@ -810,7 +821,10 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       }
       const feeActiveTvlRatio = Number(p.fee_active_tvl_ratio);
       if (Number.isFinite(minFeeActiveTvlRatio) && minFeeActiveTvlRatio > 0 && (!Number.isFinite(feeActiveTvlRatio) || feeActiveTvlRatio < minFeeActiveTvlRatio)) {
-        pushFilteredReason(filteredOut, p, `fee/active-TVL ${Number.isFinite(feeActiveTvlRatio) ? feeActiveTvlRatio : "unknown"} below minFeeActiveTvlRatio ${minFeeActiveTvlRatio}`);
+        const feeFloor = Number(config.screening.minFeeActiveTvlRatio) !== minFeeActiveTvlRatio
+          ? `${minFeeActiveTvlRatio} at ${discovery.discovery_timeframe || tf} (scaled from base ${config.screening.minFeeActiveTvlRatio})`
+          : `${minFeeActiveTvlRatio}`;
+        pushFilteredReason(filteredOut, p, `fee/active-TVL ${Number.isFinite(feeActiveTvlRatio) ? feeActiveTvlRatio : "unknown"} below minFeeActiveTvlRatio ${feeFloor}`);
         return false;
       }
       if (!isUsableVolatility(p.volatility)) {
