@@ -11,7 +11,7 @@ import { getTopCandidates, chooseAdaptiveDeployProfile } from "./tools/screening
 import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
-import { checkCircuitBreaker, getMarketRegime, rankCandidates, sizeMultiplierForScore } from "./policy-engine.js";
+import { checkCircuitBreaker, getMarketRegime, rankCandidates, sizeMultiplierForScore, scoreCandidate } from "./policy-engine.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
 import {
   startPolling,
@@ -693,7 +693,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
       if (pool.gmgn) {
         block = [
           `POOL: ${pool.name} (${pool.pool})`,
-          `  policy: score=${policy?.score ?? "?"}/${policy?.minScore ?? "?"}, regime=${policy?.regime ?? "NEUTRAL"}`,
+          `  policy: score=${policy?.score ?? "?"}/${policy?.minScore ?? "?"}, regime=${policy?.regime ?? "NEUTRAL"}, fee/vol=${policy?.flow?.feeVolatilityRatio?.toFixed?.(4) ?? "?"}, volume_persist=${policy?.flow?.volumePersistenceRatio?.toFixed?.(2) ?? "?"}${policy?.flow?.toxic ? `, toxic=${policy.flow.toxicReasons.join("; ")}` : ""}`,
           formatGmgnCandidateForPrompt(pool),
           pvpLine,
           `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
@@ -707,7 +707,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
           : null;
         block = [
           `POOL: ${pool.name} (${pool.pool})`,
-          `  policy: score=${policy?.score ?? "?"}/${policy?.minScore ?? "?"}, regime=${policy?.regime ?? "NEUTRAL"}`,
+          `  policy: score=${policy?.score ?? "?"}/${policy?.minScore ?? "?"}, regime=${policy?.regime ?? "NEUTRAL"}, fee/vol=${policy?.flow?.feeVolatilityRatio?.toFixed?.(4) ?? "?"}, volume_persist=${policy?.flow?.volumePersistenceRatio?.toFixed?.(2) ?? "?"}${policy?.flow?.toxic ? `, toxic=${policy.flow.toxicReasons.join("; ")}` : ""}`,
           `  metrics: bin_step=${pool.bin_step}, fee_pct=${pool.fee_pct}%, fee_tvl=${pool.fee_active_tvl_ratio}, vol=$${pool.volume_window}, tvl=$${pool.tvl ?? pool.active_tvl}, volatility_${pool.volatility_timeframe || "30m"}=${pool.volatility}, mcap=$${pool.mcap}, organic=${pool.organic_score}${pool.token_age_hours != null ? `, age=${pool.token_age_hours}h` : ""}`,
           `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
           gmgnPriceLine,
@@ -948,6 +948,11 @@ IMPORTANT:
                 organic_score: topSurvivor.organic_score,
                 discovery_timeframe: topSurvivor.discovery_timeframe || config.screening.timeframe,
                 initial_value_usd: initialValueUsd,
+                entry_score: passing[0]?.policy?.score ?? null,
+                entry_regime: regime.regime,
+                entry_fee_volatility_ratio: passing[0]?.policy?.flow?.feeVolatilityRatio ?? null,
+                entry_volume_persistence_ratio: passing[0]?.policy?.flow?.volumePersistenceRatio ?? null,
+                entry_toxic_flow: passing[0]?.policy?.flow?.toxicReasons ?? null,
               });
               deployAttempted = true;
               deploySucceeded = Boolean(fallbackResult?.success && !fallbackResult?.error && !fallbackResult?.blocked);
@@ -1021,6 +1026,11 @@ IMPORTANT:
               organic_score: topSurvivor.organic_score,
               discovery_timeframe: topSurvivor.discovery_timeframe || config.screening.timeframe,
               initial_value_usd: initialValueUsd,
+              entry_score: passingForFallback[0]?.policy?.score ?? null,
+              entry_regime: passingForFallback[0]?.policy?.regime ?? null,
+              entry_fee_volatility_ratio: passingForFallback[0]?.policy?.flow?.feeVolatilityRatio ?? null,
+              entry_volume_persistence_ratio: passingForFallback[0]?.policy?.flow?.volumePersistenceRatio ?? null,
+              entry_toxic_flow: passingForFallback[0]?.policy?.flow?.toxicReasons ?? null,
             });
             deployAttempted = true;
             deploySucceeded = Boolean(fallbackResult?.success && !fallbackResult?.error && !fallbackResult?.blocked);
@@ -1762,8 +1772,9 @@ async function deployLatestCandidate(index) {
     });
     throw new Error(`NO DEPLOY: ${candidate.name} — ${deployProfile.reason}`);
   }
+  const manualPolicy = scoreCandidate(candidate, { audit: enriched?.ti?.audit, smartWallets: enriched?.sw });
   const baseDeployAmount = computeDeployAmount(wallet.sol);
-  const deployAmount = Number((baseDeployAmount * (deployProfile.sizeMultiplier || 1)).toFixed(2));
+  const deployAmount = Number((baseDeployAmount * (deployProfile.sizeMultiplier || 1) * sizeMultiplierForScore(manualPolicy.score)).toFixed(2));
   const initialValueUsd = wallet.sol_price ? deployAmount * wallet.sol_price : null;
   const binsBelow = Math.max(35, Math.round(computeBinsBelow(candidate.volatility) * (deployProfile.binsMultiplier || 1)));
   const result = await executeTool("deploy_position", {
@@ -1781,6 +1792,11 @@ async function deployLatestCandidate(index) {
     organic_score: candidate.organic_score,
     discovery_timeframe: candidate.discovery_timeframe || config.screening.timeframe,
     initial_value_usd: initialValueUsd,
+    entry_score: manualPolicy.score,
+    entry_regime: getMarketRegime().regime,
+    entry_fee_volatility_ratio: manualPolicy.flow?.feeVolatilityRatio ?? null,
+    entry_volume_persistence_ratio: manualPolicy.flow?.volumePersistenceRatio ?? null,
+    entry_toxic_flow: manualPolicy.flow?.toxicReasons ?? null,
   });
   if (result?.success === false || result?.error) {
     throw new Error(result.error || "Deploy failed");

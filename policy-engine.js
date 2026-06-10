@@ -9,6 +9,40 @@ function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
+export function getFlowQuality(pool = {}, context = {}) {
+  const fee = n(pool.fee_active_tvl_ratio ?? pool.fee_tvl_ratio);
+  const volatility = n(pool.volatility);
+  const feeVolatilityRatio = volatility > 0 ? fee / volatility : 0;
+  const volume5m = n(pool.volume_5m ?? pool.volume_window);
+  const volume15m = n(pool.volume_15m);
+  const volume30m = n(pool.volume_30m ?? pool.volume_window);
+  const volume1h = n(pool.volume_1h);
+  const reference = volume30m > 0 ? volume30m : volume1h;
+  const volumePersistenceRatio = volume5m > 0 && reference > 0 ? reference / volume5m : reference > 500 ? 3 : 0;
+  const priceChange1h = n(pool.price_change_1h ?? pool.price_change_1h_pct ?? pool.gmgn_price_action?.priceChangePct ?? context.stats1h?.price_change);
+  const netBuyers = n(pool.net_buyers_1h ?? context.stats1h?.net_buyers, null);
+  const priceVsAth = n(pool.price_vs_ath_pct ?? pool.gmgn_price_action?.priceVsAthPct, null);
+  const top10 = n(pool.top10_pct ?? pool.holder_top10_pct ?? context.audit?.top_holders_pct);
+  const bots = n(pool.bot_holders_pct ?? context.audit?.bot_holders_pct);
+  const highVolume = n(pool.volume_window ?? volume30m ?? volume1h) >= 5000;
+  const toxicReasons = [];
+  if (highVolume && priceChange1h < -15) toxicReasons.push("high volume with sharp negative 1h price change");
+  if (netBuyers != null && netBuyers < 0 && priceChange1h < 0) toxicReasons.push("negative net buyers with falling price");
+  if (top10 > 50 && priceChange1h < 0) toxicReasons.push("concentrated holders while price is falling");
+  if (bots > 35 && priceChange1h < 5) toxicReasons.push("bot-heavy holders without strong price confirmation");
+  if (priceVsAth != null && priceVsAth > 88 && priceChange1h > 20) toxicReasons.push("overextended near ATH after vertical move");
+  if (volume5m > 0 && reference > 0 && volumePersistenceRatio < 1.5) toxicReasons.push("weak volume persistence");
+  return {
+    feeVolatilityRatio,
+    volumePersistenceRatio,
+    toxic: toxicReasons.length > 0,
+    toxicReasons,
+    priceChange1h,
+    netBuyers,
+    priceVsAth,
+  };
+}
+
 export function scoreCandidate(pool = {}, context = {}) {
   const fee = n(pool.fee_active_tvl_ratio ?? pool.fee_tvl_ratio);
   const organic = n(pool.organic_score);
@@ -20,22 +54,27 @@ export function scoreCandidate(pool = {}, context = {}) {
   const bots = n(pool.bot_holders_pct ?? context.audit?.bot_holders_pct);
   const bundle = n(pool.bundle_pct ?? pool.gmgn_bundler_pct);
   const smart = pool.smart_money_buy || context.smartWallets?.smart_money_buy ? 8 : 0;
+  const flow = getFlowQuality(pool, context);
 
   let score = 0;
-  score += clamp(fee / 0.08, 0, 2) * 24;
-  score += clamp(organic / 85, 0, 1.3) * 18;
-  score += clamp(Math.log10(volume + 1) / 5, 0, 1.4) * 16;
-  score += clamp(Math.log10(holders + 1) / 4, 0, 1.2) * 12;
+  score += clamp(fee / 0.08, 0, 2) * 20;
+  score += clamp(flow.feeVolatilityRatio / 0.02, 0, 1.5) * 16;
+  score += clamp(flow.volumePersistenceRatio / 3, 0, 1.5) * 10;
+  score += clamp(organic / 85, 0, 1.3) * 16;
+  score += clamp(Math.log10(volume + 1) / 5, 0, 1.4) * 14;
+  score += clamp(Math.log10(holders + 1) / 4, 0, 1.2) * 10;
   score += smart;
-  score += age >= 2 && age <= 72 ? 8 : age > 72 && age <= 168 ? 4 : -10;
-  score += volatility > 0 && volatility <= 6 ? 8 : volatility > 6 && volatility <= 10 ? -4 : -10;
+  score += age >= 6 && age <= 72 ? 8 : age >= 2 && age < 6 ? -4 : age > 72 && age <= 168 ? 4 : -12;
+  score += volatility > 0 && volatility <= 6 ? 6 : volatility > 6 && volatility <= 10 ? -6 : -12;
   score -= clamp((top10 - 35) / 25, 0, 2) * 10;
   score -= clamp((bots - 20) / 20, 0, 2) * 8;
   score -= clamp((bundle - 15) / 20, 0, 2) * 8;
+  if (flow.toxic) score -= 22;
   if (pool.is_pvp) score -= 15;
 
-  const reasons = [];
+  const reasons = [...flow.toxicReasons];
   if (fee < 0.03) reasons.push("weak fee/active-TVL");
+  if (flow.feeVolatilityRatio < 0.01) reasons.push("weak fee/volatility quality");
   if (organic < 70) reasons.push("weak organic score");
   if (volume < 1000) reasons.push("weak volume");
   if (holders < 500) reasons.push("thin holder base");
@@ -43,7 +82,7 @@ export function scoreCandidate(pool = {}, context = {}) {
   if (top10 > 55) reasons.push("high top-10 concentration");
   if (bots > 35) reasons.push("high bot-holder concentration");
 
-  return { score: Math.round(clamp(score, 0, 100)), reasons };
+  return { score: Math.round(clamp(score, 0, 100)), reasons, flow };
 }
 
 export function getMarketRegime({ performanceSummary = getPerformanceSummary(), recentPerformance = null } = {}) {

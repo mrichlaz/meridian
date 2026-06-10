@@ -699,7 +699,24 @@ export async function executeTool(name, args) {
 
   // ─── Execute ──────────────────────────────
   try {
-    const result = await fn(args);
+    let result = await fn(args);
+    if (
+      name === "deploy_position" &&
+      (result?.success === false || result?.error) &&
+      /insufficient funds|custom program error: 0x1/i.test(String(result.error || ""))
+    ) {
+      const originalAmount = Number(args.amount_y ?? args.amount_sol ?? 0);
+      const retryAmount = Number((originalAmount * 0.8).toFixed(4));
+      const minDeploy = Math.max(0.1, config.management.deployAmountSol);
+      if (Number.isFinite(retryAmount) && retryAmount >= minDeploy && retryAmount < originalAmount) {
+        log("deploy_retry", `Retrying deploy at 80% size after insufficient-funds simulation: ${originalAmount} → ${retryAmount} SOL`);
+        result = await fn({ ...args, amount_y: retryAmount, amount_sol: undefined, retry_of_amount_y: originalAmount });
+        if (result && typeof result === "object") {
+          result.retry_of_amount_y = originalAmount;
+          result.retry_amount_y = retryAmount;
+        }
+      }
+    }
     const duration = Date.now() - startTime;
     const success = result?.success !== false && !result?.error;
 

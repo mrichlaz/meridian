@@ -557,6 +557,11 @@ export async function deployPosition({
   entry_tvl,
   entry_volume,
   entry_holders,
+  entry_score = null,
+  entry_regime = null,
+  entry_fee_volatility_ratio = null,
+  entry_volume_persistence_ratio = null,
+  entry_toxic_flow = null,
 }) {
   pool_address = normalizeMint(pool_address);
   const activeStrategy = strategy || config.strategy.strategy;
@@ -801,6 +806,11 @@ export async function deployPosition({
           entry_tvl,
           entry_volume,
           entry_holders,
+          entry_score,
+          entry_regime,
+          entry_fee_volatility_ratio,
+          entry_volume_persistence_ratio,
+          entry_toxic_flow,
         });
       }
 
@@ -947,6 +957,11 @@ export async function deployPosition({
       entry_tvl,
       entry_volume,
       entry_holders,
+      entry_score,
+      entry_regime,
+      entry_fee_volatility_ratio,
+      entry_volume_persistence_ratio,
+      entry_toxic_flow,
     });
 
     appendDecision({
