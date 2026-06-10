@@ -128,6 +128,14 @@ const FEATURE_SPEC = [
   "isol_volume_per_tvl",       // 75: volume / TVL
   "isol_tvl_per_position",     // 76: TVL / position count
   "isol_holder_density",       // 77: holders / mcap log10
+
+  // ─── POLICY / FLOW QUALITY ────────────────
+  "policy_score",              // 78: deterministic policy score (0-100)
+  "policy_fee_volatility_ratio", // 79: fee_active_tvl_ratio / volatility
+  "policy_volume_persistence", // 80: longer-window volume / 5m volume
+  "policy_toxic_flow",         // 81: boolean toxic-flow flag
+  "policy_regime_risk_off",    // 82: boolean
+  "policy_regime_risk_on",     // 83: boolean
 ];
 
 const FEATURE_COUNT = FEATURE_SPEC.length;
@@ -363,6 +371,17 @@ export function extractFeatures({
     vec[FEATURE_INDEX.token_mcap_usd],
   );
 
+  // ─── POLICY / FLOW QUALITY ────────────────
+  const policy = c.policy || context.policy || {};
+  const flow = policy.flow || c.flow || context.flow || {};
+  const regime = String(policy.regime || c.entry_regime || context.entryRegime || "").toUpperCase();
+  vec[FEATURE_INDEX.policy_score] = numeric(policy.score ?? c.entry_score ?? context.entryScore, 0);
+  vec[FEATURE_INDEX.policy_fee_volatility_ratio] = numeric(flow.feeVolatilityRatio ?? c.entry_fee_volatility_ratio ?? context.entryFeeVolatilityRatio, 0);
+  vec[FEATURE_INDEX.policy_volume_persistence] = numeric(flow.volumePersistenceRatio ?? c.entry_volume_persistence_ratio ?? context.entryVolumePersistenceRatio, 0);
+  vec[FEATURE_INDEX.policy_toxic_flow] = Array.isArray(c.entry_toxic_flow) ? (c.entry_toxic_flow.length > 0 ? 1 : 0) : bool(flow.toxic ?? context.entryToxicFlow);
+  vec[FEATURE_INDEX.policy_regime_risk_off] = regime === "RISK_OFF" ? 1 : 0;
+  vec[FEATURE_INDEX.policy_regime_risk_on] = regime === "RISK_ON" ? 1 : 0;
+
   return vec;
 }
 
@@ -414,6 +433,11 @@ export function extractFromPerformance(perf) {
     entry_tvl: perf.entry_tvl,
     entry_volume: perf.entry_volume,
     entry_holders: perf.entry_holders,
+    entry_score: perf.entry_score,
+    entry_regime: perf.entry_regime,
+    entry_fee_volatility_ratio: perf.entry_fee_volatility_ratio,
+    entry_volume_persistence_ratio: perf.entry_volume_persistence_ratio,
+    entry_toxic_flow: perf.entry_toxic_flow,
   };
   const context = {
     walletSol: perf.amount_sol || 0,
@@ -424,6 +448,11 @@ export function extractFromPerformance(perf) {
     entryTvl: perf.entry_tvl,
     entryVolume: perf.entry_volume,
     entryHolders: perf.entry_holders,
+    entryScore: perf.entry_score,
+    entryRegime: perf.entry_regime,
+    entryFeeVolatilityRatio: perf.entry_fee_volatility_ratio,
+    entryVolumePersistenceRatio: perf.entry_volume_persistence_ratio,
+    entryToxicFlow: perf.entry_toxic_flow,
   };
   return normalizeVector(extractFeatures({ candidate, context }));
 }
@@ -438,6 +467,10 @@ function numeric(value, fallback = 0) {
 
 function clamp(value, lo, hi) {
   return Math.max(lo, Math.min(hi, value));
+}
+
+function bool(value) {
+  return value ? 1 : 0;
 }
 
 function isActive(isoString) {

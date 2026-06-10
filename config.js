@@ -226,6 +226,18 @@ export const config = {
     minSamples:     u.darwinMinSamples  ?? 10,
   },
 
+  // ─── Automated policy / flow-quality guardrails ────────────────
+  policy: {
+    enabled:                 u.policyEnabled                 ?? true,
+    minFeeVolatilityRatio:   u.policyMinFeeVolatilityRatio   ?? 0.01,
+    minVolumePersistence:    u.policyMinVolumePersistence    ?? 1.5,
+    toxicFlowPenalty:        u.policyToxicFlowPenalty        ?? 22,
+    neutralMinScore:         u.policyNeutralMinScore         ?? 66,
+    riskOffMinScore:         u.policyRiskOffMinScore         ?? 76,
+    riskOnMinScore:          u.policyRiskOnMinScore          ?? 60,
+    shrinkRetryPct:          u.policyShrinkRetryPct          ?? 0.8,
+  },
+
   // ─── Deep Learning / ML ────────────────
   ml: {
     enabled:            u.mlEnabled            ?? false,

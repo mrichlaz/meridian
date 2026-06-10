@@ -596,6 +596,12 @@ export function formatConfigSnapshot(config, options = {}) {
   lines.push(`  • claim threshold: ${formatUsd(m.minClaimAmount, 2)}`);
   if (m.solMode) lines.push(`  • solMode: ON (PnL/values reported in SOL)`);
   lines.push("");
+  lines.push(b("Policy / ML"));
+  lines.push(`  • policy: ${config.policy?.enabled ? "ON" : "OFF"} • ML: ${config.ml?.enabled ? "ON" : "OFF"}`);
+  lines.push(`  • min fee/vol: ${config.policy?.minFeeVolatilityRatio} • min volume persistence: ${config.policy?.minVolumePersistence}`);
+  lines.push(`  • scores: risk-on ${config.policy?.riskOnMinScore}, neutral ${config.policy?.neutralMinScore}, risk-off ${config.policy?.riskOffMinScore}`);
+  lines.push(`  • toxic penalty: ${config.policy?.toxicFlowPenalty} • shrink retry: ${config.policy?.shrinkRetryPct}`);
+  lines.push("");
   lines.push(b("Schedule"));
   lines.push(`  • management: every ${config.schedule?.managementIntervalMin}m`);
   lines.push(`  • screening: every ${config.schedule?.screeningIntervalMin}m`);

@@ -1432,6 +1432,15 @@ function settingValue(key) {
     rsiLength: config.indicators.rsiLength,
     indicatorIntervals: config.indicators.intervals,
     requireAllIntervals: config.indicators.requireAllIntervals,
+    policyEnabled: config.policy.enabled,
+    policyMinFeeVolatilityRatio: config.policy.minFeeVolatilityRatio,
+    policyMinVolumePersistence: config.policy.minVolumePersistence,
+    policyToxicFlowPenalty: config.policy.toxicFlowPenalty,
+    policyNeutralMinScore: config.policy.neutralMinScore,
+    policyRiskOffMinScore: config.policy.riskOffMinScore,
+    policyRiskOnMinScore: config.policy.riskOnMinScore,
+    policyShrinkRetryPct: config.policy.shrinkRetryPct,
+    mlEnabled: config.ml.enabled,
   };
   return values[key];
 }
@@ -1476,7 +1485,7 @@ function renderSettingsMenu(page = "main") {
       settingButton("Main", "cfg:page:main"),
       settingButton("Risk", "cfg:page:risk"),
       settingButton("Screen", "cfg:page:screen"),
-      settingButton("Indicators", "cfg:page:indicators"),
+      settingButton("Policy", "cfg:page:policy"),
     ],
   ];
 
@@ -1517,6 +1526,17 @@ function renderSettingsMenu(page = "main") {
       stepButtons("managementIntervalMin", "Manage min", 1, { digits: 0 }),
       stepButtons("screeningIntervalMin", "Screen min", 5, { digits: 0 }),
     ];
+  } else if (page === "policy") {
+    rows = [
+      [toggleButton("policyEnabled", "Policy guard"), toggleButton("mlEnabled", "ML")],
+      stepButtons("policyMinFeeVolatilityRatio", "Min fee/vol", 0.002, { digits: 3 }),
+      stepButtons("policyMinVolumePersistence", "Vol persist", 0.25, { digits: 2 }),
+      stepButtons("policyToxicFlowPenalty", "Toxic penalty", 2, { digits: 0 }),
+      stepButtons("policyNeutralMinScore", "Neutral score", 1, { digits: 0 }),
+      stepButtons("policyRiskOffMinScore", "Risk-off score", 1, { digits: 0 }),
+      stepButtons("policyRiskOnMinScore", "Risk-on score", 1, { digits: 0 }),
+      stepButtons("policyShrinkRetryPct", "Retry pct", 0.05, { digits: 2 }),
+    ];
   } else if (page === "indicators") {
     rows = [
       [toggleButton("chartIndicatorsEnabled", "Chart indicators"), toggleButton("requireAllIntervals", "Require all TF")],
@@ -1546,7 +1566,7 @@ function renderSettingsMenu(page = "main") {
         settingButton("Screening", "cfg:page:screen"),
       ],
       [
-        settingButton("Indicators", "cfg:page:indicators"),
+        settingButton("Policy / ML", "cfg:page:policy"),
         settingButton("Show config", "cfg:show"),
       ],
     ];
@@ -1618,6 +1638,9 @@ async function applySettingsMenuCallback(msg) {
     if (key === "repeatDeployCooldownMinFeeEarnedPct") value = Math.max(0, value);
     if (["minBinsBelow", "maxBinsBelow", "defaultBinsBelow"].includes(key)) value = Math.max(35, Math.round(value));
     if (["deployAmountSol", "gasReserve", "maxDeployAmount"].includes(key)) value = Math.max(0, value);
+    if (["policyNeutralMinScore", "policyRiskOffMinScore", "policyRiskOnMinScore"].includes(key)) value = Math.max(0, Math.min(100, Math.round(value)));
+    if (["policyMinFeeVolatilityRatio", "policyMinVolumePersistence", "policyToxicFlowPenalty"].includes(key)) value = Math.max(0, value);
+    if (key === "policyShrinkRetryPct") value = Math.max(0.4, Math.min(0.95, value));
   } else if (action === "set") {
     value = normalizeMenuValue(key, parts.slice(3).join(":"));
   } else {
@@ -1635,9 +1658,11 @@ async function applySettingsMenuCallback(msg) {
   }
   page = key.startsWith("indicator") || key === "chartIndicatorsEnabled" || key === "rsiLength" || key === "requireAllIntervals"
     ? "indicators"
-    : ["useDiscordSignals", "blockPvpSymbols", "strategy", "minBinsBelow", "maxBinsBelow", "defaultBinsBelow", "managementIntervalMin", "screeningIntervalMin"].includes(key)
-      ? "screen"
-      : "risk";
+    : key.startsWith("policy") || key === "mlEnabled"
+      ? "policy"
+      : ["useDiscordSignals", "blockPvpSymbols", "strategy", "minBinsBelow", "maxBinsBelow", "defaultBinsBelow", "managementIntervalMin", "screeningIntervalMin"].includes(key)
+        ? "screen"
+        : "risk";
   await answerCallbackQuery(msg.callbackQueryId, `Updated ${key}`);
   await showSettingsMenu({ messageId: msg.messageId, page });
 }

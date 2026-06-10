@@ -1,3 +1,4 @@
+import { config } from "./config.js";
 import { getPerformanceSummary, getPerformanceHistory } from "./lessons.js";
 
 function n(value, fallback = 0) {
@@ -31,7 +32,7 @@ export function getFlowQuality(pool = {}, context = {}) {
   if (top10 > 50 && priceChange1h < 0) toxicReasons.push("concentrated holders while price is falling");
   if (bots > 35 && priceChange1h < 5) toxicReasons.push("bot-heavy holders without strong price confirmation");
   if (priceVsAth != null && priceVsAth > 88 && priceChange1h > 20) toxicReasons.push("overextended near ATH after vertical move");
-  if (volume5m > 0 && reference > 0 && volumePersistenceRatio < 1.5) toxicReasons.push("weak volume persistence");
+  if (volume5m > 0 && reference > 0 && volumePersistenceRatio < (config.policy?.minVolumePersistence ?? 1.5)) toxicReasons.push("weak volume persistence");
   return {
     feeVolatilityRatio,
     volumePersistenceRatio,
@@ -58,7 +59,7 @@ export function scoreCandidate(pool = {}, context = {}) {
 
   let score = 0;
   score += clamp(fee / 0.08, 0, 2) * 20;
-  score += clamp(flow.feeVolatilityRatio / 0.02, 0, 1.5) * 16;
+  score += clamp(flow.feeVolatilityRatio / Math.max((config.policy?.minFeeVolatilityRatio ?? 0.01) * 2, 0.001), 0, 1.5) * 16;
   score += clamp(flow.volumePersistenceRatio / 3, 0, 1.5) * 10;
   score += clamp(organic / 85, 0, 1.3) * 16;
   score += clamp(Math.log10(volume + 1) / 5, 0, 1.4) * 14;
@@ -69,12 +70,12 @@ export function scoreCandidate(pool = {}, context = {}) {
   score -= clamp((top10 - 35) / 25, 0, 2) * 10;
   score -= clamp((bots - 20) / 20, 0, 2) * 8;
   score -= clamp((bundle - 15) / 20, 0, 2) * 8;
-  if (flow.toxic) score -= 22;
+  if (flow.toxic) score -= n(config.policy?.toxicFlowPenalty, 22);
   if (pool.is_pvp) score -= 15;
 
   const reasons = [...flow.toxicReasons];
   if (fee < 0.03) reasons.push("weak fee/active-TVL");
-  if (flow.feeVolatilityRatio < 0.01) reasons.push("weak fee/volatility quality");
+  if (flow.feeVolatilityRatio < (config.policy?.minFeeVolatilityRatio ?? 0.01)) reasons.push("weak fee/volatility quality");
   if (organic < 70) reasons.push("weak organic score");
   if (volume < 1000) reasons.push("weak volume");
   if (holders < 500) reasons.push("thin holder base");
@@ -91,9 +92,9 @@ export function getMarketRegime({ performanceSummary = getPerformanceSummary(), 
   const losses = last.filter((p) => n(p.pnl_usd) < 0).length;
   const pnl = last.reduce((s, p) => s + n(p.pnl_usd), 0);
   const winRate = n(performanceSummary?.win_rate_pct, 50);
-  if (last.length >= 3 && (losses >= 3 || pnl < -15 || winRate < 35)) return { regime: "RISK_OFF", minScore: 76, sizeMultiplier: 0.5, reason: "recent closed-position performance is weak" };
-  if (last.length >= 4 && losses <= 1 && pnl > 10 && winRate >= 55) return { regime: "RISK_ON", minScore: 60, sizeMultiplier: 1.1, reason: "recent closed-position performance is healthy" };
-  return { regime: "NEUTRAL", minScore: 66, sizeMultiplier: 1, reason: "normal operating regime" };
+  if (last.length >= 3 && (losses >= 3 || pnl < -15 || winRate < 35)) return { regime: "RISK_OFF", minScore: n(config.policy?.riskOffMinScore, 76), sizeMultiplier: 0.5, reason: "recent closed-position performance is weak" };
+  if (last.length >= 4 && losses <= 1 && pnl > 10 && winRate >= 55) return { regime: "RISK_ON", minScore: n(config.policy?.riskOnMinScore, 60), sizeMultiplier: 1.1, reason: "recent closed-position performance is healthy" };
+  return { regime: "NEUTRAL", minScore: n(config.policy?.neutralMinScore, 66), sizeMultiplier: 1, reason: "normal operating regime" };
 }
 
 export function checkCircuitBreaker({ positions = null, balance = null, performanceSummary = getPerformanceSummary() } = {}) {
@@ -111,6 +112,9 @@ export function checkCircuitBreaker({ positions = null, balance = null, performa
 }
 
 export function rankCandidates(entries = [], { regime = getMarketRegime() } = {}) {
+  if (config.policy?.enabled === false) {
+    return entries.map((entry) => ({ ...entry, policy: { score: 100, reasons: [], flow: getFlowQuality(entry.pool, { audit: entry.ti?.audit, smartWallets: entry.sw }), regime: regime.regime, minScore: 0, disabled: true } }));
+  }
   return entries
     .map((entry) => {
       const scored = scoreCandidate(entry.pool, { audit: entry.ti?.audit, smartWallets: entry.sw });

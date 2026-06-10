@@ -274,6 +274,7 @@ function normalizeConfigValue(key, value) {
     "chartIndicatorsEnabled",
     "requireAllIntervals",
     "lpAgentRelayEnabled",
+    "policyEnabled",
   ]);
   const arrayKeys = new Set(["allowedLaunchpads", "blockedLaunchpads"]);
   const stringKeys = new Set([
@@ -298,6 +299,8 @@ function normalizeConfigValue(key, value) {
   ]);
   const numberKeys = new Set([
     "mlTrainEvery", "mlMinSamples", "mlBatchSize", "mlEpochs", "mlLearningRate",
+    "policyMinFeeVolatilityRatio", "policyMinVolumePersistence", "policyToxicFlowPenalty",
+    "policyNeutralMinScore", "policyRiskOffMinScore", "policyRiskOnMinScore", "policyShrinkRetryPct",
     "darwinWindowDays", "darwinRecalcEvery", "darwinBoost", "darwinDecay",
     "darwinFloor", "darwinCeiling", "darwinMinSamples",
     "rsiLength", "indicatorCandles", "rsiOversold", "rsiOverbought",
@@ -496,6 +499,15 @@ const toolMap = {
       publicApiKey: ["api", "publicApiKey"],
       agentMeridianApiUrl: ["api", "url"],
       lpAgentRelayEnabled: ["api", "lpAgentRelayEnabled"],
+      // policy / flow quality
+      policyEnabled: ["policy", "enabled", ["policyEnabled"]],
+      policyMinFeeVolatilityRatio: ["policy", "minFeeVolatilityRatio", ["policyMinFeeVolatilityRatio"]],
+      policyMinVolumePersistence: ["policy", "minVolumePersistence", ["policyMinVolumePersistence"]],
+      policyToxicFlowPenalty: ["policy", "toxicFlowPenalty", ["policyToxicFlowPenalty"]],
+      policyNeutralMinScore: ["policy", "neutralMinScore", ["policyNeutralMinScore"]],
+      policyRiskOffMinScore: ["policy", "riskOffMinScore", ["policyRiskOffMinScore"]],
+      policyRiskOnMinScore: ["policy", "riskOnMinScore", ["policyRiskOnMinScore"]],
+      policyShrinkRetryPct: ["policy", "shrinkRetryPct", ["policyShrinkRetryPct"]],
       // ml / darwin
       mlEnabled: ["ml", "enabled", ["mlEnabled"]],
       mlTrainEvery: ["ml", "trainEvery", ["mlTrainEvery"]],
@@ -706,7 +718,7 @@ export async function executeTool(name, args) {
       /insufficient funds|custom program error: 0x1/i.test(String(result.error || ""))
     ) {
       const originalAmount = Number(args.amount_y ?? args.amount_sol ?? 0);
-      const retryAmount = Number((originalAmount * 0.8).toFixed(4));
+      const retryAmount = Number((originalAmount * Number(config.policy?.shrinkRetryPct ?? 0.8)).toFixed(4));
       const minDeploy = Math.max(0.1, config.management.deployAmountSol);
       if (Number.isFinite(retryAmount) && retryAmount >= minDeploy && retryAmount < originalAmount) {
         log("deploy_retry", `Retrying deploy at 80% size after insufficient-funds simulation: ${originalAmount} → ${retryAmount} SOL`);
