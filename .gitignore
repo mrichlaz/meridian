@@ -33,6 +33,13 @@ context.md
 CONTEXT.md
 dev-blocklist.json
 docs/
+remote_index.js
+tmp-*.mjs
+test-telegram-commands.js
+test-utils.js
+screening-snapshots/
+ml/emotion-state.json
+ml/personality.json
 
 # Discord listener queue
 discord-signals.json

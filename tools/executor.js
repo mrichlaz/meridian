@@ -12,7 +12,7 @@ import {
 import { getWalletBalances, swapToken } from "./wallet.js";
 import { studyTopLPers } from "./study.js";
 import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons } from "../lessons.js";
-import { setPositionInstruction } from "../state.js";
+import { getTrackedPosition, setPositionInstruction } from "../state.js";
 
 import { getPoolMemory, addPoolNote } from "../pool-memory.js";
 import { getCryptoBotTokens } from "./crypto-signals.js";
@@ -716,6 +716,13 @@ export async function executeTool(name, args) {
         notifySwap({ inputSymbol: args.input_mint?.slice(0, 8), outputSymbol: args.output_mint === "So11111111111111111111111111111111111111112" || args.output_mint === "SOL" ? "SOL" : args.output_mint?.slice(0, 8), amountIn: result.amount_in, amountOut: result.amount_out, tx: result.tx }).catch(() => {});
       } else if (name === "deploy_position") {
         notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, priceRange: result.price_range, rangeCoverage: result.range_coverage, binStep: result.bin_step, baseFee: result.base_fee }).catch(() => {});
+        const v = Number(args.volatility);
+        const nextInterval = Number.isFinite(v) && v >= 5 ? 3 : Number.isFinite(v) && v >= 2 ? 5 : 10;
+        if (config.schedule.managementIntervalMin !== nextInterval) {
+          config.schedule.managementIntervalMin = nextInterval;
+          if (_cronRestarter) _cronRestarter();
+          log("config", `Auto-set management interval to ${nextInterval}m after deploy volatility=${args.volatility ?? "unknown"}`);
+        }
       } else if (name === "close_position") {
         notifyClose({
           pair: result.pool_name || args.position_address?.slice(0, 8),
@@ -936,9 +943,43 @@ async function runSafetyChecks(name, args) {
       return { pass: true };
     }
 
+    case "claim_fees":
+    case "close_position": {
+      const positionAddress = String(args?.position_address || "").trim();
+      if (!positionAddress) {
+        return { pass: false, reason: `${name} requires position_address.` };
+      }
+      const tracked = getTrackedPosition(positionAddress);
+      if (!tracked || tracked.closed) {
+        return { pass: false, reason: `Position ${positionAddress} is not an open tracked position.` };
+      }
+      return { pass: true };
+    }
+
     case "swap_token": {
-      // Basic check — prevent swapping when DRY_RUN is true
-      // (handled inside swapToken itself, but belt-and-suspenders)
+      const inputMint = String(args?.input_mint || "").trim();
+      const outputMint = String(args?.output_mint || "").trim();
+      const amount = Number(args?.amount);
+      if (!inputMint || !outputMint) {
+        return { pass: false, reason: "swap_token requires input_mint and output_mint." };
+      }
+      if (!Number.isFinite(amount) || amount <= 0) {
+        return { pass: false, reason: `swap_token amount must be positive and finite, got ${args?.amount}.` };
+      }
+      if (process.env.DRY_RUN !== "true") {
+        const balances = await getWalletBalances();
+        if (balances.error) return { pass: false, reason: `Could not verify wallet balance before swap: ${balances.error}` };
+        const isSolInput = inputMint === "SOL" || inputMint === config.tokens.SOL;
+        const available = isSolInput
+          ? Number(balances.sol || 0)
+          : Number(balances.tokens?.find((t) => t.mint === inputMint)?.balance || 0);
+        if (!Number.isFinite(available) || available <= 0) {
+          return { pass: false, reason: `No available balance for input mint ${inputMint}.` };
+        }
+        if (amount > available) {
+          return { pass: false, reason: `Swap amount ${amount} exceeds available balance ${available} for ${inputMint}.` };
+        }
+      }
       return { pass: true };
     }
 

@@ -38,6 +38,12 @@ function die(msg, extra = {}) {
   process.exit(1);
 }
 
+function requireLiveConfirmation(command) {
+  if (process.env.DRY_RUN === "true") return;
+  if (process.env.ALLOW_CLI_LIVE_TRADES === "true" || process.argv.includes("--live-confirm")) return;
+  die(`${command} is a live trading command. Re-run with --dry-run, --live-confirm, or ALLOW_CLI_LIVE_TRADES=true.`);
+}
+
 import { PATHS } from "./utils/paths.js";
 
 // ─── SKILL.md generation ──────────────────────────────────────────
@@ -461,6 +467,7 @@ switch (subcommand) {
 
   // ── deploy ───────────────────────────────────────────────────────
   case "deploy": {
+    requireLiveConfirmation("deploy");
     if (!flags.pool) die("Usage: meridian deploy --pool <addr> --amount <sol>");
     const amountX = flags["amount-x"] ? parseFloat(flags["amount-x"]) : undefined;
     if (!flags.amount && !amountX) die("--amount or --amount-x is required");
@@ -481,6 +488,7 @@ switch (subcommand) {
 
   // ── claim ────────────────────────────────────────────────────────
   case "claim": {
+    requireLiveConfirmation("claim");
     if (!flags.position) die("Usage: meridian claim --position <addr>");
     const { executeTool } = await import("./tools/executor.js");
     out(await executeTool("claim_fees", { position_address: flags.position }));
@@ -489,6 +497,7 @@ switch (subcommand) {
 
   // ── close ────────────────────────────────────────────────────────
   case "close": {
+    requireLiveConfirmation("close");
     if (!flags.position) die("Usage: meridian close --position <addr>");
     const { executeTool } = await import("./tools/executor.js");
     out(await executeTool("close_position", {
@@ -500,6 +509,7 @@ switch (subcommand) {
 
   // ── swap ─────────────────────────────────────────────────────────
   case "swap": {
+    requireLiveConfirmation("swap");
     if (!flags.from || !flags.to || !flags.amount) die("Usage: meridian swap --from <mint> --to <mint> --amount <n>");
     const { executeTool } = await import("./tools/executor.js");
     out(await executeTool("swap_token", {

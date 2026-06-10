@@ -91,6 +91,31 @@ async function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function getErrorLogs(error) {
+  if (Array.isArray(error?.logs)) return error.logs;
+  if (typeof error?.getLogs === "function") {
+    try { return await error.getLogs(getPrimaryConnection()); } catch { /* fall through */ }
+  }
+  return null;
+}
+
+function summarizeSimulationFailure(error, logs) {
+  const message = String(error?.message || error || "Transaction failed");
+  const joinedLogs = (logs || []).join("\n");
+  const hints = [];
+  if (/insufficient funds/i.test(message) || /insufficient funds/i.test(joinedLogs)) {
+    hints.push("Insufficient token/SOL balance during simulation. This is often caused by stale wallet balance, token-side liquidity requested by the SDK, or rent/ATA/bin-array fees exceeding reserve.");
+  }
+  if (/custom program error: 0x1/i.test(message) || /custom program error: 0x1/i.test(joinedLogs)) {
+    hints.push("Program error 0x1 usually means an arithmetic/insufficient-funds failure in the invoked token/DLMM program.");
+  }
+  return [
+    `${message}`,
+    hints.length ? `Hints: ${hints.join(" ")}` : null,
+    logs?.length ? `Full simulation logs:\n${logs.join("\n")}` : null,
+  ].filter(Boolean).join("\n");
+}
+
 async function sendAndConfirmWithRetry(tx, signers, { label = "transaction", maxAttempts = 4 } = {}) {
   let lastError = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -98,6 +123,8 @@ async function sendAndConfirmWithRetry(tx, signers, { label = "transaction", max
       return await sendAndConfirmTransaction(getPrimaryConnection(), tx, signers);
     } catch (error) {
       lastError = error;
+      const logs = await getErrorLogs(error);
+      if (logs?.length) log("tx_simulation_logs", `${label} attempt ${attempt}/${maxAttempts}\n${logs.join("\n")}`);
       if (!isRetryableRpcError(error) || attempt >= maxAttempts) break;
       const delayMs = Math.min(1500 * (2 ** (attempt - 1)), 8000);
       log("rpc_retry", `${label} attempt ${attempt}/${maxAttempts} failed: ${error.message}. Retrying in ${delayMs}ms`);
@@ -107,7 +134,8 @@ async function sendAndConfirmWithRetry(tx, signers, { label = "transaction", max
   if (isRpcRateLimitError(lastError)) {
     throw new Error(`${label} blocked by RPC 429 Too Many Requests after retries. Add more RPC capacity or wait before retrying.`);
   }
-  throw lastError;
+  const logs = await getErrorLogs(lastError);
+  throw new Error(`${label} failed. ${summarizeSimulationFailure(lastError, logs)}`);
 }
 
 function deriveCloseMetricsFromTrackedAndLive(tracked, livePosition, feesUsd = 0) {

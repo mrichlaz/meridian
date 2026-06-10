@@ -11,6 +11,7 @@ import { getTopCandidates, chooseAdaptiveDeployProfile } from "./tools/screening
 import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
+import { checkCircuitBreaker, getMarketRegime, rankCandidates, sizeMultiplierForScore } from "./policy-engine.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
 import {
   startPolling,
@@ -450,7 +451,10 @@ export async function runScreeningCycle({ silent = false } = {}) {
   let screenReport = null;
   try {
     [prePositions, preBalance] = await Promise.all([getMyPositions({ force: true }), getWalletBalances()]);
-    if (prePositions.total_positions >= config.risk.maxPositions) {
+    const breaker = checkCircuitBreaker({ positions: prePositions, balance: preBalance });
+    if (breaker.blocked) {
+      screenReport = `Screening skipped — circuit breaker: ${breaker.reason}.`;
+    } else if (prePositions.total_positions >= config.risk.maxPositions) {
       log("cron", `Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions})`);
       screenReport = `Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions}).`;
     } else {
@@ -518,7 +522,17 @@ export async function runScreeningCycle({ silent = false } = {}) {
       screenReport = `Screening failed: ${pipeline.error}`;
       return screenReport;
     }
-    const { passing, filteredOut, gmgnStageCounts, gmgnAllFiltered, topCandidates, allCandidates } = pipeline;
+    let { passing, filteredOut, gmgnStageCounts, gmgnAllFiltered, topCandidates, allCandidates } = pipeline;
+    const regime = getMarketRegime();
+    const rankedPassing = rankCandidates(passing, { regime });
+    const policyFiltered = passing.filter((entry) => !rankedPassing.some((ranked) => ranked.pool?.pool === entry.pool?.pool));
+    if (policyFiltered.length > 0) {
+      filteredOut.push(...policyFiltered.map((entry) => ({
+        name: entry.pool?.name || entry.pool?.pool || "unknown",
+        reason: `policy score ${entry.policy?.score ?? "below"} below ${regime.minScore} in ${regime.regime}`,
+      })));
+    }
+    passing = rankedPassing;
     passingForFallback = passing;
     const earlyFilteredExamples = topCandidates?.filtered_examples || [];
     // Stash the full top-level result for the screening-snapshot log
@@ -641,7 +655,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     }
 
     // Build compact candidate blocks
-    const candidateBlocks = passing.map(({ pool, sw, n, ti, mem }, i) => {
+    const candidateBlocks = passing.map(({ pool, sw, n, ti, mem, policy }, i) => {
       const botPct = ti?.audit?.bot_holders_pct ?? "?";
       const top10Pct = ti?.audit?.top_holders_pct ?? "?";
       const feesSol = ti?.global_fees_sol ?? "?";
@@ -679,6 +693,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
       if (pool.gmgn) {
         block = [
           `POOL: ${pool.name} (${pool.pool})`,
+          `  policy: score=${policy?.score ?? "?"}/${policy?.minScore ?? "?"}, regime=${policy?.regime ?? "NEUTRAL"}`,
           formatGmgnCandidateForPrompt(pool),
           pvpLine,
           `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
@@ -692,6 +707,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
           : null;
         block = [
           `POOL: ${pool.name} (${pool.pool})`,
+          `  policy: score=${policy?.score ?? "?"}/${policy?.minScore ?? "?"}, regime=${policy?.regime ?? "NEUTRAL"}`,
           `  metrics: bin_step=${pool.bin_step}, fee_pct=${pool.fee_pct}%, fee_tvl=${pool.fee_active_tvl_ratio}, vol=$${pool.volume_window}, tvl=$${pool.tvl ?? pool.active_tvl}, volatility_${pool.volatility_timeframe || "30m"}=${pool.volatility}, mcap=$${pool.mcap}, organic=${pool.organic_score}${pool.token_age_hours != null ? `, age=${pool.token_age_hours}h` : ""}`,
           `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
           gmgnPriceLine,
@@ -914,7 +930,7 @@ IMPORTANT:
           if (topSurvivor) {
             const deployProfile = chooseAdaptiveDeployProfile(topSurvivor, config.strategy);
             if (deployProfile.deployable) {
-              const deployAmountOverride = Number((deployAmount * (deployProfile.sizeMultiplier || 1)).toFixed(2));
+              const deployAmountOverride = Number((deployAmount * (deployProfile.sizeMultiplier || 1) * sizeMultiplierForScore(passing[0]?.policy?.score || 66, regime)).toFixed(2));
               const initialValueUsd = currentBalance.sol_price ? deployAmountOverride * currentBalance.sol_price : null;
               const binsBelow = Math.max(35, Math.round(computeBinsBelow(topSurvivor.volatility) * (deployProfile.binsMultiplier || 1)));
               const fallbackResult = await executeTool("deploy_position", {
@@ -987,7 +1003,7 @@ IMPORTANT:
         if (topSurvivor) {
           const deployProfile = chooseAdaptiveDeployProfile(topSurvivor, config.strategy);
           if (deployProfile.deployable) {
-            const deployAmountOverride = Number((screeningDeployAmount * (deployProfile.sizeMultiplier || 1)).toFixed(2));
+            const deployAmountOverride = Number((screeningDeployAmount * (deployProfile.sizeMultiplier || 1) * sizeMultiplierForScore(passingForFallback[0]?.policy?.score || 66)).toFixed(2));
             const initialValueUsd = screeningBalance?.sol_price ? deployAmountOverride * screeningBalance.sol_price : null;
             const binsBelow = Math.max(35, Math.round(computeBinsBelow(topSurvivor.volatility) * (deployProfile.binsMultiplier || 1)));
             const fallbackResult = await executeTool("deploy_position", {
