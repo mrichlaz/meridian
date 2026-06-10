@@ -533,6 +533,33 @@ export async function runScreeningCycle({ silent = false } = {}) {
       })));
     }
     passing = rankedPassing;
+    if (config.ml?.enabled && passing.length > 0) {
+      try {
+        const { scoreCandidate: scoreMlCandidate } = await import("./ml/inference.js");
+        passing = passing.map((entry) => {
+          const ml = scoreMlCandidate({ ...entry.pool, policy: entry.policy }, {
+            studyData: entry.study?.patterns || null,
+            context: {
+              walletSol: currentBalance.sol,
+              walletTotalUsd: currentBalance.total_usd,
+              activePositions: prePositions.total_positions,
+              maxPositions: config.risk.maxPositions,
+              deployAmountSol: deployAmount,
+              policy: entry.policy,
+              flow: entry.policy?.flow,
+            },
+          });
+          const lambda = Number(ml.lambda ?? config.ml?.blendLambdaStart ?? 0.3);
+          const finalScore = Math.round(((1 - lambda) * Number(entry.policy.score || 0)) + (lambda * Number(ml.mlScore || 0.5) * 100));
+          const verdict = finalScore >= entry.policy.score + 5 ? "boost" : finalScore <= entry.policy.score - 5 ? "penalty" : "neutral";
+          return { ...entry, policy: { ...entry.policy, ml, finalScore, mlVerdict: verdict } };
+        })
+          .filter((entry) => entry.policy.finalScore >= entry.policy.minScore)
+          .sort((a, b) => b.policy.finalScore - a.policy.finalScore);
+      } catch (error) {
+        log("ml_inference", `Policy/ML blend skipped: ${error.message}`);
+      }
+    }
     passingForFallback = passing;
     const earlyFilteredExamples = topCandidates?.filtered_examples || [];
     // Stash the full top-level result for the screening-snapshot log
@@ -625,10 +652,10 @@ export async function runScreeningCycle({ silent = false } = {}) {
     // Stage ML features for all passing candidates (for training data capture)
     if (config.ml?.enabled) {
       const { extractFeatures, normalizeVector } = await import("./ml/features.js");
-      for (const { pool, study, mem } of passing) {
+      for (const { pool, study, mem, policy } of passing) {
         try {
           const rawFeatures = extractFeatures({
-            candidate: pool,
+            candidate: { ...pool, policy },
             poolMemory: null,
             studyData: study?.patterns || null,
             context: {
@@ -693,7 +720,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
       if (pool.gmgn) {
         block = [
           `POOL: ${pool.name} (${pool.pool})`,
-          `  policy: score=${policy?.score ?? "?"}/${policy?.minScore ?? "?"}, regime=${policy?.regime ?? "NEUTRAL"}, fee/vol=${policy?.flow?.feeVolatilityRatio?.toFixed?.(4) ?? "?"}, volume_persist=${policy?.flow?.volumePersistenceRatio?.toFixed?.(2) ?? "?"}${policy?.flow?.toxic ? `, toxic=${policy.flow.toxicReasons.join("; ")}` : ""}`,
+          `  policy: score=${policy?.score ?? "?"}/${policy?.minScore ?? "?"}, final=${policy?.finalScore ?? policy?.score ?? "?"}, regime=${policy?.regime ?? "NEUTRAL"}, fee/vol=${policy?.flow?.feeVolatilityRatio?.toFixed?.(4) ?? "?"}, volume_persist=${policy?.flow?.volumePersistenceRatio?.toFixed?.(2) ?? "?"}${policy?.ml ? `, ml=${policy.ml.mlScore} (${policy.mlVerdict})` : ""}${policy?.flow?.toxic ? `, toxic=${policy.flow.toxicReasons.join("; ")}` : ""}`,
           formatGmgnCandidateForPrompt(pool),
           pvpLine,
           `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
@@ -707,7 +734,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
           : null;
         block = [
           `POOL: ${pool.name} (${pool.pool})`,
-          `  policy: score=${policy?.score ?? "?"}/${policy?.minScore ?? "?"}, regime=${policy?.regime ?? "NEUTRAL"}, fee/vol=${policy?.flow?.feeVolatilityRatio?.toFixed?.(4) ?? "?"}, volume_persist=${policy?.flow?.volumePersistenceRatio?.toFixed?.(2) ?? "?"}${policy?.flow?.toxic ? `, toxic=${policy.flow.toxicReasons.join("; ")}` : ""}`,
+          `  policy: score=${policy?.score ?? "?"}/${policy?.minScore ?? "?"}, final=${policy?.finalScore ?? policy?.score ?? "?"}, regime=${policy?.regime ?? "NEUTRAL"}, fee/vol=${policy?.flow?.feeVolatilityRatio?.toFixed?.(4) ?? "?"}, volume_persist=${policy?.flow?.volumePersistenceRatio?.toFixed?.(2) ?? "?"}${policy?.ml ? `, ml=${policy.ml.mlScore} (${policy.mlVerdict})` : ""}${policy?.flow?.toxic ? `, toxic=${policy.flow.toxicReasons.join("; ")}` : ""}`,
           `  metrics: bin_step=${pool.bin_step}, fee_pct=${pool.fee_pct}%, fee_tvl=${pool.fee_active_tvl_ratio}, vol=$${pool.volume_window}, tvl=$${pool.tvl ?? pool.active_tvl}, volatility_${pool.volatility_timeframe || "30m"}=${pool.volatility}, mcap=$${pool.mcap}, organic=${pool.organic_score}${pool.token_age_hours != null ? `, age=${pool.token_age_hours}h` : ""}`,
           `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
           gmgnPriceLine,
@@ -948,7 +975,7 @@ IMPORTANT:
                 organic_score: topSurvivor.organic_score,
                 discovery_timeframe: topSurvivor.discovery_timeframe || config.screening.timeframe,
                 initial_value_usd: initialValueUsd,
-                entry_score: passing[0]?.policy?.score ?? null,
+                entry_score: passing[0]?.policy?.finalScore ?? passing[0]?.policy?.score ?? null,
                 entry_regime: regime.regime,
                 entry_fee_volatility_ratio: passing[0]?.policy?.flow?.feeVolatilityRatio ?? null,
                 entry_volume_persistence_ratio: passing[0]?.policy?.flow?.volumePersistenceRatio ?? null,
@@ -1026,7 +1053,7 @@ IMPORTANT:
               organic_score: topSurvivor.organic_score,
               discovery_timeframe: topSurvivor.discovery_timeframe || config.screening.timeframe,
               initial_value_usd: initialValueUsd,
-              entry_score: passingForFallback[0]?.policy?.score ?? null,
+              entry_score: passingForFallback[0]?.policy?.finalScore ?? passingForFallback[0]?.policy?.score ?? null,
               entry_regime: passingForFallback[0]?.policy?.regime ?? null,
               entry_fee_volatility_ratio: passingForFallback[0]?.policy?.flow?.feeVolatilityRatio ?? null,
               entry_volume_persistence_ratio: passingForFallback[0]?.policy?.flow?.volumePersistenceRatio ?? null,

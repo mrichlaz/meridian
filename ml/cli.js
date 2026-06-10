@@ -18,7 +18,7 @@ import { scoreCandidate, scoreAndRank, explainScore, getMlPromptContext, getBlen
 import { getCurrentState, resetEmotions, getEmotionTrend, getEmotionPrompt } from "./emotions.js";
 import { getActive, setActive, list as listPersonalities } from "./personalities.js";
 import { getTopCandidates } from "../tools/screening.js";
-import { normalizeVector } from "./features.js";
+import { normalizeVector, FEATURE_COUNT } from "./features.js";
 
 export async function handleMlCommand(args, config) {
   const sub = args[0] || "status";
@@ -59,7 +59,8 @@ export function mlStatus(config) {
 
   // Model
   if (model) {
-    lines.push(`Model: gen ${model.generation}, ${model.totalSamples} samples`);
+    lines.push(`Model: gen ${model.generation}, ${model.totalSamples} samples, dim ${model.inputDim}/${FEATURE_COUNT}`);
+    if (model.inputDim !== FEATURE_COUNT) lines.push(`  Warning: model feature dimension is old; run /ml-train to use new policy/flow features.`);
     const recentLoss = model.trainingLoss?.[model.trainingLoss.length - 1];
     if (recentLoss) {
       const lossValue = recentLoss.loss ?? recentLoss.total ?? recentLoss.totalLoss ?? null;
@@ -74,6 +75,28 @@ export function mlStatus(config) {
 
   // Blend
   lines.push(`Blend λ: ${lambda} (${Math.round(lambda * 100)}% ML / ${Math.round((1 - lambda) * 100)}% heuristic)`);
+
+  if (model && data.length > 0) {
+    const buckets = {
+      strong: { label: "0.70-1.00", n: 0, wins: 0, pnl: 0 },
+      mid: { label: "0.40-0.70", n: 0, wins: 0, pnl: 0 },
+      weak: { label: "0.00-0.40", n: 0, wins: 0, pnl: 0 },
+    };
+    for (const sample of data) {
+      const score = model.score(sample.features);
+      const bucket = score >= 0.7 ? buckets.strong : score >= 0.4 ? buckets.mid : buckets.weak;
+      bucket.n++;
+      bucket.wins += sample.label ? 1 : 0;
+      bucket.pnl += Number(sample.pnl_pct || 0);
+    }
+    lines.push("");
+    lines.push("── ML Predictiveness ──");
+    for (const b of [buckets.strong, buckets.mid, buckets.weak]) {
+      const wr = b.n ? Math.round((b.wins / b.n) * 100) : 0;
+      const avg = b.n ? b.pnl / b.n : 0;
+      lines.push(`Score ${b.label}: ${b.n} trades, win ${wr}%, avg PnL ${avg.toFixed(2)}%`);
+    }
+  }
 
   // Emotion
   lines.push("");

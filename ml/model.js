@@ -338,8 +338,10 @@ class LogisticRegression {
       const raw = JSON.parse(readFileSync(filepath, "utf8"));
       if (raw.type !== "logistic_regression") return null;
 
-      const m = new LogisticRegression(raw.inputDim || FEATURE_COUNT);
-      m.weights = new Float64Array(raw.weights);
+      const inputDim = raw.inputDim || raw.weights?.length || FEATURE_COUNT;
+      const m = new LogisticRegression(inputDim);
+      m.weights = new Float64Array(inputDim);
+      for (let i = 0; i < inputDim; i++) m.weights[i] = Number(raw.weights?.[i] || 0);
       m.bias = raw.bias || 0;
       m.generation = raw.generation || 0;
       m.totalSamples = raw.totalSamples || 0;
