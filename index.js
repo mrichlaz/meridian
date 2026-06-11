@@ -1339,6 +1339,8 @@ function formatCandidates(candidates) {
 export function getDeterministicCloseRule(position, managementConfig) {
   const tracked = getTrackedPosition(position.position);
   const pnlSuspect = (() => {
+    // Couldn't-price-this-tick flag (e.g. Jupiter outage) — never act on PnL rules.
+    if (position.pnl_pct_suspicious) return true;
     if (position.pnl_pct == null) return false;
     // Only suspect if PnL is so extreme (e.g. < -95%) that it likely contradicts tracked USD value
     if (position.pnl_pct <= -95) {
