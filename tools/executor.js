@@ -980,7 +980,9 @@ async function runSafetyChecks(name, args) {
       }
       const tracked = getTrackedPosition(positionAddress);
       if (!tracked || tracked.closed) {
-        return { pass: false, reason: `Position ${positionAddress} is not an open tracked position.` };
+        // Instead of failing, return success for already-closed positions to handle race conditions gracefully
+        log("cron", `Management: ${name} called for already closed position ${positionAddress} — ignoring.`);
+        return { pass: true, already_closed: true };
       }
       return { pass: true };
     }

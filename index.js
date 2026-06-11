@@ -369,10 +369,40 @@ export async function runManagementCycle({ silent = false, triggerScreening = tr
       return a.action !== "STAY";
     });
 
-    if (actionPositions.length > 0) {
-      log("cron", `Management: ${actionPositions.length} action(s) needed — invoking LLM [model: ${config.llm.managementModel}]`);
+    // 1. Handle Immediate Actions (CLOSE/CLAIM) - NO LLM REQUIRED
+    const immediateActions = actionPositions.filter(p => {
+      const a = actionMap.get(p.position);
+      return a.action === "CLOSE" || a.action === "CLAIM";
+    });
 
-      const actionBlocks = actionPositions.map((p) => {
+    for (const p of immediateActions) {
+      const act = actionMap.get(p.position);
+      log("cron", `Management: Executing immediate ${act.action} for ${p.pair} (${act.reason || ""})`);
+      
+      const toolName = act.action === "CLOSE" ? "close_position" : "claim_fees";
+      // FIX: Use position_address to match executor expectations
+      const result = await executeTool(toolName, { position_address: p.position });
+
+      if (result?.success) {
+        log("cron", `Management: Successfully executed ${act.action} for ${p.pair}`);
+        if (telegramEnabled()) {
+          await sendMessage(`⚡ ${act.action} executed for ${p.pair}\nReason: ${act.reason || "Rule triggered"}`);
+        }
+      } else {
+        log("cron_error", `Management: Failed to execute ${act.action} for ${p.pair}: ${result?.error || "Unknown error"}`);
+      }
+    }
+
+    // 2. Handle LLM Actions (INSTRUCTION)
+    const llmActions = actionPositions.filter(p => {
+      const a = actionMap.get(p.position);
+      return a.action === "INSTRUCTION";
+    });
+
+    if (llmActions.length > 0) {
+      log("cron", `Management: ${llmActions.length} instruction(s) pending — invoking LLM [model: ${config.llm.managementModel}]`);
+
+      const actionBlocks = llmActions.map((p) => {
         const act = actionMap.get(p.position);
         return [
           `POSITION: ${p.pair} (${p.position})`,
@@ -385,25 +415,21 @@ export async function runManagementCycle({ silent = false, triggerScreening = tr
       }).join("\n\n");
 
       const { content } = await agentLoop(`
-MANAGEMENT ACTION REQUIRED — ${actionPositions.length} position(s)
+MANAGEMENT INSTRUCTION REQUIRED — ${llmActions.length} position(s)
 
 ${actionBlocks}
 
 RULES:
-- CLOSE: call close_position only — it handles fee claiming internally, do NOT call claim_fees first
-- CLAIM: call claim_fees with position address
 - INSTRUCTION: evaluate the instruction condition. If met → close_position. If not → HOLD, do nothing.
-- ⚡ exit alerts: close immediately, no exceptions
-
-Execute the required actions. Do NOT re-evaluate CLOSE/CLAIM — rules already applied. Just execute.
-After executing, write a brief one-line result per position.
+- Execute the required actions. Do NOT re-evaluate CLOSE/CLAIM — rules already applied. Just execute.
+- After executing, write a brief one-line result per position.
       `, config.llm.maxSteps, [], "MANAGER", config.llm.managementModel, 2048, {
         onToolStart: async ({ name }) => { await liveMessage?.toolStart(name); },
         onToolFinish: async ({ name, result, success }) => { await liveMessage?.toolFinish(name, result, success); },
       });
 
       mgmtReport += `\n\n${content}`;
-    } else {
+    } else if (immediateActions.length === 0) {
       log("cron", "Management: all positions STAY — skipping LLM");
     }
 
@@ -1312,10 +1338,12 @@ export function getDeterministicCloseRule(position, managementConfig) {
   const tracked = getTrackedPosition(position.position);
   const pnlSuspect = (() => {
     if (position.pnl_pct == null) return false;
-    if (position.pnl_pct > -90) return false;
-    if (tracked?.amount_sol && (position.total_value_usd ?? 0) > 0.01) {
-      log("cron_warn", `Suspect PnL for ${position.pair}: ${position.pnl_pct}% but position still has value — skipping PnL rules`);
-      return true;
+    // Only suspect if PnL is so extreme (e.g. < -95%) that it likely contradicts tracked USD value
+    if (position.pnl_pct <= -95) {
+      if (tracked?.amount_sol && (position.total_value_usd ?? 0) > (position.amount_sol * 0.01)) {
+        log("cron_warn", `Suspect PnL for ${position.pair}: ${position.pnl_pct}% but position still has value — skipping PnL rules`);
+        return true; 
+      }
     }
     return false;
   })();
