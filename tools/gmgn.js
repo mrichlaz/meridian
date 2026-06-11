@@ -3,7 +3,6 @@ import { setDefaultResultOrder } from "dns";
 import { config } from "../config.js";
 import { log } from "../logger.js";
 import { fetchChartIndicatorsForMint } from "./chart-indicators.js";
-
 // Force IPv4 — GMGN OpenAPI does not support IPv6
 setDefaultResultOrder("ipv4first");
 
@@ -29,12 +28,14 @@ function getApiKey() {
   return key;
 }
 
+export function hasGmgnApiKey() {
+  return !!(config.gmgn?.apiKey || process.env.GMGN_API_KEY);
+}
+
 function normalizeInterval(value, fallback = "5m") {
   const normalized = String(value || fallback).trim();
   return SUPPORTED_INTERVALS.has(normalized) ? normalized : fallback;
 }
-
-
 function appendParams(url, params = {}) {
   for (const [key, value] of Object.entries(params)) {
     if (value == null) continue;
@@ -730,4 +731,23 @@ export function formatGmgnCandidateForPrompt(p) {
 
 function round(n) {
   return n != null ? Math.round(n) : null;
+}
+
+// ─── Token fees (SOL) for the minTokenFeesSol gate ──────────────
+// Returns { total_fee, trade_fee } in SOL, or null on missing key / error
+// so callers can fall back to Jupiter's fee figure.
+export async function getGmgnTokenFees(mint) {
+  if (!mint || !hasGmgnApiKey()) return null;
+  try {
+    const payload = await gmgnFetch("/v1/token/info", { params: { chain: "sol", address: mint } });
+    const info = payload?.data?.data || payload?.data || payload;
+    if (!info || typeof info !== "object") return null;
+    return {
+      total_fee: num(info.total_fee),
+      trade_fee: num(info.trade_fee),
+    };
+  } catch (error) {
+    log("gmgn", `token fees lookup failed for ${String(mint).slice(0, 8)}: ${error.message}`);
+    return null;
+  }
 }

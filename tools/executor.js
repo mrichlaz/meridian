@@ -295,6 +295,10 @@ function normalizeConfigValue(key, value) {
     "hiveMindPullMode",
     "publicApiKey",
     "agentMeridianApiUrl",
+    "pnlSource",
+    "pnlRpcUrl",
+    "gmgnFeeSource",
+    "gmgnApiKey",
   ]);
   const numberKeys = new Set([
     "mlTrainEvery", "mlMinSamples", "mlBatchSize", "mlEpochs", "mlLearningRate",
@@ -523,6 +527,14 @@ const toolMap = {
       darwinFloor: ["darwin", "weightFloor", ["darwinFloor"]],
       darwinCeiling: ["darwin", "weightCeiling", ["darwinCeiling"]],
       darwinMinSamples: ["darwin", "minSamples", ["darwinMinSamples"]],
+      // pnl fetcher / poller
+      pnlSource: ["pnl", "source", ["pnlSource"]],
+      pnlRpcUrl: ["pnl", "rpcUrl", ["pnlRpcUrl"]],
+      pnlPollIntervalSec: ["pnl", "pollIntervalSec", ["pnlPollIntervalSec"]],
+      pnlDepositCacheTtlSec: ["pnl", "depositCacheTtlSec", ["pnlDepositCacheTtlSec"]],
+      // gmgn fee source
+      gmgnFeeSource: ["gmgn", "feeSource", ["gmgnFeeSource"]],
+      gmgnApiKey: ["gmgn", "apiKey", ["gmgnApiKey"]],
       // chart indicators
       chartIndicatorsEnabled: ["indicators", "enabled", ["chartIndicators", "enabled"]],
       indicatorEntryPreset: ["indicators", "entryPreset", ["chartIndicators", "entryPreset"]],
@@ -647,10 +659,10 @@ const toolMap = {
     fs.writeFileSync(USER_CONFIG_PATH, JSON.stringify(userConfig, null, 2));
 
     // Restart cron jobs if intervals changed
-    const intervalChanged = applied.managementIntervalMin != null || applied.screeningIntervalMin != null;
+    const intervalChanged = applied.managementIntervalMin != null || applied.screeningIntervalMin != null || applied.pnlPollIntervalSec != null;
     if (intervalChanged && _cronRestarter) {
       _cronRestarter();
-      log("config", `Cron restarted — management: ${config.schedule.managementIntervalMin}m, screening: ${config.schedule.screeningIntervalMin}m`);
+      log("config", `Cron restarted — management: ${config.schedule.managementIntervalMin}m, screening: ${config.schedule.screeningIntervalMin}m, pnlPoll: ${config.pnl.pollIntervalSec}s`);
     }
 
     // Skip repeated volatility-driven interval changes; they are operational tuning, not reusable lessons.

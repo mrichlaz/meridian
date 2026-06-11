@@ -202,6 +202,8 @@ export const config = {
     minTotalFeeSol: gmgnValue("minTotalFeeSol", "gmgnMinTotalFeeSol", 30),
     maxBotDegenRate: gmgnValue("maxBotDegenRate", "gmgnMaxBotDegenRate", 0.4),
     athFilterPct: gmgnValue("athFilterPct", "gmgnAthFilterPct", null),
+    // gmgn = use GMGN total_fee for global_fees_sol; jupiter = legacy Jupiter fees
+    feeSource: nonEmptyString(gmgnUserConfig.feeSource, u.gmgnFeeSource, "gmgn"),
   },
 
   // ─── LLM Settings ──────────────────────
@@ -276,6 +278,17 @@ export const config = {
     url: nonEmptyString(u.agentMeridianApiUrl, process.env.AGENT_MERIDIAN_API_URL, DEFAULT_AGENT_MERIDIAN_API_URL),
     publicApiKey: nonEmptyString(u.publicApiKey, process.env.PUBLIC_API_KEY, DEFAULT_AGENT_MERIDIAN_PUBLIC_KEY),
     lpAgentRelayEnabled: u.lpAgentRelayEnabled ?? false,
+  },
+
+  // ─── PnL fetcher / poller (public infra: RPC + Meteora deposits + Jupiter) ──
+  pnl: {
+    // Live position value comes from on-chain reads on this RPC.
+    // Defaults to the public pump.helius endpoint so the aggressive poller
+    // never burns the main RPC_URL or the LPAgent sponsor budget.
+    rpcUrl: nonEmptyString(u.pnlRpcUrl, process.env.PNL_RPC_URL, "https://pump.helius-rpc.com"),
+    source: nonEmptyString(u.pnlSource, "rpc"), // rpc | meteora (fallback-only)
+    pollIntervalSec: Number(u.pnlPollIntervalSec ?? 3),
+    depositCacheTtlSec: Number(u.pnlDepositCacheTtlSec ?? 300),
   },
 
   jupiter: {
