@@ -419,7 +419,7 @@ Reason is optional but helpful — logged as a lesson when provided.`,
         properties: {
           changes: {
             type: "object",
-            description: "Key-value pairs of settings to update. e.g. { \"takeProfitPct\": 8 }"
+            description: "Key-value pairs of settings to update. The CURRENT actual values are in the Config section above — never guess them."
           },
           reason: {
             type: "string",
