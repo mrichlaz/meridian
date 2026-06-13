@@ -96,8 +96,8 @@ if (isMain) {
   startBotTracker();
 }
 
-const TP_PCT = config.management.takeProfitPct;
-const DEPLOY = config.management.deployAmountSol;
+// Use a fresh read every time — config evolves during runtime.
+function getDeployAmount() { return config.management.deployAmountSol; }
 
 // ═══════════════════════════════════════════
 //  CYCLE TIMERS
@@ -2919,7 +2919,7 @@ if (isMain && isTTY) {
 
   console.log(`
 Commands:
-  1 / 2 / 3 ...  Deploy ${DEPLOY} SOL into that pool
+  1 / 2 / 3 ...  Deploy ${getDeployAmount()} SOL into that pool
   auto           Let the agent pick and deploy automatically
   /status        Refresh wallet + positions
   /screen        Refresh deterministic candidate list
@@ -2944,9 +2944,9 @@ Commands:
     if (!isNaN(pick) && pick >= 1 && pick <= latest.length) {
       await runBusy(async () => {
         const pool = latest[pick - 1];
-        console.log(`\nDeploying ${DEPLOY} SOL into ${pool.name}...\n`);
+        console.log(`\nDeploying ${getDeployAmount()} SOL into ${pool.name}...\n`);
         const { content: reply } = await agentLoop(
-          `Deploy ${DEPLOY} SOL into pool ${pool.pool} (${pool.name}). Call get_active_bin first then deploy_position. Report result.`,
+          `Deploy ${getDeployAmount()} SOL into pool ${pool.pool} (${pool.name}). Call get_active_bin first then deploy_position. Report result.`,
           config.llm.maxSteps,
           [],
           "SCREENER"
@@ -2962,7 +2962,7 @@ Commands:
       await runBusy(async () => {
         console.log("\nAgent is picking and deploying...\n");
         const { content: reply } = await agentLoop(
-          `get_top_candidates and deploy only if a candidate is clearly worth it. If there is only one weak candidate, report NO DEPLOY. For a valid deploy, use amount_y=${DEPLOY}, amount_x=0, bins_above=0, and bins_below from positive volatility. Execute now, don't ask.`,
+          `get_top_candidates and deploy only if a candidate is clearly worth it. If there is only one weak candidate, report NO DEPLOY. For a valid deploy, use amount_y=${getDeployAmount()}, amount_x=0, bins_above=0, and bins_below from positive volatility. Execute now, don't ask.`,
           config.llm.maxSteps,
           [],
           "SCREENER"
