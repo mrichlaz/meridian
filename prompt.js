@@ -88,7 +88,7 @@ The same pool will show much smaller numbers on 5m vs 24h. Adjust your expectati
   timeframe │ fee_active_tvl_ratio │ volume (good pool)
   ──────────┼─────────────────────┼────────────────────
   5m        │ ≥ 0.02% = decent    │ ≥ $500
-  15m       │ ≥ 0.05% = decent    │ ≥ $2k
+  30m       │ ≥ 0.15% = decent    │ ≥ $1k
   1h        │ ≥ 0.2%  = decent    │ ≥ $10k
   2h        │ ≥ 0.4%  = decent    │ ≥ $20k
   4h        │ ≥ 0.8%  = decent    │ ≥ $40k
