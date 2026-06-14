@@ -1145,6 +1145,9 @@ const PERFORMANCE_SIGNAL_FIELDS = [
   "study_win_rate",
   "hive_consensus",
   "volatility",
+  "entry_mcap",
+  "entry_tvl",
+  "entry_volume",
 ];
 
 function resolvePerformanceSignalSnapshot({ poolAddress, baseMint, tracked }) {
