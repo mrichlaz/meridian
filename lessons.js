@@ -164,7 +164,7 @@ export async function recordPerformance(perf) {
   }
 
   // Evolve thresholds every 5 closed positions
-  if (data.performance.length % MIN_EVOLVE_POSITIONS === 0) {
+  if (data.performance.length % MIN_EVOLVE_POSITIONS === 0 && config.management.evolveEnabled !== false) {
     const { config, reloadScreeningThresholds } = await import("./config.js");
     const result = evolveThresholds(data.performance, config);
     if (result?.changes && Object.keys(result.changes).length > 0) {

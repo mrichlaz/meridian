@@ -139,6 +139,8 @@ export const config = {
     pnlSanityMaxDiffPct:   u.pnlSanityMaxDiffPct   ?? 5,    // max allowed diff between reported and derived pnl % before ignoring a tick
     // SOL mode — positions, PnL, and balances reported in SOL instead of USD
     solMode:               u.solMode               ?? false,
+    // Auto-threshold evolution (takeProfitPct, stopLossPct, etc. from perf data)
+    evolveEnabled:         u.evolveEnabled         ?? true,
   },
 
   // ─── Strategy Mapping ───────────────────
