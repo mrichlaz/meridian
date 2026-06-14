@@ -178,6 +178,9 @@ function getRawPoolScreeningRejectReason(pool, s) {
   if (pool?.quote_token_has_critical_warnings === true) return "quote token has critical warnings";
   if (pool?.base_token_has_high_single_ownership === true) return "base token has high single ownership";
   if (pool?.pool_type && pool.pool_type !== "dlmm") return `pool_type ${pool.pool_type} is not dlmm`;
+  // Single-side SOL agent — reject pools where the quote token is not SOL
+  const quoteMint = quote?.address;
+  if (quoteMint && quoteMint !== config.tokens.SOL) return `quote token ${quote.symbol || quoteMint.slice(0, 8)} is not SOL`;
 
   if (mcap == null || mcap < s.minMcap) return `mcap ${mcap ?? "unknown"} below minMcap ${s.minMcap}`;
   if (mcap > s.maxMcap) return `mcap ${mcap} above maxMcap ${s.maxMcap}`;

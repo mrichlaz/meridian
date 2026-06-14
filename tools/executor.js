@@ -869,6 +869,16 @@ async function runSafetyChecks(name, args) {
 
       const deployAmountY = Number(args.amount_y ?? args.amount_sol ?? 0);
       const deployAmountX = Number(args.amount_x ?? 0);
+      // Defense-in-depth: reject deploy if the pool's quote token is not SOL
+      if (deployDetail) {
+        const quoteMint = deployDetail?.token_y?.address;
+        if (quoteMint && quoteMint !== config.tokens.SOL) {
+          return {
+            pass: false,
+            reason: `Pool quote token ${deployDetail.token_y?.symbol || quoteMint.slice(0, 8)} is not SOL — this agent only supports SOL-quoted pools.`,
+          };
+        }
+      }
       if (Number.isFinite(deployAmountX) && deployAmountX > 0) {
         return {
           pass: false,
