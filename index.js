@@ -790,6 +790,9 @@ export async function runScreeningCycle({ silent = false } = {}) {
           smart_wallets_present: (sw?.in_pool?.length ?? 0) > 0,
           narrative_quality:     n?.narrative ? "present" : "absent",
           volatility:            pool.volatility            ?? null,
+          entry_mcap:            pool.mcap                  ?? null,
+          entry_tvl:             pool.tvl                   ?? null,
+          entry_volume:          pool.volume_window         ?? null,
         });
       }
 

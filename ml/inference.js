@@ -359,4 +359,4 @@ function computeEmotionalBoost(mlScore, emo, personality) {
 /**
  * Try to load signal weights from the Darwinian system.
  */
-export { _blendLambda, _lastScoringTime, invalidateBlendLambda };
+export { _blendLambda, _lastScoringTime };
