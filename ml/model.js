@@ -89,6 +89,12 @@ class LogisticRegression {
     this.generation = 0;
     this.totalSamples = 0;
     this.trainingLoss = [];
+    this.predictiveness = 0;
+    // Xavier initialization: small random weights centered on zero
+    // avoids all-zero symmetry that Adam + L2 can't escape
+    for (let i = 0; i < inputDim; i++) {
+      this.weights[i] = (Math.random() - 0.5) * 0.02;
+    }
   }
 
   // ─── Forward pass ─────────────────────────────────────────
@@ -293,6 +299,16 @@ class LogisticRegression {
     // Clear adam state for next training run (fresh momentum)
     this._adam = null;
 
+    // Compute predictiveness: fraction of predictions that are meaningfully
+    // outside the neutral shrugging zone [0.35, 0.65]. A model that always
+    // outputs ~0.5 has 0 predictiveness and shouldn't get blend weight.
+    let outsideNeutral = 0;
+    for (let i = 0; i < n; i++) {
+      const s = this.score(features[i]);
+      if (s < 0.35 || s > 0.65) outsideNeutral++;
+    }
+    this.predictiveness = n > 0 ? outsideNeutral / n : 0;
+
     return {
       trained: true,
       samples: n,
@@ -327,6 +343,7 @@ class LogisticRegression {
       bias: this.bias,
       generation: this.generation,
       totalSamples: this.totalSamples,
+      predictiveness: this.predictiveness,
       trainingLoss: this.trainingLoss.slice(-20),
     };
     writeFileSync(filepath, JSON.stringify(blob, null, 2));
@@ -345,6 +362,7 @@ class LogisticRegression {
       m.bias = raw.bias || 0;
       m.generation = raw.generation || 0;
       m.totalSamples = raw.totalSamples || 0;
+      m.predictiveness = raw.predictiveness ?? 0;
       m.trainingLoss = raw.trainingLoss || [];
       return m;
     } catch {

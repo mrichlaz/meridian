@@ -90,7 +90,11 @@ export function scoreCandidate(candidate, opts = {}) {
     criticValue: round(criticValue),
     heuristicScore: round(heuristicScore),
     blendedScore: round(blendedScore),
-    confidence: modelUsed ? round(emo.confidence || 0.5) : 0,
+    // Confidence = predictiveness (can the model actually separate?) times
+    // blended score range — a model that always outputs 0.5 has zero confidence.
+    confidence: modelUsed
+      ? round((getBlendLambda() * (Math.abs(mlScore - 0.5) * 2)) + 0.05, 2)
+      : 0,
     modelUsed,
     lambda,
   };
@@ -270,7 +274,9 @@ export function explainScore(candidate, opts = {}) {
 
 /**
  * Get the current blend lambda (weight of ML vs heuristic).
- * Incremented when the model proves itself on validation data.
+ * Starts low (0.1) and ramps up only when the model shows it can
+ * separate winners from losers — measured by score spread across
+ * prediction buckets.
  */
 export function getBlendLambda() {
   if (_blendLambda != null) return _blendLambda;
@@ -278,7 +284,11 @@ export function getBlendLambda() {
   try {
     const model = LogisticRegression.load();
     if (model && model.totalSamples > 10) {
-      _blendLambda = 0.3;
+      // Start at 0.1, scale toward 0.3 as model proves predictiveness.
+      // predictiveness: fraction of samples with score outside [0.35, 0.65]
+      // — i.e. the model is actually making a call, not shrugging 0.5.
+      const p = model.predictiveness || 0;
+      _blendLambda = 0.1 + Math.min(0.4, p * 0.5);
     }
   } catch {}
 
