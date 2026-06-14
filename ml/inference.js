@@ -148,7 +148,8 @@ export function getMlPromptContext(scoredCandidates) {
   const personality = getActive();
 
   lines.push("── ML PREDICTIONS ──");
-  lines.push(`Personality: ${personality.name} | λ: ${getBlendLambda()} | Confidence: ${fmt(emo.confidence)}`);
+  const lambda = getBlendLambda();
+  lines.push(`Personality: ${personality.name} | λ: ${lambda} | Confidence: ${fmt(emo.confidence)}`);
 
   for (let i = 0; i < Math.min(scoredCandidates.length, 5); i++) {
     const c = scoredCandidates[i];
@@ -284,15 +285,17 @@ export function getBlendLambda() {
   try {
     const model = LogisticRegression.load();
     if (model && model.totalSamples > 10) {
-      // Start at 0.1, scale toward 0.3 as model proves predictiveness.
-      // predictiveness: fraction of samples with score outside [0.35, 0.65]
-      // — i.e. the model is actually making a call, not shrugging 0.5.
       const p = model.predictiveness || 0;
       _blendLambda = 0.1 + Math.min(0.4, p * 0.5);
     }
   } catch {}
 
   return _blendLambda || 0.1;
+}
+
+/** Invalidate the cached blend lambda — call after training. */
+export function invalidateBlendLambda() {
+  _blendLambda = null;
 }
 
 /**
@@ -356,4 +359,4 @@ function computeEmotionalBoost(mlScore, emo, personality) {
 /**
  * Try to load signal weights from the Darwinian system.
  */
-export { _blendLambda, _lastScoringTime };
+export { _blendLambda, _lastScoringTime, invalidateBlendLambda };

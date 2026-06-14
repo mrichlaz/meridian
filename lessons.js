@@ -186,8 +186,10 @@ export async function recordPerformance(perf) {
       try {
         const { onModelTrained } = await import("./ml/emotions.js");
         const { trainModel } = await import("./ml/trainer.js");
+        const { invalidateBlendLambda } = await import("./ml/inference.js");
         const trainResult = await trainModel({ config: config.ml });
         if (trainResult.trained) {
+          invalidateBlendLambda(); // pick up new predictiveness
           onModelTrained(trainResult);
           log("evolve", `ML: trained on ${trainResult.trainSize} samples, loss=${trainResult.finalLoss?.totalLoss?.toFixed(4) || "N/A"}`);
         }
