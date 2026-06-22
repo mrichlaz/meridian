@@ -669,6 +669,11 @@ export async function deployPosition({
 
   if (process.env.DRY_RUN === "true") {
     return {
+      // success:false so the executor does NOT fire the "✅ Deployed"
+      // Telegram notification. dry_run:true lets callers (manual /deploy,
+      // LLM agent loop) detect the simulated result and render their own
+      // honest "would deploy" message.
+      success: false,
       dry_run: true,
       would_deploy: {
         pool_address,
@@ -813,16 +818,70 @@ export async function deployPosition({
           entry_volume_persistence_ratio,
           entry_toxic_flow,
         });
+
+        appendDecision({
+          type: "deploy",
+          actor: "SCREENER",
+          pool: pool_address,
+          pool_name,
+          position: positionAddress,
+          summary: `Relay deployed ${finalAmountY} SOL with ${activeStrategy}`,
+          reason: `Chosen range ${minBinId}→${maxBinId} around active bin ${activeBin.binId}`,
+          risks: [
+            normalizedVolatility != null ? `volatility ${normalizedVolatility}` : null,
+            fee_tvl_ratio != null ? `fee/TVL ${fee_tvl_ratio}%` : null,
+          ].filter(Boolean),
+          metrics: {
+            amount_sol: finalAmountY,
+            strategy: activeStrategy,
+            active_bin: activeBin.binId,
+            min_bin: minBinId,
+            max_bin: maxBinId,
+            downside_pct: downside_pct ?? downsideCoveragePct,
+            upside_pct: upside_pct ?? upsideCoveragePct,
+          },
+        });
+
+        return {
+          success: true,
+          relay: true,
+          request_id: order.requestId,
+          position: positionAddress,
+          pool: pool_address,
+          pool_name,
+          bin_range: { min: minBinId, max: maxBinId, active: activeBin.binId },
+          price_range: { min: minPrice, max: maxPrice },
+          range_coverage: {
+            downside_pct: downsideCoveragePct,
+            upside_pct: upsideCoveragePct,
+            width_pct: totalWidthPct,
+            active_price: activePrice,
+          },
+          bin_step: actualBinStep,
+          base_fee: actualBaseFee,
+          strategy: activeStrategy,
+          wide_range: isWideRange,
+          amount_x: finalAmountX,
+          amount_y: finalAmountY,
+          txs: normalizeExecutionSignatures(submit),
+        };
       }
 
+      // Relay accepted the order but we could not find the new position
+      // on-chain within the verification window. Treat this as a failure:
+      // the executor will not fire the "✅ Deployed" Telegram card, the
+      // state tracker will not record a phantom position, and the caller
+      // can surface a real error to the user.
+      const submitTxs = normalizeExecutionSignatures(submit);
+      log("deploy_warn", `Relay deploy submitted but position not found on-chain after 5s — tx: ${submitTxs.join(", ") || "none"}`);
       appendDecision({
-        type: "deploy",
+        type: "no_deploy",
         actor: "SCREENER",
         pool: pool_address,
         pool_name,
-        position: positionAddress,
-        summary: `Relay deployed ${finalAmountY} SOL with ${activeStrategy}`,
-        reason: `Chosen range ${minBinId}→${maxBinId} around active bin ${activeBin.binId}`,
+        position: null,
+        summary: `Relay deploy submitted but position not found on-chain`,
+        reason: `Chosen range ${minBinId}→${maxBinId} around active bin ${activeBin.binId} — verification window expired`,
         risks: [
           normalizedVolatility != null ? `volatility ${normalizedVolatility}` : null,
           fee_tvl_ratio != null ? `fee/TVL ${fee_tvl_ratio}%` : null,
@@ -837,12 +896,11 @@ export async function deployPosition({
           upside_pct: upside_pct ?? upsideCoveragePct,
         },
       });
-
       return {
-        success: true,
+        success: false,
+        error: "Relay deploy submitted but position not found on-chain after verification window",
         relay: true,
         request_id: order.requestId,
-        position: positionAddress,
         pool: pool_address,
         pool_name,
         bin_range: { min: minBinId, max: maxBinId, active: activeBin.binId },
@@ -859,7 +917,7 @@ export async function deployPosition({
         wide_range: isWideRange,
         amount_x: finalAmountX,
         amount_y: finalAmountY,
-        txs: normalizeExecutionSignatures(submit),
+        txs: submitTxs,
       };
     } catch (error) {
       log("deploy_error", `Relay deploy failed: ${error.message}`);
@@ -1691,8 +1749,25 @@ export async function closePosition({ position_address, reason }) {
     const poolAddress = await lookupPoolForPosition(position_address, wallet.publicKey.toString());
     const poolMeta = await getPoolMetadata(poolAddress);
 
-    // Guard: check if the position account still exists on-chain
-    const posAccount = await getPrimaryConnection().getAccountInfo(new PublicKey(position_address)).catch(() => null);
+    // Guard: check if the position account still exists on-chain.
+    // We deliberately do NOT swallow RPC errors here — if the primary RPC
+    // fails, we must abort the close with a retryable failure rather than
+    // treating "no response" as "account gone" and returning a false
+    // success that marks the local position as closed while it remains
+    // open on-chain.
+    let posAccount = null;
+    try {
+      posAccount = await getPrimaryConnection().getAccountInfo(new PublicKey(position_address));
+    } catch (rpcError) {
+      log("close_warn", `RPC error checking position ${position_address.slice(0, 12)}: ${rpcError.message} — aborting close to avoid false success`);
+      return {
+        success: false,
+        error: `RPC error verifying position state: ${rpcError.message}`,
+        position: position_address,
+        pool: poolAddress,
+        retryable: true,
+      };
+    }
     if (!posAccount || posAccount.owner.equals(SystemProgram.programId)) {
       log("close_warn", `Position ${position_address.slice(0, 12)} already closed on-chain (account gone or System Program owner) — cleaning up local state`);
       recordClose(position_address, reason || "already closed");

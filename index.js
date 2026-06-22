@@ -383,11 +383,18 @@ export async function runManagementCycle({ silent = false, triggerScreening = tr
       // FIX: Use position_address to match executor expectations
       const result = await executeTool(toolName, { position_address: p.position });
 
-      if (result?.success) {
+      if (result?.success && !result.already_closed) {
         log("cron", `Management: Successfully executed ${act.action} for ${p.pair}`);
         if (telegramEnabled()) {
           await sendMessage(`⚡ ${act.action} executed for ${p.pair}\nReason: ${act.reason || "Rule triggered"}`);
         }
+      } else if (result?.already_closed) {
+        // Position was already closed when the tool ran (on-chain account
+        // gone, or local state already marked closed). The executor
+        // already suppressed the "🔒 Closed" card for this case, and we
+        // must not claim "⚡ CLOSE executed" either — that would be a
+        // false success that misleads the operator.
+        log("cron", `Management: ${act.action} for ${p.pair} was already closed — skipping Telegram notification`);
       } else {
         log("cron_error", `Management: Failed to execute ${act.action} for ${p.pair}: ${result?.error || "Unknown error"}`);
       }
@@ -2258,6 +2265,21 @@ async function telegramHandler(msg) {
     try {
       const idx = parseInt(deployMatch[1]) - 1;
       const { candidate, result, deployAmount, binsBelow } = await deployLatestCandidate(idx);
+      if (result.dry_run) {
+        const wouldDeploy = result.would_deploy || {};
+        await sendMessage([
+          `⚠️ DRY RUN — would deploy ${candidate.name}`,
+          `Pool: ${candidate.pool}`,
+          `Amount: ${deployAmount} SOL`,
+          `Strategy: ${wouldDeploy.strategy || config.strategy.strategy} | binsBelow: ${wouldDeploy.bins_below ?? binsBelow}`,
+          `No transaction sent. Set DRY_RUN=false in .env to go live.`,
+        ].join("\n")).catch(() => {});
+        return;
+      }
+      if (!result.success) {
+        await sendMessage(`❌ Deploy failed for ${candidate.name}: ${result.error || "unknown error"}`).catch(() => {});
+        return;
+      }
       const coverage = result.range_coverage
         ? `Range: ${fmtPct(result.range_coverage.downside_pct)} downside | ${fmtPct(result.range_coverage.upside_pct)} upside`
         : `Strategy: ${config.strategy.strategy} | binsBelow: ${binsBelow}`;

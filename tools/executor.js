@@ -770,7 +770,12 @@ export async function executeTool(name, args) {
       if (name === "swap_token" && result.tx) {
         notifySwap({ inputSymbol: args.input_mint?.slice(0, 8), outputSymbol: args.output_mint === "So11111111111111111111111111111111111111112" || args.output_mint === "SOL" ? "SOL" : args.output_mint?.slice(0, 8), amountIn: result.amount_in, amountOut: result.amount_out, tx: result.tx }).catch(() => {});
       } else if (name === "deploy_position") {
-        notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, priceRange: result.price_range, rangeCoverage: result.range_coverage, binStep: result.bin_step, baseFee: result.base_fee }).catch(() => {});
+        if (result.dry_run) {
+          // Dry-run must not announce "Deployed" — the position does not exist.
+          log("executor", `Dry-run deploy — skipping Telegram notification for ${result.pool_name || args.pool_name || args.pool_address?.slice(0, 8)}`);
+        } else {
+          notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, priceRange: result.price_range, rangeCoverage: result.range_coverage, binStep: result.bin_step, baseFee: result.base_fee }).catch(() => {});
+        }
         const v = Number(args.volatility);
         const nextInterval = Number.isFinite(v) && v >= 5 ? 3 : Number.isFinite(v) && v >= 2 ? 5 : 10;
         if (config.schedule.managementIntervalMin !== nextInterval) {
@@ -779,32 +784,42 @@ export async function executeTool(name, args) {
           log("config", `Auto-set management interval to ${nextInterval}m after deploy volatility=${args.volatility ?? "unknown"}`);
         }
       } else if (name === "close_position") {
-        notifyClose({
-          pair: result.pool_name || args.position_address?.slice(0, 8),
-          pnlUsd: result.pnl_usd ?? 0,
-          pnlPct: result.pnl_pct ?? 0,
-          reason: result.reason || args.reason,
-        }).catch(() => {});
-        // Note low-yield closes in pool memory so screener avoids redeploying
-        if (args.reason && args.reason.toLowerCase().includes("yield")) {
-          const poolAddr = result.pool || args.pool_address;
-          if (poolAddr) addPoolNote({ pool_address: poolAddr, note: `Closed: low yield (fee/TVL below threshold) at ${new Date().toISOString().slice(0,10)}` }).catch?.(() => {});
-        }
-        // Auto-swap base token back to SOL unless user said to hold
-        if (!args.skip_swap && result.base_mint) {
-          try {
-            const balances = await getWalletBalances({});
-            const token = balances.tokens?.find(t => t.mint === result.base_mint);
-            if (token && token.usd >= 0.10) {
-              log("executor", `Auto-swapping ${token.symbol || result.base_mint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL`);
-              const swapResult = await swapToken({ input_mint: result.base_mint, output_mint: "SOL", amount: token.balance });
-              // Tell the model the swap already happened so it doesn't call swap_token again
-              result.auto_swapped = true;
-              result.auto_swap_note = `Base token already auto-swapped back to SOL (${token.symbol || result.base_mint.slice(0, 8)} → SOL). Do NOT call swap_token again.`;
-              if (swapResult?.amount_out) result.sol_received = swapResult.amount_out;
+        if (result.already_closed) {
+          // Already-closed path means the tool itself short-circuited because
+          // the on-chain account is gone or the state was already closed. The
+          // management cycle or /close command owns the user-facing message
+          // for this case; we must not double-announce "🔒 Closed" here, and
+          // we must not run the auto-swap again (the underlying tokens were
+          // already moved by the original close).
+          log("executor", `Skipping notifyClose + auto-swap for already-closed position ${args.position_address?.slice(0, 8)}`);
+        } else {
+          notifyClose({
+            pair: result.pool_name || args.position_address?.slice(0, 8),
+            pnlUsd: result.pnl_usd ?? 0,
+            pnlPct: result.pnl_pct ?? 0,
+            reason: result.reason || args.reason,
+          }).catch(() => {});
+          // Note low-yield closes in pool memory so screener avoids redeploying
+          if (args.reason && args.reason.toLowerCase().includes("yield")) {
+            const poolAddr = result.pool || args.pool_address;
+            if (poolAddr) addPoolNote({ pool_address: poolAddr, note: `Closed: low yield (fee/TVL below threshold) at ${new Date().toISOString().slice(0,10)}` }).catch?.(() => {});
+          }
+          // Auto-swap base token back to SOL unless user said to hold
+          if (!args.skip_swap && result.base_mint) {
+            try {
+              const balances = await getWalletBalances({});
+              const token = balances.tokens?.find(t => t.mint === result.base_mint);
+              if (token && token.usd >= 0.10) {
+                log("executor", `Auto-swapping ${token.symbol || result.base_mint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL`);
+                const swapResult = await swapToken({ input_mint: result.base_mint, output_mint: "SOL", amount: token.balance });
+                // Tell the model the swap already happened so it doesn't call swap_token again
+                result.auto_swapped = true;
+                result.auto_swap_note = `Base token already auto-swapped back to SOL (${token.symbol || result.base_mint.slice(0, 8)} → SOL). Do NOT call swap_token again.`;
+                if (swapResult?.amount_out) result.sol_received = swapResult.amount_out;
+              }
+            } catch (e) {
+              log("executor_warn", `Auto-swap after close failed: ${e.message}`);
             }
-          } catch (e) {
-            log("executor_warn", `Auto-swap after close failed: ${e.message}`);
           }
         }
       } else if (name === "claim_fees" && config.management.autoSwapAfterClaim && result.base_mint) {
