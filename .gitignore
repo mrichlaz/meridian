@@ -10,6 +10,12 @@ node_modules/
 # User config (contains RPC URL, wallet key, API keys)
 user-config.json
 
+# GMGN fee-source config (contains API key)
+gmgn-config.json
+
+# Stray Claude Code worktrees
+.claude/worktrees/
+
 # Runtime state (position tracking, lessons — user-specific)
 state.json
 lessons.json
@@ -33,6 +39,13 @@ context.md
 CONTEXT.md
 dev-blocklist.json
 docs/
+remote_index.js
+tmp-*.mjs
+test-telegram-commands.js
+test-utils.js
+screening-snapshots/
+ml/emotion-state.json
+ml/personality.json
 
 # Discord listener queue
 discord-signals.json

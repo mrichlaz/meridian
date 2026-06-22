@@ -139,6 +139,8 @@ export const config = {
     pnlSanityMaxDiffPct:   u.pnlSanityMaxDiffPct   ?? 5,    // max allowed diff between reported and derived pnl % before ignoring a tick
     // SOL mode — positions, PnL, and balances reported in SOL instead of USD
     solMode:               u.solMode               ?? false,
+    // Auto-threshold evolution (takeProfitPct, stopLossPct, etc. from perf data)
+    evolveEnabled:         u.evolveEnabled         ?? true,
   },
 
   // ─── Strategy Mapping ───────────────────
@@ -202,6 +204,8 @@ export const config = {
     minTotalFeeSol: gmgnValue("minTotalFeeSol", "gmgnMinTotalFeeSol", 30),
     maxBotDegenRate: gmgnValue("maxBotDegenRate", "gmgnMaxBotDegenRate", 0.4),
     athFilterPct: gmgnValue("athFilterPct", "gmgnAthFilterPct", null),
+    // gmgn = use GMGN total_fee for global_fees_sol; jupiter = legacy Jupiter fees
+    feeSource: nonEmptyString(gmgnUserConfig.feeSource, u.gmgnFeeSource, "gmgn"),
   },
 
   // ─── LLM Settings ──────────────────────
@@ -224,6 +228,18 @@ export const config = {
     weightFloor:    u.darwinFloor       ?? 0.3,
     weightCeiling:  u.darwinCeiling     ?? 2.5,
     minSamples:     u.darwinMinSamples  ?? 10,
+  },
+
+  // ─── Automated policy / flow-quality guardrails ────────────────
+  policy: {
+    enabled:                 u.policyEnabled                 ?? true,
+    minFeeVolatilityRatio:   u.policyMinFeeVolatilityRatio   ?? 0.01,
+    minVolumePersistence:    u.policyMinVolumePersistence    ?? 1.5,
+    toxicFlowPenalty:        u.policyToxicFlowPenalty        ?? 22,
+    neutralMinScore:         u.policyNeutralMinScore         ?? 66,
+    riskOffMinScore:         u.policyRiskOffMinScore         ?? 76,
+    riskOnMinScore:          u.policyRiskOnMinScore          ?? 60,
+    shrinkRetryPct:          u.policyShrinkRetryPct          ?? 0.8,
   },
 
   // ─── Deep Learning / ML ────────────────
@@ -264,6 +280,17 @@ export const config = {
     url: nonEmptyString(u.agentMeridianApiUrl, process.env.AGENT_MERIDIAN_API_URL, DEFAULT_AGENT_MERIDIAN_API_URL),
     publicApiKey: nonEmptyString(u.publicApiKey, process.env.PUBLIC_API_KEY, DEFAULT_AGENT_MERIDIAN_PUBLIC_KEY),
     lpAgentRelayEnabled: u.lpAgentRelayEnabled ?? false,
+  },
+
+  // ─── PnL fetcher / poller (public infra: RPC + Meteora deposits + Jupiter) ──
+  pnl: {
+    // Live position value comes from on-chain reads on this RPC.
+    // Defaults to the public pump.helius endpoint so the aggressive poller
+    // never burns the main RPC_URL or the LPAgent sponsor budget.
+    rpcUrl: nonEmptyString(u.pnlRpcUrl, process.env.PNL_RPC_URL, "https://pump.helius-rpc.com"),
+    source: nonEmptyString(u.pnlSource, "rpc"), // rpc | meteora (fallback-only)
+    pollIntervalSec: Number(u.pnlPollIntervalSec ?? 3),
+    depositCacheTtlSec: Number(u.pnlDepositCacheTtlSec ?? 300),
   },
 
   jupiter: {

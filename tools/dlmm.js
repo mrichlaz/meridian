@@ -30,6 +30,7 @@ import { normalizeMint } from "./wallet.js";
 import { appendDecision } from "../decision-log.js";
 import { agentMeridianJson, getAgentIdForRequests, getAgentMeridianHeaders } from "./agent-meridian.js";
 import { getAndClearStagedSignals, getAndClearStagedMlFeatures } from "../signal-tracker.js";
+import { computePositions, fetchDlmmPnlForPool } from "./pnl.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
 // @meteora-ag/dlmm → @coral-xyz/anchor uses CJS directory imports
@@ -91,6 +92,31 @@ async function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function getErrorLogs(error) {
+  if (Array.isArray(error?.logs)) return error.logs;
+  if (typeof error?.getLogs === "function") {
+    try { return await error.getLogs(getPrimaryConnection()); } catch { /* fall through */ }
+  }
+  return null;
+}
+
+function summarizeSimulationFailure(error, logs) {
+  const message = String(error?.message || error || "Transaction failed");
+  const joinedLogs = (logs || []).join("\n");
+  const hints = [];
+  if (/insufficient funds/i.test(message) || /insufficient funds/i.test(joinedLogs)) {
+    hints.push("Insufficient token/SOL balance during simulation. This is often caused by stale wallet balance, token-side liquidity requested by the SDK, or rent/ATA/bin-array fees exceeding reserve.");
+  }
+  if (/custom program error: 0x1/i.test(message) || /custom program error: 0x1/i.test(joinedLogs)) {
+    hints.push("Program error 0x1 usually means an arithmetic/insufficient-funds failure in the invoked token/DLMM program.");
+  }
+  return [
+    `${message}`,
+    hints.length ? `Hints: ${hints.join(" ")}` : null,
+    logs?.length ? `Full simulation logs:\n${logs.join("\n")}` : null,
+  ].filter(Boolean).join("\n");
+}
+
 async function sendAndConfirmWithRetry(tx, signers, { label = "transaction", maxAttempts = 4 } = {}) {
   let lastError = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -98,6 +124,8 @@ async function sendAndConfirmWithRetry(tx, signers, { label = "transaction", max
       return await sendAndConfirmTransaction(getPrimaryConnection(), tx, signers);
     } catch (error) {
       lastError = error;
+      const logs = await getErrorLogs(error);
+      if (logs?.length) log("tx_simulation_logs", `${label} attempt ${attempt}/${maxAttempts}\n${logs.join("\n")}`);
       if (!isRetryableRpcError(error) || attempt >= maxAttempts) break;
       const delayMs = Math.min(1500 * (2 ** (attempt - 1)), 8000);
       log("rpc_retry", `${label} attempt ${attempt}/${maxAttempts} failed: ${error.message}. Retrying in ${delayMs}ms`);
@@ -107,7 +135,8 @@ async function sendAndConfirmWithRetry(tx, signers, { label = "transaction", max
   if (isRpcRateLimitError(lastError)) {
     throw new Error(`${label} blocked by RPC 429 Too Many Requests after retries. Add more RPC capacity or wait before retrying.`);
   }
-  throw lastError;
+  const logs = await getErrorLogs(lastError);
+  throw new Error(`${label} failed. ${summarizeSimulationFailure(lastError, logs)}`);
 }
 
 function deriveCloseMetricsFromTrackedAndLive(tracked, livePosition, feesUsd = 0) {
@@ -529,6 +558,11 @@ export async function deployPosition({
   entry_tvl,
   entry_volume,
   entry_holders,
+  entry_score = null,
+  entry_regime = null,
+  entry_fee_volatility_ratio = null,
+  entry_volume_persistence_ratio = null,
+  entry_toxic_flow = null,
 }) {
   pool_address = normalizeMint(pool_address);
   const activeStrategy = strategy || config.strategy.strategy;
@@ -635,6 +669,11 @@ export async function deployPosition({
 
   if (process.env.DRY_RUN === "true") {
     return {
+      // success:false so the executor does NOT fire the "✅ Deployed"
+      // Telegram notification. dry_run:true lets callers (manual /deploy,
+      // LLM agent loop) detect the simulated result and render their own
+      // honest "would deploy" message.
+      success: false,
       dry_run: true,
       would_deploy: {
         pool_address,
@@ -773,17 +812,76 @@ export async function deployPosition({
           entry_tvl,
           entry_volume,
           entry_holders,
+          entry_score,
+          entry_regime,
+          entry_fee_volatility_ratio,
+          entry_volume_persistence_ratio,
+          entry_toxic_flow,
         });
+
+        appendDecision({
+          type: "deploy",
+          actor: "SCREENER",
+          pool: pool_address,
+          pool_name,
+          position: positionAddress,
+          summary: `Relay deployed ${finalAmountY} SOL with ${activeStrategy}`,
+          reason: `Chosen range ${minBinId}→${maxBinId} around active bin ${activeBin.binId}`,
+          risks: [
+            normalizedVolatility != null ? `volatility ${normalizedVolatility}` : null,
+            fee_tvl_ratio != null ? `fee/TVL ${fee_tvl_ratio}%` : null,
+          ].filter(Boolean),
+          metrics: {
+            amount_sol: finalAmountY,
+            strategy: activeStrategy,
+            active_bin: activeBin.binId,
+            min_bin: minBinId,
+            max_bin: maxBinId,
+            downside_pct: downside_pct ?? downsideCoveragePct,
+            upside_pct: upside_pct ?? upsideCoveragePct,
+          },
+        });
+
+        return {
+          success: true,
+          relay: true,
+          request_id: order.requestId,
+          position: positionAddress,
+          pool: pool_address,
+          pool_name,
+          bin_range: { min: minBinId, max: maxBinId, active: activeBin.binId },
+          price_range: { min: minPrice, max: maxPrice },
+          range_coverage: {
+            downside_pct: downsideCoveragePct,
+            upside_pct: upsideCoveragePct,
+            width_pct: totalWidthPct,
+            active_price: activePrice,
+          },
+          bin_step: actualBinStep,
+          base_fee: actualBaseFee,
+          strategy: activeStrategy,
+          wide_range: isWideRange,
+          amount_x: finalAmountX,
+          amount_y: finalAmountY,
+          txs: normalizeExecutionSignatures(submit),
+        };
       }
 
+      // Relay accepted the order but we could not find the new position
+      // on-chain within the verification window. Treat this as a failure:
+      // the executor will not fire the "✅ Deployed" Telegram card, the
+      // state tracker will not record a phantom position, and the caller
+      // can surface a real error to the user.
+      const submitTxs = normalizeExecutionSignatures(submit);
+      log("deploy_warn", `Relay deploy submitted but position not found on-chain after 5s — tx: ${submitTxs.join(", ") || "none"}`);
       appendDecision({
-        type: "deploy",
+        type: "no_deploy",
         actor: "SCREENER",
         pool: pool_address,
         pool_name,
-        position: positionAddress,
-        summary: `Relay deployed ${finalAmountY} SOL with ${activeStrategy}`,
-        reason: `Chosen range ${minBinId}→${maxBinId} around active bin ${activeBin.binId}`,
+        position: null,
+        summary: `Relay deploy submitted but position not found on-chain`,
+        reason: `Chosen range ${minBinId}→${maxBinId} around active bin ${activeBin.binId} — verification window expired`,
         risks: [
           normalizedVolatility != null ? `volatility ${normalizedVolatility}` : null,
           fee_tvl_ratio != null ? `fee/TVL ${fee_tvl_ratio}%` : null,
@@ -798,12 +896,11 @@ export async function deployPosition({
           upside_pct: upside_pct ?? upsideCoveragePct,
         },
       });
-
       return {
-        success: true,
+        success: false,
+        error: "Relay deploy submitted but position not found on-chain after verification window",
         relay: true,
         request_id: order.requestId,
-        position: positionAddress,
         pool: pool_address,
         pool_name,
         bin_range: { min: minBinId, max: maxBinId, active: activeBin.binId },
@@ -820,7 +917,7 @@ export async function deployPosition({
         wide_range: isWideRange,
         amount_x: finalAmountX,
         amount_y: finalAmountY,
-        txs: normalizeExecutionSignatures(submit),
+        txs: submitTxs,
       };
     } catch (error) {
       log("deploy_error", `Relay deploy failed: ${error.message}`);
@@ -919,6 +1016,11 @@ export async function deployPosition({
       entry_tvl,
       entry_volume,
       entry_holders,
+      entry_score,
+      entry_regime,
+      entry_fee_volatility_ratio,
+      entry_volume_persistence_ratio,
+      entry_toxic_flow,
     });
 
     appendDecision({
@@ -1008,39 +1110,13 @@ async function fetchLpAgentOpenPositions(walletAddress) {
   }
 }
 
-// ─── Fetch DLMM PnL API for all positions in a pool ────────────
-async function fetchDlmmPnlForPool(poolAddress, walletAddress) {
-  const url = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${walletAddress}&status=open&pageSize=100&page=1`;
-  try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      log("pnl_api", `HTTP ${res.status} for pool ${poolAddress.slice(0, 8)}: ${body.slice(0, 120)}`);
-      return {};
-    }
-    const data = await res.json();
-    const positions = data.positions || data.data || [];
-    if (positions.length === 0) {
-      log("pnl_api", `No positions returned for pool ${poolAddress.slice(0, 8)} — keys: ${Object.keys(data).join(", ")}`);
-    }
-    const byAddress = {};
-    for (const p of positions) {
-      const addr = p.positionAddress || p.address || p.position;
-      if (addr) byAddress[addr] = p;
-    }
-    return byAddress;
-  } catch (e) {
-    log("pnl_api", `Fetch error for pool ${poolAddress.slice(0, 8)}: ${e.message}`);
-    return {};
-  }
-}
-
 // ─── Get Position PnL (Meteora API) ─────────────────────────────
 export async function getPositionPnl({ pool_address, position_address }) {
   pool_address = normalizeMint(pool_address);
   position_address = normalizeMint(position_address);
   const walletAddress = getWallet().publicKey.toString();
-  if (shouldUseLpAgentRelay()) {
+  // Prefer the public-infra path (RPC + Jupiter + Meteora deposits) used by getMyPositions.
+  if (config.pnl.source === "rpc") {
     try {
       const payload = await getMyPositions({ force: true, silent: true });
       const p = payload?.positions?.find((position) => position.position === position_address);
@@ -1057,12 +1133,10 @@ export async function getPositionPnl({ pool_address, position_address }) {
           upper_bin: p.upper_bin,
           active_bin: p.active_bin,
           age_minutes: p.age_minutes,
-          request_id: payload?.request_id || null,
         };
       }
-      log("pnl_warn", "Relay positions API did not include requested position; falling back to Meteora PnL path");
     } catch (error) {
-      log("pnl_warn", `Relay PnL lookup failed; falling back to Meteora PnL path: ${error.message}`);
+      log("pnl_warn", `RPC PnL lookup failed; falling back to direct Meteora PnL path: ${error.message}`);
     }
   }
   try {
@@ -1129,6 +1203,9 @@ const PERFORMANCE_SIGNAL_FIELDS = [
   "study_win_rate",
   "hive_consensus",
   "volatility",
+  "entry_mcap",
+  "entry_tvl",
+  "entry_volume",
 ];
 
 function resolvePerformanceSignalSnapshot({ poolAddress, baseMint, tracked }) {
@@ -1278,24 +1355,25 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
   }
 
   const loadPositions = async () => { try {
-    let relayLpAgentByPosition = null;
-    let relayRequestId = null;
-    if (shouldUseLpAgentRelay()) {
+    // ── Primary path: public infra (on-chain RPC + Jupiter + Meteora deposits) ──
+    // No LPAgent / agentmeridian dependency, so the poller runs aggressively on
+    // fully public resources. Falls through to the Meteora-API path on any error.
+    if (config.pnl.source === "rpc") {
       try {
-        if (!silent) log("positions", "Fetching raw LPAgent open positions via Agent Meridian relay...");
-        const result = await fetchRawOpenPositionsFromMeridian({
-          walletAddress,
-          agentId: getAgentIdForRequests(),
-        });
-        relayLpAgentByPosition = result.byPosition || {};
-        relayRequestId = result.requestId || result.request_id || null;
+        if (!silent) log("positions", `Computing PnL from RPC (${config.pnl.rpcUrl})...`);
+        const rpcResult = await computePositions(walletAddress);
+        if (useLocalWallet) {
+          syncOpenPositions(rpcResult.positions.map((p) => p.position));
+          _positionsCache = rpcResult;
+          _positionsCacheAt = Date.now();
+        }
+        return rpcResult;
       } catch (error) {
-        log("positions_warn", `Agent Meridian raw relay failed; falling back to direct LPAgent fetch: ${error.message}`);
+        log("positions_warn", `RPC PnL path failed; falling back to Meteora portfolio API: ${error.message}`);
       }
     }
 
-    // Portfolio API discovers open pools/positions for this wallet.
-    // Detailed range data stays on Meteora PnL API; value/PnL can be overridden by LPAgent below.
+    // ── Fallback path: Meteora portfolio + /pnl APIs (no LPAgent) ──
     if (!silent) log("positions", "Fetching portfolio via Meteora portfolio API...");
     const portfolioUrl = `https://dlmm.datapi.meteora.ag/portfolio/open?user=${walletAddress}`;
     const res = await fetch(portfolioUrl, { signal: AbortSignal.timeout(15_000) });
@@ -1310,7 +1388,7 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
     const binDataByPool = {};
     const pnlMaps = await Promise.all(pools.map(pool => fetchDlmmPnlForPool(pool.poolAddress, walletAddress)));
     pools.forEach((pool, i) => { binDataByPool[pool.poolAddress] = pnlMaps[i]; });
-    const lpAgentByPosition = relayLpAgentByPosition || await fetchLpAgentOpenPositions(walletAddress);
+    const lpAgentByPosition = {}; // LPAgent removed — Meteora binData only
 
     const positions = [];
     for (const pool of pools) {
@@ -1497,7 +1575,7 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
       wallet: walletAddress,
       total_positions: positions.length,
       positions,
-      request_id: relayRequestId,
+      source: "meteora",
     };
     if (useLocalWallet) {
       syncOpenPositions(positions.map(p => p.position));
@@ -1671,8 +1749,25 @@ export async function closePosition({ position_address, reason }) {
     const poolAddress = await lookupPoolForPosition(position_address, wallet.publicKey.toString());
     const poolMeta = await getPoolMetadata(poolAddress);
 
-    // Guard: check if the position account still exists on-chain
-    const posAccount = await getPrimaryConnection().getAccountInfo(new PublicKey(position_address)).catch(() => null);
+    // Guard: check if the position account still exists on-chain.
+    // We deliberately do NOT swallow RPC errors here — if the primary RPC
+    // fails, we must abort the close with a retryable failure rather than
+    // treating "no response" as "account gone" and returning a false
+    // success that marks the local position as closed while it remains
+    // open on-chain.
+    let posAccount = null;
+    try {
+      posAccount = await getPrimaryConnection().getAccountInfo(new PublicKey(position_address));
+    } catch (rpcError) {
+      log("close_warn", `RPC error checking position ${position_address.slice(0, 12)}: ${rpcError.message} — aborting close to avoid false success`);
+      return {
+        success: false,
+        error: `RPC error verifying position state: ${rpcError.message}`,
+        position: position_address,
+        pool: poolAddress,
+        retryable: true,
+      };
+    }
     if (!posAccount || posAccount.owner.equals(SystemProgram.programId)) {
       log("close_warn", `Position ${position_address.slice(0, 12)} already closed on-chain (account gone or System Program owner) — cleaning up local state`);
       recordClose(position_address, reason || "already closed");

@@ -12,7 +12,7 @@ import {
 import { getWalletBalances, swapToken } from "./wallet.js";
 import { studyTopLPers } from "./study.js";
 import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons } from "../lessons.js";
-import { setPositionInstruction } from "../state.js";
+import { getTrackedPosition, setPositionInstruction } from "../state.js";
 
 import { getPoolMemory, addPoolNote } from "../pool-memory.js";
 import { getCryptoBotTokens } from "./crypto-signals.js";
@@ -28,7 +28,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { execSync, spawn } from "child_process";
 
-import { scaleScreeningToTimeframe } from "../screening-scales.js";
+import { normalizeTimeframe, scaleScreeningToTimeframe, getEffectiveWindowThresholds } from "../screening-scales.js";
 
 import { PATHS } from "../utils/paths.js";
 
@@ -38,7 +38,6 @@ const POOL_DISCOVERY_BASE = "https://pool-discovery-api.datapi.meteora.ag";
 const MIN_VOLATILITY_TIMEFRAME = "30m";
 const TIMEFRAME_MINUTES = {
   "5m": 5,
-  "15m": 15,
   "30m": 30,
   "1h": 60,
   "2h": 120,
@@ -151,12 +150,12 @@ async function validateDeployPoolThresholds(args) {
   const candidateFeeActiveTvlRatio = numberOrNull(args.fee_tvl_ratio);
   const rawMinFeeActiveTvlRatio = numberOrNull(config.screening.minFeeActiveTvlRatio);
   // Use the candidate's discovery timeframe when available. Custom values are
-  // treated as 5m baselines and scaled linearly to the effective window.
+  // scaled by per-metric rules (linear / power / none) via screening-scales.js.
   const timeframe = args.discovery_timeframe || config.screening.timeframe || "5m";
-  const { minFeeActiveTvlRatio: scaledFee } = scaleScreeningToTimeframe(timeframe);
-  const minFeeActiveTvlRatio = rawMinFeeActiveTvlRatio != null
-    ? (rawMinFeeActiveTvlRatio * (({ "5m": 5, "15m": 15, "30m": 30, "1h": 60, "2h": 120, "4h": 240, "12h": 720, "24h": 1440 })[timeframe] || 5) / 5)
-    : scaledFee;
+  const { minFeeActiveTvlRatio: minFeeActiveTvlRatio } = getEffectiveWindowThresholds({
+    minFeeActiveTvlRatio: rawMinFeeActiveTvlRatio,
+    minVolume: null,
+  }, timeframe);
 
   // Pool Discovery single-pool endpoint can lag behind the list endpoint and
   // return null or 0 for fee_active_tvl_ratio even when screening just saw a
@@ -271,9 +270,11 @@ function normalizeConfigValue(key, value) {
     "solMode",
     "darwinEnabled",
     "mlEnabled",
+    "evolveEnabled",
     "chartIndicatorsEnabled",
     "requireAllIntervals",
     "lpAgentRelayEnabled",
+    "policyEnabled",
   ]);
   const arrayKeys = new Set(["allowedLaunchpads", "blockedLaunchpads"]);
   const stringKeys = new Set([
@@ -295,9 +296,15 @@ function normalizeConfigValue(key, value) {
     "hiveMindPullMode",
     "publicApiKey",
     "agentMeridianApiUrl",
+    "pnlSource",
+    "pnlRpcUrl",
+    "gmgnFeeSource",
+    "gmgnApiKey",
   ]);
   const numberKeys = new Set([
     "mlTrainEvery", "mlMinSamples", "mlBatchSize", "mlEpochs", "mlLearningRate",
+    "policyMinFeeVolatilityRatio", "policyMinVolumePersistence", "policyToxicFlowPenalty",
+    "policyNeutralMinScore", "policyRiskOffMinScore", "policyRiskOnMinScore", "policyShrinkRetryPct",
     "darwinWindowDays", "darwinRecalcEvery", "darwinBoost", "darwinDecay",
     "darwinFloor", "darwinCeiling", "darwinMinSamples",
     "rsiLength", "indicatorCandles", "rsiOversold", "rsiOverbought",
@@ -462,6 +469,7 @@ const toolMap = {
       trailingDropPct: ["management", "trailingDropPct"],
       pnlSanityMaxDiffPct: ["management", "pnlSanityMaxDiffPct"],
       solMode: ["management", "solMode"],
+      evolveEnabled: ["management", "evolveEnabled"],
       minSolToOpen: ["management", "minSolToOpen"],
       deployAmountSol: ["management", "deployAmountSol"],
       gasReserve: ["management", "gasReserve"],
@@ -496,6 +504,15 @@ const toolMap = {
       publicApiKey: ["api", "publicApiKey"],
       agentMeridianApiUrl: ["api", "url"],
       lpAgentRelayEnabled: ["api", "lpAgentRelayEnabled"],
+      // policy / flow quality
+      policyEnabled: ["policy", "enabled", ["policyEnabled"]],
+      policyMinFeeVolatilityRatio: ["policy", "minFeeVolatilityRatio", ["policyMinFeeVolatilityRatio"]],
+      policyMinVolumePersistence: ["policy", "minVolumePersistence", ["policyMinVolumePersistence"]],
+      policyToxicFlowPenalty: ["policy", "toxicFlowPenalty", ["policyToxicFlowPenalty"]],
+      policyNeutralMinScore: ["policy", "neutralMinScore", ["policyNeutralMinScore"]],
+      policyRiskOffMinScore: ["policy", "riskOffMinScore", ["policyRiskOffMinScore"]],
+      policyRiskOnMinScore: ["policy", "riskOnMinScore", ["policyRiskOnMinScore"]],
+      policyShrinkRetryPct: ["policy", "shrinkRetryPct", ["policyShrinkRetryPct"]],
       // ml / darwin
       mlEnabled: ["ml", "enabled", ["mlEnabled"]],
       mlTrainEvery: ["ml", "trainEvery", ["mlTrainEvery"]],
@@ -512,6 +529,14 @@ const toolMap = {
       darwinFloor: ["darwin", "weightFloor", ["darwinFloor"]],
       darwinCeiling: ["darwin", "weightCeiling", ["darwinCeiling"]],
       darwinMinSamples: ["darwin", "minSamples", ["darwinMinSamples"]],
+      // pnl fetcher / poller
+      pnlSource: ["pnl", "source", ["pnlSource"]],
+      pnlRpcUrl: ["pnl", "rpcUrl", ["pnlRpcUrl"]],
+      pnlPollIntervalSec: ["pnl", "pollIntervalSec", ["pnlPollIntervalSec"]],
+      pnlDepositCacheTtlSec: ["pnl", "depositCacheTtlSec", ["pnlDepositCacheTtlSec"]],
+      // gmgn fee source
+      gmgnFeeSource: ["gmgn", "feeSource", ["gmgnFeeSource"]],
+      gmgnApiKey: ["gmgn", "apiKey", ["gmgnApiKey"]],
       // chart indicators
       chartIndicatorsEnabled: ["indicators", "enabled", ["chartIndicators", "enabled"]],
       indicatorEntryPreset: ["indicators", "entryPreset", ["chartIndicators", "entryPreset"]],
@@ -593,8 +618,20 @@ const toolMap = {
       }
     }
 
+    // Auto-scale fee/volume when timeframe changes (unless user set them explicitly in same call).
+    if (applied.timeframe != null && applied.minFeeActiveTvlRatio == null && applied.minVolume == null) {
+      const tf = normalizeTimeframe(applied.timeframe);
+      applied.timeframe = tf;
+      const scaled = scaleScreeningToTimeframe(tf);
+      applied.minFeeActiveTvlRatio = scaled.minFeeActiveTvlRatio;
+      applied.minVolume = scaled.minVolume;
+      applied._timeframeScaled = true;
+      log("config", `timeframe ${tf} → auto-scaled minFeeActiveTvlRatio=${scaled.minFeeActiveTvlRatio}, minVolume=${scaled.minVolume}`);
+    }
+
     // Apply to live config immediately after the persisted config is known-good.
     for (const [key, val] of Object.entries(applied)) {
+      if (key.startsWith("_")) continue;
       const [section, field] = CONFIG_MAP[key];
       const before = config[section][field];
       config[section][field] = val;
@@ -618,6 +655,7 @@ const toolMap = {
     }
 
     for (const [key, val] of Object.entries(applied)) {
+      if (key.startsWith("_")) continue;
       const persistPath = CONFIG_MAP[key]?.[2];
       if (Array.isArray(persistPath) && persistPath.length > 0) {
         let target = userConfig;
@@ -636,10 +674,10 @@ const toolMap = {
     fs.writeFileSync(USER_CONFIG_PATH, JSON.stringify(userConfig, null, 2));
 
     // Restart cron jobs if intervals changed
-    const intervalChanged = applied.managementIntervalMin != null || applied.screeningIntervalMin != null;
+    const intervalChanged = applied.managementIntervalMin != null || applied.screeningIntervalMin != null || applied.pnlPollIntervalSec != null;
     if (intervalChanged && _cronRestarter) {
       _cronRestarter();
-      log("config", `Cron restarted — management: ${config.schedule.managementIntervalMin}m, screening: ${config.schedule.screeningIntervalMin}m`);
+      log("config", `Cron restarted — management: ${config.schedule.managementIntervalMin}m, screening: ${config.schedule.screeningIntervalMin}m, pnlPoll: ${config.pnl.pollIntervalSec}s`);
     }
 
     // Skip repeated volatility-driven interval changes; they are operational tuning, not reusable lessons.
@@ -699,7 +737,24 @@ export async function executeTool(name, args) {
 
   // ─── Execute ──────────────────────────────
   try {
-    const result = await fn(args);
+    let result = await fn(args);
+    if (
+      name === "deploy_position" &&
+      (result?.success === false || result?.error) &&
+      /insufficient funds|custom program error: 0x1/i.test(String(result.error || ""))
+    ) {
+      const originalAmount = Number(args.amount_y ?? args.amount_sol ?? 0);
+      const retryAmount = Number((originalAmount * Number(config.policy?.shrinkRetryPct ?? 0.8)).toFixed(4));
+      const minDeploy = Math.max(0.1, config.management.deployAmountSol);
+      if (Number.isFinite(retryAmount) && retryAmount >= minDeploy && retryAmount < originalAmount) {
+        log("deploy_retry", `Retrying deploy at 80% size after insufficient-funds simulation: ${originalAmount} → ${retryAmount} SOL`);
+        result = await fn({ ...args, amount_y: retryAmount, amount_sol: undefined, retry_of_amount_y: originalAmount });
+        if (result && typeof result === "object") {
+          result.retry_of_amount_y = originalAmount;
+          result.retry_amount_y = retryAmount;
+        }
+      }
+    }
     const duration = Date.now() - startTime;
     const success = result?.success !== false && !result?.error;
 
@@ -715,34 +770,56 @@ export async function executeTool(name, args) {
       if (name === "swap_token" && result.tx) {
         notifySwap({ inputSymbol: args.input_mint?.slice(0, 8), outputSymbol: args.output_mint === "So11111111111111111111111111111111111111112" || args.output_mint === "SOL" ? "SOL" : args.output_mint?.slice(0, 8), amountIn: result.amount_in, amountOut: result.amount_out, tx: result.tx }).catch(() => {});
       } else if (name === "deploy_position") {
-        notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, priceRange: result.price_range, rangeCoverage: result.range_coverage, binStep: result.bin_step, baseFee: result.base_fee }).catch(() => {});
-      } else if (name === "close_position") {
-        notifyClose({
-          pair: result.pool_name || args.position_address?.slice(0, 8),
-          pnlUsd: result.pnl_usd ?? 0,
-          pnlPct: result.pnl_pct ?? 0,
-          reason: result.reason || args.reason,
-        }).catch(() => {});
-        // Note low-yield closes in pool memory so screener avoids redeploying
-        if (args.reason && args.reason.toLowerCase().includes("yield")) {
-          const poolAddr = result.pool || args.pool_address;
-          if (poolAddr) addPoolNote({ pool_address: poolAddr, note: `Closed: low yield (fee/TVL below threshold) at ${new Date().toISOString().slice(0,10)}` }).catch?.(() => {});
+        if (result.dry_run) {
+          // Dry-run must not announce "Deployed" — the position does not exist.
+          log("executor", `Dry-run deploy — skipping Telegram notification for ${result.pool_name || args.pool_name || args.pool_address?.slice(0, 8)}`);
+        } else {
+          notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, priceRange: result.price_range, rangeCoverage: result.range_coverage, binStep: result.bin_step, baseFee: result.base_fee }).catch(() => {});
         }
-        // Auto-swap base token back to SOL unless user said to hold
-        if (!args.skip_swap && result.base_mint) {
-          try {
-            const balances = await getWalletBalances({});
-            const token = balances.tokens?.find(t => t.mint === result.base_mint);
-            if (token && token.usd >= 0.10) {
-              log("executor", `Auto-swapping ${token.symbol || result.base_mint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL`);
-              const swapResult = await swapToken({ input_mint: result.base_mint, output_mint: "SOL", amount: token.balance });
-              // Tell the model the swap already happened so it doesn't call swap_token again
-              result.auto_swapped = true;
-              result.auto_swap_note = `Base token already auto-swapped back to SOL (${token.symbol || result.base_mint.slice(0, 8)} → SOL). Do NOT call swap_token again.`;
-              if (swapResult?.amount_out) result.sol_received = swapResult.amount_out;
+        const v = Number(args.volatility);
+        const nextInterval = Number.isFinite(v) && v >= 5 ? 3 : Number.isFinite(v) && v >= 2 ? 5 : 10;
+        if (config.schedule.managementIntervalMin !== nextInterval) {
+          config.schedule.managementIntervalMin = nextInterval;
+          if (_cronRestarter) _cronRestarter();
+          log("config", `Auto-set management interval to ${nextInterval}m after deploy volatility=${args.volatility ?? "unknown"}`);
+        }
+      } else if (name === "close_position") {
+        if (result.already_closed) {
+          // Already-closed path means the tool itself short-circuited because
+          // the on-chain account is gone or the state was already closed. The
+          // management cycle or /close command owns the user-facing message
+          // for this case; we must not double-announce "🔒 Closed" here, and
+          // we must not run the auto-swap again (the underlying tokens were
+          // already moved by the original close).
+          log("executor", `Skipping notifyClose + auto-swap for already-closed position ${args.position_address?.slice(0, 8)}`);
+        } else {
+          notifyClose({
+            pair: result.pool_name || args.position_address?.slice(0, 8),
+            pnlUsd: result.pnl_usd ?? 0,
+            pnlPct: result.pnl_pct ?? 0,
+            reason: result.reason || args.reason,
+          }).catch(() => {});
+          // Note low-yield closes in pool memory so screener avoids redeploying
+          if (args.reason && args.reason.toLowerCase().includes("yield")) {
+            const poolAddr = result.pool || args.pool_address;
+            if (poolAddr) addPoolNote({ pool_address: poolAddr, note: `Closed: low yield (fee/TVL below threshold) at ${new Date().toISOString().slice(0,10)}` }).catch?.(() => {});
+          }
+          // Auto-swap base token back to SOL unless user said to hold
+          if (!args.skip_swap && result.base_mint) {
+            try {
+              const balances = await getWalletBalances({});
+              const token = balances.tokens?.find(t => t.mint === result.base_mint);
+              if (token && token.usd >= 0.10) {
+                log("executor", `Auto-swapping ${token.symbol || result.base_mint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL`);
+                const swapResult = await swapToken({ input_mint: result.base_mint, output_mint: "SOL", amount: token.balance });
+                // Tell the model the swap already happened so it doesn't call swap_token again
+                result.auto_swapped = true;
+                result.auto_swap_note = `Base token already auto-swapped back to SOL (${token.symbol || result.base_mint.slice(0, 8)} → SOL). Do NOT call swap_token again.`;
+                if (swapResult?.amount_out) result.sol_received = swapResult.amount_out;
+              }
+            } catch (e) {
+              log("executor_warn", `Auto-swap after close failed: ${e.message}`);
             }
-          } catch (e) {
-            log("executor_warn", `Auto-swap after close failed: ${e.message}`);
           }
         }
       } else if (name === "claim_fees" && config.management.autoSwapAfterClaim && result.base_mint) {
@@ -809,6 +886,16 @@ async function runSafetyChecks(name, args) {
 
       const deployAmountY = Number(args.amount_y ?? args.amount_sol ?? 0);
       const deployAmountX = Number(args.amount_x ?? 0);
+      // Defense-in-depth: reject deploy if the pool's quote token is not SOL
+      if (deployDetail) {
+        const quoteMint = deployDetail?.token_y?.address;
+        if (quoteMint && quoteMint !== config.tokens.SOL) {
+          return {
+            pass: false,
+            reason: `Pool quote token ${deployDetail.token_y?.symbol || quoteMint.slice(0, 8)} is not SOL — this agent only supports SOL-quoted pools.`,
+          };
+        }
+      }
       if (Number.isFinite(deployAmountX) && deployAmountX > 0) {
         return {
           pass: false,
@@ -936,9 +1023,45 @@ async function runSafetyChecks(name, args) {
       return { pass: true };
     }
 
+    case "claim_fees":
+    case "close_position": {
+      const positionAddress = String(args?.position_address || "").trim();
+      if (!positionAddress) {
+        return { pass: false, reason: `${name} requires position_address.` };
+      }
+      const tracked = getTrackedPosition(positionAddress);
+      if (!tracked || tracked.closed) {
+        // Instead of failing, return success for already-closed positions to handle race conditions gracefully
+        log("cron", `Management: ${name} called for already closed position ${positionAddress} — ignoring.`);
+        return { pass: true, already_closed: true };
+      }
+      return { pass: true };
+    }
+
     case "swap_token": {
-      // Basic check — prevent swapping when DRY_RUN is true
-      // (handled inside swapToken itself, but belt-and-suspenders)
+      const inputMint = String(args?.input_mint || "").trim();
+      const outputMint = String(args?.output_mint || "").trim();
+      const amount = Number(args?.amount);
+      if (!inputMint || !outputMint) {
+        return { pass: false, reason: "swap_token requires input_mint and output_mint." };
+      }
+      if (!Number.isFinite(amount) || amount <= 0) {
+        return { pass: false, reason: `swap_token amount must be positive and finite, got ${args?.amount}.` };
+      }
+      if (process.env.DRY_RUN !== "true") {
+        const balances = await getWalletBalances();
+        if (balances.error) return { pass: false, reason: `Could not verify wallet balance before swap: ${balances.error}` };
+        const isSolInput = inputMint === "SOL" || inputMint === config.tokens.SOL;
+        const available = isSolInput
+          ? Number(balances.sol || 0)
+          : Number(balances.tokens?.find((t) => t.mint === inputMint)?.balance || 0);
+        if (!Number.isFinite(available) || available <= 0) {
+          return { pass: false, reason: `No available balance for input mint ${inputMint}.` };
+        }
+        if (amount > available) {
+          return { pass: false, reason: `Swap amount ${amount} exceeds available balance ${available} for ${inputMint}.` };
+        }
+      }
       return { pass: true };
     }
 

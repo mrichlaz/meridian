@@ -11,6 +11,7 @@ import { getTopCandidates, chooseAdaptiveDeployProfile } from "./tools/screening
 import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
+import { checkCircuitBreaker, getMarketRegime, rankCandidates, sizeMultiplierForScore, scoreCandidate } from "./policy-engine.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
 import {
   startPolling,
@@ -95,8 +96,8 @@ if (isMain) {
   startBotTracker();
 }
 
-const TP_PCT = config.management.takeProfitPct;
-const DEPLOY = config.management.deployAmountSol;
+// Use a fresh read every time — config evolves during runtime.
+function getDeployAmount() { return config.management.deployAmountSol; }
 
 // ═══════════════════════════════════════════
 //  CYCLE TIMERS
@@ -368,10 +369,47 @@ export async function runManagementCycle({ silent = false, triggerScreening = tr
       return a.action !== "STAY";
     });
 
-    if (actionPositions.length > 0) {
-      log("cron", `Management: ${actionPositions.length} action(s) needed — invoking LLM [model: ${config.llm.managementModel}]`);
+    // 1. Handle Immediate Actions (CLOSE/CLAIM) - NO LLM REQUIRED
+    const immediateActions = actionPositions.filter(p => {
+      const a = actionMap.get(p.position);
+      return a.action === "CLOSE" || a.action === "CLAIM";
+    });
 
-      const actionBlocks = actionPositions.map((p) => {
+    for (const p of immediateActions) {
+      const act = actionMap.get(p.position);
+      log("cron", `Management: Executing immediate ${act.action} for ${p.pair} (${act.reason || ""})`);
+      
+      const toolName = act.action === "CLOSE" ? "close_position" : "claim_fees";
+      // FIX: Use position_address to match executor expectations
+      const result = await executeTool(toolName, { position_address: p.position });
+
+      if (result?.success && !result.already_closed) {
+        log("cron", `Management: Successfully executed ${act.action} for ${p.pair}`);
+        if (telegramEnabled()) {
+          await sendMessage(`⚡ ${act.action} executed for ${p.pair}\nReason: ${act.reason || "Rule triggered"}`);
+        }
+      } else if (result?.already_closed) {
+        // Position was already closed when the tool ran (on-chain account
+        // gone, or local state already marked closed). The executor
+        // already suppressed the "🔒 Closed" card for this case, and we
+        // must not claim "⚡ CLOSE executed" either — that would be a
+        // false success that misleads the operator.
+        log("cron", `Management: ${act.action} for ${p.pair} was already closed — skipping Telegram notification`);
+      } else {
+        log("cron_error", `Management: Failed to execute ${act.action} for ${p.pair}: ${result?.error || "Unknown error"}`);
+      }
+    }
+
+    // 2. Handle LLM Actions (INSTRUCTION)
+    const llmActions = actionPositions.filter(p => {
+      const a = actionMap.get(p.position);
+      return a.action === "INSTRUCTION";
+    });
+
+    if (llmActions.length > 0) {
+      log("cron", `Management: ${llmActions.length} instruction(s) pending — invoking LLM [model: ${config.llm.managementModel}]`);
+
+      const actionBlocks = llmActions.map((p) => {
         const act = actionMap.get(p.position);
         return [
           `POSITION: ${p.pair} (${p.position})`,
@@ -384,25 +422,21 @@ export async function runManagementCycle({ silent = false, triggerScreening = tr
       }).join("\n\n");
 
       const { content } = await agentLoop(`
-MANAGEMENT ACTION REQUIRED — ${actionPositions.length} position(s)
+MANAGEMENT INSTRUCTION REQUIRED — ${llmActions.length} position(s)
 
 ${actionBlocks}
 
 RULES:
-- CLOSE: call close_position only — it handles fee claiming internally, do NOT call claim_fees first
-- CLAIM: call claim_fees with position address
 - INSTRUCTION: evaluate the instruction condition. If met → close_position. If not → HOLD, do nothing.
-- ⚡ exit alerts: close immediately, no exceptions
-
-Execute the required actions. Do NOT re-evaluate CLOSE/CLAIM — rules already applied. Just execute.
-After executing, write a brief one-line result per position.
+- Execute the required actions. Do NOT re-evaluate CLOSE/CLAIM — rules already applied. Just execute.
+- After executing, write a brief one-line result per position.
       `, config.llm.maxSteps, [], "MANAGER", config.llm.managementModel, 2048, {
         onToolStart: async ({ name }) => { await liveMessage?.toolStart(name); },
         onToolFinish: async ({ name, result, success }) => { await liveMessage?.toolFinish(name, result, success); },
       });
 
       mgmtReport += `\n\n${content}`;
-    } else {
+    } else if (immediateActions.length === 0) {
       log("cron", "Management: all positions STAY — skipping LLM");
     }
 
@@ -450,7 +484,10 @@ export async function runScreeningCycle({ silent = false } = {}) {
   let screenReport = null;
   try {
     [prePositions, preBalance] = await Promise.all([getMyPositions({ force: true }), getWalletBalances()]);
-    if (prePositions.total_positions >= config.risk.maxPositions) {
+    const breaker = checkCircuitBreaker({ positions: prePositions, balance: preBalance });
+    if (breaker.blocked) {
+      screenReport = `Screening skipped — circuit breaker: ${breaker.reason}.`;
+    } else if (prePositions.total_positions >= config.risk.maxPositions) {
       log("cron", `Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions})`);
       screenReport = `Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions}).`;
     } else {
@@ -518,7 +555,44 @@ export async function runScreeningCycle({ silent = false } = {}) {
       screenReport = `Screening failed: ${pipeline.error}`;
       return screenReport;
     }
-    const { passing, filteredOut, gmgnStageCounts, gmgnAllFiltered, topCandidates, allCandidates } = pipeline;
+    let { passing, filteredOut, gmgnStageCounts, gmgnAllFiltered, topCandidates, allCandidates } = pipeline;
+    const regime = getMarketRegime();
+    const rankedPassing = rankCandidates(passing, { regime });
+    const policyFiltered = passing.filter((entry) => !rankedPassing.some((ranked) => ranked.pool?.pool === entry.pool?.pool));
+    if (policyFiltered.length > 0) {
+      filteredOut.push(...policyFiltered.map((entry) => ({
+        name: entry.pool?.name || entry.pool?.pool || "unknown",
+        reason: `policy score ${entry.policy?.score ?? "below"} below ${regime.minScore} in ${regime.regime}`,
+      })));
+    }
+    passing = rankedPassing;
+    if (config.ml?.enabled && passing.length > 0) {
+      try {
+        const { scoreCandidate: scoreMlCandidate } = await import("./ml/inference.js");
+        passing = passing.map((entry) => {
+          const ml = scoreMlCandidate({ ...entry.pool, policy: entry.policy }, {
+            studyData: entry.study?.patterns || null,
+            context: {
+              walletSol: currentBalance.sol,
+              walletTotalUsd: currentBalance.total_usd,
+              activePositions: prePositions.total_positions,
+              maxPositions: config.risk.maxPositions,
+              deployAmountSol: deployAmount,
+              policy: entry.policy,
+              flow: entry.policy?.flow,
+            },
+          });
+          const lambda = Number(ml.lambda ?? config.ml?.blendLambdaStart ?? 0.3);
+          const finalScore = Math.round(((1 - lambda) * Number(entry.policy.score || 0)) + (lambda * Number(ml.mlScore || 0.5) * 100));
+          const verdict = finalScore >= entry.policy.score + 5 ? "boost" : finalScore <= entry.policy.score - 5 ? "penalty" : "neutral";
+          return { ...entry, policy: { ...entry.policy, ml, finalScore, mlVerdict: verdict } };
+        })
+          .filter((entry) => entry.policy.finalScore >= entry.policy.minScore)
+          .sort((a, b) => b.policy.finalScore - a.policy.finalScore);
+      } catch (error) {
+        log("ml_inference", `Policy/ML blend skipped: ${error.message}`);
+      }
+    }
     passingForFallback = passing;
     const earlyFilteredExamples = topCandidates?.filtered_examples || [];
     // Stash the full top-level result for the screening-snapshot log
@@ -611,10 +685,10 @@ export async function runScreeningCycle({ silent = false } = {}) {
     // Stage ML features for all passing candidates (for training data capture)
     if (config.ml?.enabled) {
       const { extractFeatures, normalizeVector } = await import("./ml/features.js");
-      for (const { pool, study, mem } of passing) {
+      for (const { pool, study, mem, policy } of passing) {
         try {
           const rawFeatures = extractFeatures({
-            candidate: pool,
+            candidate: { ...pool, policy },
             poolMemory: null,
             studyData: study?.patterns || null,
             context: {
@@ -641,7 +715,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     }
 
     // Build compact candidate blocks
-    const candidateBlocks = passing.map(({ pool, sw, n, ti, mem }, i) => {
+    const candidateBlocks = passing.map(({ pool, sw, n, ti, mem, policy }, i) => {
       const botPct = ti?.audit?.bot_holders_pct ?? "?";
       const top10Pct = ti?.audit?.top_holders_pct ?? "?";
       const feesSol = ti?.global_fees_sol ?? "?";
@@ -679,6 +753,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
       if (pool.gmgn) {
         block = [
           `POOL: ${pool.name} (${pool.pool})`,
+          `  policy: score=${policy?.score ?? "?"}/${policy?.minScore ?? "?"}, final=${policy?.finalScore ?? policy?.score ?? "?"}, regime=${policy?.regime ?? "NEUTRAL"}, fee/vol=${policy?.flow?.feeVolatilityRatio?.toFixed?.(4) ?? "?"}, volume_persist=${policy?.flow?.volumePersistenceRatio?.toFixed?.(2) ?? "?"}${policy?.ml ? `, ml=${policy.ml.mlScore} (${policy.mlVerdict})` : ""}${policy?.flow?.toxic ? `, toxic=${policy.flow.toxicReasons.join("; ")}` : ""}`,
           formatGmgnCandidateForPrompt(pool),
           pvpLine,
           `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
@@ -692,6 +767,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
           : null;
         block = [
           `POOL: ${pool.name} (${pool.pool})`,
+          `  policy: score=${policy?.score ?? "?"}/${policy?.minScore ?? "?"}, final=${policy?.finalScore ?? policy?.score ?? "?"}, regime=${policy?.regime ?? "NEUTRAL"}, fee/vol=${policy?.flow?.feeVolatilityRatio?.toFixed?.(4) ?? "?"}, volume_persist=${policy?.flow?.volumePersistenceRatio?.toFixed?.(2) ?? "?"}${policy?.ml ? `, ml=${policy.ml.mlScore} (${policy.mlVerdict})` : ""}${policy?.flow?.toxic ? `, toxic=${policy.flow.toxicReasons.join("; ")}` : ""}`,
           `  metrics: bin_step=${pool.bin_step}, fee_pct=${pool.fee_pct}%, fee_tvl=${pool.fee_active_tvl_ratio}, vol=$${pool.volume_window}, tvl=$${pool.tvl ?? pool.active_tvl}, volatility_${pool.volatility_timeframe || "30m"}=${pool.volatility}, mcap=$${pool.mcap}, organic=${pool.organic_score}${pool.token_age_hours != null ? `, age=${pool.token_age_hours}h` : ""}`,
           `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
           gmgnPriceLine,
@@ -721,6 +797,9 @@ export async function runScreeningCycle({ silent = false } = {}) {
           smart_wallets_present: (sw?.in_pool?.length ?? 0) > 0,
           narrative_quality:     n?.narrative ? "present" : "absent",
           volatility:            pool.volatility            ?? null,
+          entry_mcap:            pool.mcap                  ?? null,
+          entry_tvl:             pool.tvl                   ?? null,
+          entry_volume:          pool.volume_window         ?? null,
         });
       }
 
@@ -914,7 +993,7 @@ IMPORTANT:
           if (topSurvivor) {
             const deployProfile = chooseAdaptiveDeployProfile(topSurvivor, config.strategy);
             if (deployProfile.deployable) {
-              const deployAmountOverride = Number((deployAmount * (deployProfile.sizeMultiplier || 1)).toFixed(2));
+              const deployAmountOverride = Number((deployAmount * (deployProfile.sizeMultiplier || 1) * sizeMultiplierForScore(passing[0]?.policy?.score || 66, regime)).toFixed(2));
               const initialValueUsd = currentBalance.sol_price ? deployAmountOverride * currentBalance.sol_price : null;
               const binsBelow = Math.max(35, Math.round(computeBinsBelow(topSurvivor.volatility) * (deployProfile.binsMultiplier || 1)));
               const fallbackResult = await executeTool("deploy_position", {
@@ -932,6 +1011,11 @@ IMPORTANT:
                 organic_score: topSurvivor.organic_score,
                 discovery_timeframe: topSurvivor.discovery_timeframe || config.screening.timeframe,
                 initial_value_usd: initialValueUsd,
+                entry_score: passing[0]?.policy?.finalScore ?? passing[0]?.policy?.score ?? null,
+                entry_regime: regime.regime,
+                entry_fee_volatility_ratio: passing[0]?.policy?.flow?.feeVolatilityRatio ?? null,
+                entry_volume_persistence_ratio: passing[0]?.policy?.flow?.volumePersistenceRatio ?? null,
+                entry_toxic_flow: passing[0]?.policy?.flow?.toxicReasons ?? null,
               });
               deployAttempted = true;
               deploySucceeded = Boolean(fallbackResult?.success && !fallbackResult?.error && !fallbackResult?.blocked);
@@ -987,7 +1071,7 @@ IMPORTANT:
         if (topSurvivor) {
           const deployProfile = chooseAdaptiveDeployProfile(topSurvivor, config.strategy);
           if (deployProfile.deployable) {
-            const deployAmountOverride = Number((screeningDeployAmount * (deployProfile.sizeMultiplier || 1)).toFixed(2));
+            const deployAmountOverride = Number((screeningDeployAmount * (deployProfile.sizeMultiplier || 1) * sizeMultiplierForScore(passingForFallback[0]?.policy?.score || 66)).toFixed(2));
             const initialValueUsd = screeningBalance?.sol_price ? deployAmountOverride * screeningBalance.sol_price : null;
             const binsBelow = Math.max(35, Math.round(computeBinsBelow(topSurvivor.volatility) * (deployProfile.binsMultiplier || 1)));
             const fallbackResult = await executeTool("deploy_position", {
@@ -1005,6 +1089,11 @@ IMPORTANT:
               organic_score: topSurvivor.organic_score,
               discovery_timeframe: topSurvivor.discovery_timeframe || config.screening.timeframe,
               initial_value_usd: initialValueUsd,
+              entry_score: passingForFallback[0]?.policy?.finalScore ?? passingForFallback[0]?.policy?.score ?? null,
+              entry_regime: passingForFallback[0]?.policy?.regime ?? null,
+              entry_fee_volatility_ratio: passingForFallback[0]?.policy?.flow?.feeVolatilityRatio ?? null,
+              entry_volume_persistence_ratio: passingForFallback[0]?.policy?.flow?.volumePersistenceRatio ?? null,
+              entry_toxic_flow: passingForFallback[0]?.policy?.flow?.toxicReasons ?? null,
             });
             deployAttempted = true;
             deploySucceeded = Boolean(fallbackResult?.success && !fallbackResult?.error && !fallbackResult?.blocked);
@@ -1140,7 +1229,9 @@ Summarize the current portfolio health, total fees earned, and performance of al
     await maybeRunMissedBriefing();
   }, { timezone: 'UTC' });
 
-  // Lightweight 30s PnL poller — updates trailing TP state between management cycles, no LLM
+  // Lightweight PnL poller — updates trailing TP state between management cycles, no LLM.
+  // Runs on public infra (RPC + Jupiter + Meteora deposits) so it can poll aggressively.
+  const pnlPollMs = Math.max(1, Number(config.pnl.pollIntervalSec ?? 3)) * 1000;
   let _pnlPollBusy = false;
   const pnlPollInterval = safeSetInterval(async () => {
     if (_managementBusy || _screeningBusy || _pnlPollBusy) return;
@@ -1193,7 +1284,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
     } finally {
       _pnlPollBusy = false;
     }
-  }, 30_000);
+  }, pnlPollMs);
 
   _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog];
   // Store interval ref so stopCronJobs can clear it
@@ -1258,11 +1349,15 @@ function formatCandidates(candidates) {
 export function getDeterministicCloseRule(position, managementConfig) {
   const tracked = getTrackedPosition(position.position);
   const pnlSuspect = (() => {
+    // Couldn't-price-this-tick flag (e.g. Jupiter outage) — never act on PnL rules.
+    if (position.pnl_pct_suspicious) return true;
     if (position.pnl_pct == null) return false;
-    if (position.pnl_pct > -90) return false;
-    if (tracked?.amount_sol && (position.total_value_usd ?? 0) > 0.01) {
-      log("cron_warn", `Suspect PnL for ${position.pair}: ${position.pnl_pct}% but position still has value — skipping PnL rules`);
-      return true;
+    // Only suspect if PnL is so extreme (e.g. < -95%) that it likely contradicts tracked USD value
+    if (position.pnl_pct <= -95) {
+      if (tracked?.amount_sol && (position.total_value_usd ?? 0) > (position.amount_sol * 0.01)) {
+        log("cron_warn", `Suspect PnL for ${position.pair}: ${position.pnl_pct}% but position still has value — skipping PnL rules`);
+        return true; 
+      }
     }
     return false;
   })();
@@ -1406,6 +1501,15 @@ function settingValue(key) {
     rsiLength: config.indicators.rsiLength,
     indicatorIntervals: config.indicators.intervals,
     requireAllIntervals: config.indicators.requireAllIntervals,
+    policyEnabled: config.policy.enabled,
+    policyMinFeeVolatilityRatio: config.policy.minFeeVolatilityRatio,
+    policyMinVolumePersistence: config.policy.minVolumePersistence,
+    policyToxicFlowPenalty: config.policy.toxicFlowPenalty,
+    policyNeutralMinScore: config.policy.neutralMinScore,
+    policyRiskOffMinScore: config.policy.riskOffMinScore,
+    policyRiskOnMinScore: config.policy.riskOnMinScore,
+    policyShrinkRetryPct: config.policy.shrinkRetryPct,
+    mlEnabled: config.ml.enabled,
   };
   return values[key];
 }
@@ -1450,7 +1554,7 @@ function renderSettingsMenu(page = "main") {
       settingButton("Main", "cfg:page:main"),
       settingButton("Risk", "cfg:page:risk"),
       settingButton("Screen", "cfg:page:screen"),
-      settingButton("Indicators", "cfg:page:indicators"),
+      settingButton("Policy", "cfg:page:policy"),
     ],
   ];
 
@@ -1491,6 +1595,17 @@ function renderSettingsMenu(page = "main") {
       stepButtons("managementIntervalMin", "Manage min", 1, { digits: 0 }),
       stepButtons("screeningIntervalMin", "Screen min", 5, { digits: 0 }),
     ];
+  } else if (page === "policy") {
+    rows = [
+      [toggleButton("policyEnabled", "Policy guard"), toggleButton("mlEnabled", "ML")],
+      stepButtons("policyMinFeeVolatilityRatio", "Min fee/vol", 0.002, { digits: 3 }),
+      stepButtons("policyMinVolumePersistence", "Vol persist", 0.25, { digits: 2 }),
+      stepButtons("policyToxicFlowPenalty", "Toxic penalty", 2, { digits: 0 }),
+      stepButtons("policyNeutralMinScore", "Neutral score", 1, { digits: 0 }),
+      stepButtons("policyRiskOffMinScore", "Risk-off score", 1, { digits: 0 }),
+      stepButtons("policyRiskOnMinScore", "Risk-on score", 1, { digits: 0 }),
+      stepButtons("policyShrinkRetryPct", "Retry pct", 0.05, { digits: 2 }),
+    ];
   } else if (page === "indicators") {
     rows = [
       [toggleButton("chartIndicatorsEnabled", "Chart indicators"), toggleButton("requireAllIntervals", "Require all TF")],
@@ -1520,7 +1635,7 @@ function renderSettingsMenu(page = "main") {
         settingButton("Screening", "cfg:page:screen"),
       ],
       [
-        settingButton("Indicators", "cfg:page:indicators"),
+        settingButton("Policy / ML", "cfg:page:policy"),
         settingButton("Show config", "cfg:show"),
       ],
     ];
@@ -1592,6 +1707,9 @@ async function applySettingsMenuCallback(msg) {
     if (key === "repeatDeployCooldownMinFeeEarnedPct") value = Math.max(0, value);
     if (["minBinsBelow", "maxBinsBelow", "defaultBinsBelow"].includes(key)) value = Math.max(35, Math.round(value));
     if (["deployAmountSol", "gasReserve", "maxDeployAmount"].includes(key)) value = Math.max(0, value);
+    if (["policyNeutralMinScore", "policyRiskOffMinScore", "policyRiskOnMinScore"].includes(key)) value = Math.max(0, Math.min(100, Math.round(value)));
+    if (["policyMinFeeVolatilityRatio", "policyMinVolumePersistence", "policyToxicFlowPenalty"].includes(key)) value = Math.max(0, value);
+    if (key === "policyShrinkRetryPct") value = Math.max(0.4, Math.min(0.95, value));
   } else if (action === "set") {
     value = normalizeMenuValue(key, parts.slice(3).join(":"));
   } else {
@@ -1609,9 +1727,11 @@ async function applySettingsMenuCallback(msg) {
   }
   page = key.startsWith("indicator") || key === "chartIndicatorsEnabled" || key === "rsiLength" || key === "requireAllIntervals"
     ? "indicators"
-    : ["useDiscordSignals", "blockPvpSymbols", "strategy", "minBinsBelow", "maxBinsBelow", "defaultBinsBelow", "managementIntervalMin", "screeningIntervalMin"].includes(key)
-      ? "screen"
-      : "risk";
+    : key.startsWith("policy") || key === "mlEnabled"
+      ? "policy"
+      : ["useDiscordSignals", "blockPvpSymbols", "strategy", "minBinsBelow", "maxBinsBelow", "defaultBinsBelow", "managementIntervalMin", "screeningIntervalMin"].includes(key)
+        ? "screen"
+        : "risk";
   await answerCallbackQuery(msg.callbackQueryId, `Updated ${key}`);
   await showSettingsMenu({ messageId: msg.messageId, page });
 }
@@ -1746,8 +1866,9 @@ async function deployLatestCandidate(index) {
     });
     throw new Error(`NO DEPLOY: ${candidate.name} — ${deployProfile.reason}`);
   }
+  const manualPolicy = scoreCandidate(candidate, { audit: enriched?.ti?.audit, smartWallets: enriched?.sw });
   const baseDeployAmount = computeDeployAmount(wallet.sol);
-  const deployAmount = Number((baseDeployAmount * (deployProfile.sizeMultiplier || 1)).toFixed(2));
+  const deployAmount = Number((baseDeployAmount * (deployProfile.sizeMultiplier || 1) * sizeMultiplierForScore(manualPolicy.score)).toFixed(2));
   const initialValueUsd = wallet.sol_price ? deployAmount * wallet.sol_price : null;
   const binsBelow = Math.max(35, Math.round(computeBinsBelow(candidate.volatility) * (deployProfile.binsMultiplier || 1)));
   const result = await executeTool("deploy_position", {
@@ -1765,6 +1886,11 @@ async function deployLatestCandidate(index) {
     organic_score: candidate.organic_score,
     discovery_timeframe: candidate.discovery_timeframe || config.screening.timeframe,
     initial_value_usd: initialValueUsd,
+    entry_score: manualPolicy.score,
+    entry_regime: getMarketRegime().regime,
+    entry_fee_volatility_ratio: manualPolicy.flow?.feeVolatilityRatio ?? null,
+    entry_volume_persistence_ratio: manualPolicy.flow?.volumePersistenceRatio ?? null,
+    entry_toxic_flow: manualPolicy.flow?.toxicReasons ?? null,
   });
   if (result?.success === false || result?.error) {
     throw new Error(result.error || "Deploy failed");
@@ -2139,6 +2265,21 @@ async function telegramHandler(msg) {
     try {
       const idx = parseInt(deployMatch[1]) - 1;
       const { candidate, result, deployAmount, binsBelow } = await deployLatestCandidate(idx);
+      if (result.dry_run) {
+        const wouldDeploy = result.would_deploy || {};
+        await sendMessage([
+          `⚠️ DRY RUN — would deploy ${candidate.name}`,
+          `Pool: ${candidate.pool}`,
+          `Amount: ${deployAmount} SOL`,
+          `Strategy: ${wouldDeploy.strategy || config.strategy.strategy} | binsBelow: ${wouldDeploy.bins_below ?? binsBelow}`,
+          `No transaction sent. Set DRY_RUN=false in .env to go live.`,
+        ].join("\n")).catch(() => {});
+        return;
+      }
+      if (!result.success) {
+        await sendMessage(`❌ Deploy failed for ${candidate.name}: ${result.error || "unknown error"}`).catch(() => {});
+        return;
+      }
       const coverage = result.range_coverage
         ? `Range: ${fmtPct(result.range_coverage.downside_pct)} downside | ${fmtPct(result.range_coverage.upside_pct)} upside`
         : `Strategy: ${config.strategy.strategy} | binsBelow: ${binsBelow}`;
@@ -2803,7 +2944,7 @@ if (isMain && isTTY) {
 
   console.log(`
 Commands:
-  1 / 2 / 3 ...  Deploy ${DEPLOY} SOL into that pool
+  1 / 2 / 3 ...  Deploy ${getDeployAmount()} SOL into that pool
   auto           Let the agent pick and deploy automatically
   /status        Refresh wallet + positions
   /screen        Refresh deterministic candidate list
@@ -2828,9 +2969,9 @@ Commands:
     if (!isNaN(pick) && pick >= 1 && pick <= latest.length) {
       await runBusy(async () => {
         const pool = latest[pick - 1];
-        console.log(`\nDeploying ${DEPLOY} SOL into ${pool.name}...\n`);
+        console.log(`\nDeploying ${getDeployAmount()} SOL into ${pool.name}...\n`);
         const { content: reply } = await agentLoop(
-          `Deploy ${DEPLOY} SOL into pool ${pool.pool} (${pool.name}). Call get_active_bin first then deploy_position. Report result.`,
+          `Deploy ${getDeployAmount()} SOL into pool ${pool.pool} (${pool.name}). Call get_active_bin first then deploy_position. Report result.`,
           config.llm.maxSteps,
           [],
           "SCREENER"
@@ -2846,7 +2987,7 @@ Commands:
       await runBusy(async () => {
         console.log("\nAgent is picking and deploying...\n");
         const { content: reply } = await agentLoop(
-          `get_top_candidates and deploy only if a candidate is clearly worth it. If there is only one weak candidate, report NO DEPLOY. For a valid deploy, use amount_y=${DEPLOY}, amount_x=0, bins_above=0, and bins_below from positive volatility. Execute now, don't ask.`,
+          `get_top_candidates and deploy only if a candidate is clearly worth it. If there is only one weak candidate, report NO DEPLOY. For a valid deploy, use amount_y=${getDeployAmount()}, amount_x=0, bins_above=0, and bins_below from positive volatility. Execute now, don't ask.`,
           config.llm.maxSteps,
           [],
           "SCREENER"

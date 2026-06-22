@@ -74,6 +74,11 @@ export function trackPosition({
   entry_tvl = null,
   entry_volume = null,
   entry_holders = null,
+  entry_score = null,
+  entry_regime = null,
+  entry_fee_volatility_ratio = null,
+  entry_volume_persistence_ratio = null,
+  entry_toxic_flow = null,
 }) {
   const state = load();
   state.positions[position] = {
@@ -97,6 +102,11 @@ export function trackPosition({
     entry_tvl,
     entry_volume,
     entry_holders,
+    entry_score,
+    entry_regime,
+    entry_fee_volatility_ratio,
+    entry_volume_persistence_ratio,
+    entry_toxic_flow,
     deployed_at: new Date().toISOString(),
     out_of_range_since: null,
     last_claim_at: null,
@@ -249,7 +259,7 @@ export function queuePeakConfirmation(position_address, candidatePnlPct, options
     pos.pending_peak_pnl_pct = null;
     pos.pending_peak_started_at = null;
     save(state);
-    log("state", `Position ${position_address} peak PnL accepted at ${candidatePnlPct.toFixed(2)}% from relay poll`);
+    log("state", `Position ${position_address} peak PnL accepted at ${candidatePnlPct.toFixed(2)}% from rpc poll`);
     return true;
   }
 

@@ -32,6 +32,9 @@ const PERFORMANCE_SIGNAL_FIELDS = [
   "study_win_rate",
   "hive_consensus",
   "volatility",
+  "entry_mcap",
+  "entry_tvl",
+  "entry_volume",
 ];
 const MAX_MANUAL_LESSON_LENGTH = 400;
 const PERFORMANCE_REJECTS_FILE = PATHS.performanceRejects;
@@ -164,7 +167,7 @@ export async function recordPerformance(perf) {
   }
 
   // Evolve thresholds every 5 closed positions
-  if (data.performance.length % MIN_EVOLVE_POSITIONS === 0) {
+  if (data.performance.length % MIN_EVOLVE_POSITIONS === 0 && config.management.evolveEnabled !== false) {
     const { config, reloadScreeningThresholds } = await import("./config.js");
     const result = evolveThresholds(data.performance, config);
     if (result?.changes && Object.keys(result.changes).length > 0) {
@@ -186,8 +189,10 @@ export async function recordPerformance(perf) {
       try {
         const { onModelTrained } = await import("./ml/emotions.js");
         const { trainModel } = await import("./ml/trainer.js");
+        const { invalidateBlendLambda } = await import("./ml/inference.js");
         const trainResult = await trainModel({ config: config.ml });
         if (trainResult.trained) {
+          invalidateBlendLambda(); // pick up new predictiveness
           onModelTrained(trainResult);
           log("evolve", `ML: trained on ${trainResult.trainSize} samples, loss=${trainResult.finalLoss?.totalLoss?.toFixed(4) || "N/A"}`);
         }
@@ -532,8 +537,8 @@ export function evolveThresholds(perfData, config) {
   {
     const spec = getThresholdSpec("minFeeActiveTvlRatio");
     if (spec) {
-      const winnerFees = winners.map((p) => p.fee_active_tvl_ratio).filter(isFiniteNum);
-      const loserFees  = losers.map((p) => p.fee_active_tvl_ratio).filter(isFiniteNum);
+      const winnerFees = winners.map((p) => p.fee_tvl_ratio).filter(isFiniteNum);
+      const loserFees  = losers.map((p) => p.fee_tvl_ratio).filter(isFiniteNum);
       const current    = config[spec.section][spec.field];
 
       if (current != null && Number.isFinite(Number(current))) {

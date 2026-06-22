@@ -10,7 +10,7 @@ const CRYPTO_DB = path.resolve(__dirname, "../data/bot-tracker.db");
  * Read top tokens from the crypto bot tracker SQLite DB.
  * Returns tokens with the most trade events, optionally filtered by recency.
  */
-export function getCryptoBotTokens({ limit = 10, maxAgeMinutes = null } = {}) {
+export function getCryptoBotTokens({ limit = 20, maxAgeMinutes = 240 } = {}) {
   let db;
   try {
     db = new Database(CRYPTO_DB, { readonly: true });
