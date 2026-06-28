@@ -96,6 +96,11 @@ const client = new OpenAI({
   baseURL: process.env.LLM_BASE_URL || "https://openrouter.ai/api/v1",
   apiKey: process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY,
   timeout: 5 * 60 * 1000,
+  // Retry transient connection errors (e.g. "Premature close" from MiniMax via
+  // OpenRouter) at the SDK level before the app loop ever sees them. The SDK
+  // only retries on a narrow set of status codes, so app-level handling below
+  // still covers the rest.
+  maxRetries: 3,
 });
 
 const DEFAULT_MODEL = process.env.LLM_MODEL || "openrouter/healer-alpha";
@@ -248,7 +253,23 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           };
           if (disableToolsForRetry) delete reqParams.tools;
           if (!omitToolChoice && !disableToolsForRetry) reqParams.tool_choice = toolChoice;
-          response = await client.chat.completions.create(reqParams);
+          // Stream the response so long-running reasoning models (e.g. MiniMax
+          // m2.5/m2.7 via OpenRouter) keep the connection alive with continuous
+          // bytes. This avoids "Invalid response body ... Premature close"
+          // failures where the upstream proxy drops an idle long-generation
+          // socket before the full non-streamed body arrives.
+          //
+          // We use the beta.chat.completions.stream() helper (not
+          // create({stream:true})) because it returns a ChatCompletionStream
+          // runner whose finalChatCompletion() resolves to a full ChatCompletion
+          // object with the same shape as a non-streamed response — so all
+          // downstream logic (tool-call parsing, JSON repair, reasoning_content
+          // mapping, empty-response handling) is unchanged.
+          const stream = client.beta.chat.completions.stream(reqParams);
+          // finalChatCompletion() resolves to a full ChatCompletion, or rejects
+          // if the stream ended without producing one (surfaced as a normal
+          // error to the catch block below).
+          response = await stream.finalChatCompletion();
         } catch (error) {
           if (providerMode === "system" && isSystemRoleError(error)) {
             providerMode = "user_embedded";
