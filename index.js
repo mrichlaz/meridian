@@ -992,6 +992,9 @@ IMPORTANT:
           const topSurvivor = passing[0]?.pool;
           if (topSurvivor) {
             const deployProfile = chooseAdaptiveDeployProfile(topSurvivor, config.strategy);
+            if (deployProfile.overrideReason) {
+              log("screening", `Adaptive override: ${topSurvivor.name} config=${deployProfile.configStrategy} → effective=${deployProfile.strategy} (${deployProfile.overrideReason})`);
+            }
             if (deployProfile.deployable) {
               const deployAmountOverride = Number((deployAmount * (deployProfile.sizeMultiplier || 1) * sizeMultiplierForScore(passing[0]?.policy?.score || 66, regime)).toFixed(2));
               const initialValueUsd = currentBalance.sol_price ? deployAmountOverride * currentBalance.sol_price : null;
@@ -1070,6 +1073,9 @@ IMPORTANT:
         const topSurvivor = passingForFallback[0]?.pool;
         if (topSurvivor) {
           const deployProfile = chooseAdaptiveDeployProfile(topSurvivor, config.strategy);
+          if (deployProfile.overrideReason) {
+            log("screening", `Adaptive override: ${topSurvivor.name} config=${deployProfile.configStrategy} → effective=${deployProfile.strategy} (${deployProfile.overrideReason})`);
+          }
           if (deployProfile.deployable) {
             const deployAmountOverride = Number((screeningDeployAmount * (deployProfile.sizeMultiplier || 1) * sizeMultiplierForScore(passingForFallback[0]?.policy?.score || 66)).toFixed(2));
             const initialValueUsd = screeningBalance?.sol_price ? deployAmountOverride * screeningBalance.sol_price : null;
@@ -1851,6 +1857,9 @@ async function deployLatestCandidate(index) {
   }
   const wallet = await getWalletBalances();
   const deployProfile = chooseAdaptiveDeployProfile(candidate, config.strategy);
+  if (deployProfile.overrideReason) {
+    log("screening", `Adaptive override: ${candidate.name} config=${deployProfile.configStrategy} → effective=${deployProfile.strategy} (${deployProfile.overrideReason})`);
+  }
   if (!deployProfile.deployable) {
     appendDecision({
       type: "no_deploy",

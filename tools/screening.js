@@ -99,19 +99,47 @@ export function chooseAdaptiveDeployProfile(pool, strategyConfig = {}) {
   let strategy = strategyConfig.strategy || "bid_ask";
   let binsMultiplier = 1;
   let sizeMultiplier = 1;
+  let overrideReason = null;
 
   if (Number.isFinite(ageHours) && ageHours < 2) {
     return { deployable: false, reason: `token age ${ageHours.toFixed(1)}h below 2h auto-deploy floor` };
   }
-  if (Number.isFinite(ageHours) && ageHours >= 2 && ageHours <= 12 && Number.isFinite(volatility) && volatility >= 5) {
+  // For young volatile tokens (2-12h, vol >= 5), override to spot. Rationale:
+  // bid_ask with single-sided SOL concentrates liquidity at the active bin which
+  // is fragile in the first few hours of price discovery — spot distributes
+  // more evenly so a -20% move doesn't immediately OOR the position.
+  //
+  // The override can be disabled by setting strategyConfig.disableAdaptiveOverride
+  // or by raising strategyConfig.adaptiveMinAgeHours / adaptiveMinVolatility
+  // to thresholds that never match (e.g. Infinity).
+  const overrideDisabled = strategyConfig.disableAdaptiveOverride === true;
+  const overrideMinAge = Number(strategyConfig.adaptiveMinAgeHours ?? 2);
+  const overrideMaxAge = Number(strategyConfig.adaptiveMaxAgeHours ?? 12);
+  const overrideMinVol = Number(strategyConfig.adaptiveMinVolatility ?? 5);
+
+  if (
+    !overrideDisabled &&
+    Number.isFinite(ageHours) && ageHours >= overrideMinAge && ageHours <= overrideMaxAge &&
+    Number.isFinite(volatility) && volatility >= overrideMinVol
+  ) {
     strategy = "spot";
     binsMultiplier = 1.2;
     sizeMultiplier = 0.75;
+    overrideReason = `young (${ageHours.toFixed(1)}h, ${overrideMinAge}-${overrideMaxAge}h window) + volatile (vol=${volatility.toFixed(2)}, min ${overrideMinVol}) — spot is safer for early price discovery`;
   } else if (Number.isFinite(ageHours) && ageHours > 12 && Number.isFinite(volatility) && volatility <= 5) {
     strategy = strategyConfig.strategy || "bid_ask";
   }
 
-  return { deployable: true, strategy, binsMultiplier, sizeMultiplier, ageHours, volatility };
+  return {
+    deployable: true,
+    strategy,
+    binsMultiplier,
+    sizeMultiplier,
+    ageHours,
+    volatility,
+    overrideReason,           // null when no override, or a string explaining why
+    configStrategy: strategyConfig.strategy || "bid_ask",  // what user asked for
+  };
 }
 
 function numeric(value) {
