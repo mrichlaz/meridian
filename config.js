@@ -1,10 +1,15 @@
 import fs from "fs";
+import path from "path";
 import { REPO_ROOT, repoPath } from "./repo-root.js";
+import { PATHS } from "./utils/paths.js";
 import { getScreeningDefaultsForTimeframe, normalizeTimeframe, scaleScreeningToTimeframe, TIMEFRAME_SCREENING_SCALES } from "./screening-scales.js";
 
 export { REPO_ROOT, repoPath, getScreeningDefaultsForTimeframe, normalizeTimeframe, scaleScreeningToTimeframe, TIMEFRAME_SCREENING_SCALES };
 
-const USER_CONFIG_PATH = repoPath("user-config.json");
+// user-config lives in the persistent data volume (PATHS.userConfig → /app/data/user-config.json
+// in Docker, <repo>/data/user-config.json in dev) so settings survive container rebuilds.
+// utils/paths.js already handles DATA_DIR, /data, /app/data, and <repo>/data fallback.
+const USER_CONFIG_PATH = PATHS.userConfig;
 const DEFAULT_HIVEMIND_URL = "https://api.agentmeridian.xyz";
 const DEFAULT_AGENT_MERIDIAN_API_URL = "https://api.agentmeridian.xyz/api";
 const DEFAULT_AGENT_MERIDIAN_PUBLIC_KEY = "bWVyaWRpYW4taXMtdGhlLWJlc3QtYWdlbnRz";
@@ -17,7 +22,7 @@ function readJsonIfExists(filePath) {
 }
 
 const u = readJsonIfExists(USER_CONFIG_PATH);
-const GMGN_CONFIG_PATH = repoPath("gmgn-config.json");
+const GMGN_CONFIG_PATH = path.join(PATHS.data, "gmgn-config.json");
 const gmgnUserConfig = fs.existsSync(GMGN_CONFIG_PATH)
   ? JSON.parse(fs.readFileSync(GMGN_CONFIG_PATH, "utf8"))
   : {};

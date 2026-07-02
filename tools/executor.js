@@ -26,9 +26,12 @@ import { getRecentDecisions } from "../decision-log.js";
 import fs from "fs";
 import { execSync, spawn } from "child_process";
 import { REPO_ROOT, repoPath } from "../repo-root.js";
+import { PATHS } from "../utils/paths.js";
 import { normalizeTimeframe, scaleScreeningToTimeframe, getEffectiveWindowThresholds } from "../screening-scales.js";
 
-const USER_CONFIG_PATH = repoPath("user-config.json");
+// user-config must use the persistent data path (utils/paths.js) so writes
+// from /settings / update_config land in the same file config.js reads at boot.
+const USER_CONFIG_PATH = PATHS.userConfig;
 const POOL_DISCOVERY_BASE = "https://pool-discovery-api.datapi.meteora.ag";
 const MIN_VOLATILITY_TIMEFRAME = "30m";
 const TIMEFRAME_MINUTES = {

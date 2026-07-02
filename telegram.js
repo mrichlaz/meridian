@@ -1,8 +1,12 @@
 import fs from "fs";
 import { log } from "./logger.js";
 import { repoPath } from "./repo-root.js";
+import { PATHS } from "./utils/paths.js";
 
-const USER_CONFIG_PATH = repoPath("user-config.json");
+// user-config lives in the persistent data volume (see utils/paths.js). Reads
+// and writes must use PATHS.userConfig so the file the agent reads at boot
+// is the same file the agent writes to from /settings and update_config.
+const USER_CONFIG_PATH = PATHS.userConfig;
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN || null;
 const BASE  = TOKEN ? `https://api.telegram.org/bot${TOKEN}` : null;
