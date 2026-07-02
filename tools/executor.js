@@ -156,22 +156,34 @@ async function validateDeployPoolThresholds(args) {
   }, timeframe);
 
   // Pool Discovery single-pool endpoint can lag behind the list endpoint and
-  // return null or 0 for fee_active_tvl_ratio even when screening just saw a
-  // valid positive value. First try the DLMM fallback; if that still comes back
-  // empty/zero, trust the screened candidate snapshot carried in args.
-  if (feeActiveTvlRatio == null || feeActiveTvlRatio <= 0) {
+  // return null, 0, OR a near-zero-but-non-zero "stale" value (e.g. 0.000024%
+  // when the screening snapshot said 0.1771% — a 7400x discrepancy, both
+  // verified in the same screening cycle). Treat any value more than 10x
+  // below the candidate's screened snapshot as stale and fall back to the
+  // snapshot, which is the same source the screener trusted seconds ago.
+  const looksStale = (value) => {
+    if (value == null || value <= 0) return true;
+    if (candidateFeeActiveTvlRatio != null && candidateFeeActiveTvlRatio > 0
+        && value < candidateFeeActiveTvlRatio / 10) {
+      return true;  // fresh API is > 10x lower than the screener's snapshot
+    }
+    return false;
+  };
+
+  if (looksStale(feeActiveTvlRatio)) {
     try {
       const dlmmPool = await fetchDlmmFallback(args.pool_address);
       if (dlmmPool) {
         const dlmmFeeActiveTvlRatio = extractDlmmFeeTvlRatio(dlmmPool);
-        if (dlmmFeeActiveTvlRatio != null && dlmmFeeActiveTvlRatio > 0) {
+        if (dlmmFeeActiveTvlRatio != null && dlmmFeeActiveTvlRatio > 0
+            && !looksStale(dlmmFeeActiveTvlRatio)) {
           feeActiveTvlRatio = dlmmFeeActiveTvlRatio;
         }
       }
     } catch { /* non-critical — screening already validated this */ }
   }
-  if ((feeActiveTvlRatio == null || feeActiveTvlRatio <= 0) && candidateFeeActiveTvlRatio != null && candidateFeeActiveTvlRatio > 0) {
-    log("executor_warn", `Deploy validation using screened candidate fee/active-TVL snapshot ${candidateFeeActiveTvlRatio}% for ${args.pool_address} because fresh detail returned ${feeActiveTvlRatio ?? "null"}%`);
+  if (looksStale(feeActiveTvlRatio) && candidateFeeActiveTvlRatio != null && candidateFeeActiveTvlRatio > 0) {
+    log("executor_warn", `Deploy validation using screened candidate fee/active-TVL snapshot ${candidateFeeActiveTvlRatio}% for ${args.pool_address} because fresh detail returned stale value ${feeActiveTvlRatio ?? "null"}%`);
     feeActiveTvlRatio = candidateFeeActiveTvlRatio;
   }
 
