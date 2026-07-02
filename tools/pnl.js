@@ -261,7 +261,11 @@ export async function computePositions(walletAddress) {
 
   const map = await DLMM.getAllLbPairPositionsByUser(conn, new PublicKey(walletAddress));
   _pollCount++;
-  if (_pollCount % 20 === 1) {
+  // Heartbeat every 20 calls. Use % 20 === 0 (not === 1) so the first call
+  // after a process restart doesn't show "tick #0", and subsequent
+  // heartbeats show "tick #20", "tick #40", etc. regardless of how many
+  // cron cycles are interleaved.
+  if (_pollCount % 20 === 0) {
     const n = [...mapEntries(map)].reduce((s, [, i]) => s + (i?.lbPairPositionsData?.length ?? 0), 0);
     log("pnl_tick", `poller alive — ${n} position(s) tracked (tick #${_pollCount})`);
   }
