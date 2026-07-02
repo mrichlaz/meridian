@@ -26,7 +26,7 @@ import { getRecentDecisions } from "../decision-log.js";
 import fs from "fs";
 import { execSync, spawn } from "child_process";
 import { REPO_ROOT, repoPath } from "../repo-root.js";
-import { normalizeTimeframe, scaleScreeningToTimeframe } from "../screening-scales.js";
+import { normalizeTimeframe, scaleScreeningToTimeframe, getEffectiveWindowThresholds } from "../screening-scales.js";
 
 const USER_CONFIG_PATH = repoPath("user-config.json");
 const POOL_DISCOVERY_BASE = "https://pool-discovery-api.datapi.meteora.ag";
