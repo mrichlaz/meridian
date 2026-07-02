@@ -82,7 +82,7 @@ export async function fetchDlmmPnlForPool(poolAddress, walletAddress) {
   }
 }
 
-// ─── Jupiter prices (never cached) ──────────────────────────────
+// ─── Jupiter prices + symbols (never cached) ────────────────────────
 async function getJupiterPrices(mints) {
   const list = unique(mints.map((m) => String(m).trim()));
   if (!list.length) return {};
@@ -91,7 +91,12 @@ async function getJupiterPrices(mints) {
     if (!res.ok) throw new Error(`Jupiter ${res.status}`);
     const assets = await res.json();
     const out = {};
-    for (const a of assets) out[a.id] = maybeNum(a.usdPrice);
+    for (const a of assets) {
+      out[a.id] = {
+        price: maybeNum(a.usdPrice),
+        symbol: a.symbol || null,
+      };
+    }
     return out;
   } catch (e) {
     log("pnl_price", `Jupiter price fetch failed: ${e.message}`);
@@ -151,7 +156,7 @@ function mapEntries(map) {
 
 // ─── Build the shaped position object (matches getMyPositions output) ──
 function buildPosition(f, prices, solUsd, meteora, solMode) {
-  const priceX = f.baseMint ? (prices[f.baseMint] ?? 0) : 0;
+  const priceX = f.baseMint ? (prices[f.baseMint]?.price ?? 0) : 0;
 
   const xHuman = safeNum(f.xRaw) / 10 ** f.decX;
   const yHuman = safeNum(f.yRaw) / 10 ** f.decY;
@@ -213,7 +218,10 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
   return {
     position:           f.position,
     pool:               f.pool,
-    pair:               tracked?.pool_name || (meteora ? `${meteora.tokenX ?? "?"}/${meteora.tokenY ?? "SOL"}` : "?/SOL"),
+    pair:               tracked?.pool_name
+      || (f.baseMint && prices[f.baseMint]?.symbol
+            ? `${prices[f.baseMint].symbol}/SOL`
+            : "?/SOL"),
     base_mint:          f.baseMint,
     lower_bin:          f.lower ?? tracked?.bin_range?.min ?? null,
     upper_bin:          f.upper ?? tracked?.bin_range?.max ?? null,
@@ -227,7 +235,11 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
     collected_fees_true_usd: round(claimedUsd),
     pnl_usd:            round(solMode ? pnlSol : pnlUsd),
     pnl_true_usd:       round(pnlUsd),
-    pnl_pct:            round(ourPct, 2),
+    // Prefer Meteora's precomputed pnlPctChange so the agent's display
+    // matches what the user sees on the DLMM UI. Falls back to our
+    // freshly-computed ourPct when the Meteora API didn't return a value
+    // (e.g. brand-new position not yet indexed).
+    pnl_pct:            round(reportedPct != null ? reportedPct : ourPct, 2),
     pnl_pct_derived:    round(ourPct, 2),
     pnl_pct_diff:       pnlPctDiff != null ? round(pnlPctDiff, 2) : null,
     pnl_pct_suspicious: !!pnlPctSuspicious,
@@ -287,7 +299,7 @@ export async function computePositions(walletAddress) {
     getJupiterPrices([SOL_MINT, ...flat.map((f) => f.baseMint)]),
     getMeteoraData(conn, walletAddress, flat),
   ]);
-  const solUsd = prices[SOL_MINT] ?? null;
+  const solUsd = prices[SOL_MINT]?.price ?? null;
 
   const positions = flat.map((f) => buildPosition(f, prices, solUsd, meteoraByPosition[f.position], solMode));
 
