@@ -264,7 +264,7 @@ After evaluating, write a brief one-line result per position.
   return lines.join("\n");
 }
 
-export async function runManagementCycle({ silent = false } = {}) {
+export async function runManagementCycle({ silent = false, triggerScreening = true } = {}) {
   if (_managementBusy) return null;
   _managementBusy = true;
   timers.managementLastRun = Date.now();
