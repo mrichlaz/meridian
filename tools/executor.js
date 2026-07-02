@@ -857,7 +857,7 @@ export async function executeTool(name, args) {
             pnlUsd: result.pnl_usd ?? 0,
             pnlPct: result.pnl_pct ?? 0,
             reason: result.reason || args.reason,
-          }).catch(() => {});
+          }).catch((e) => log("executor_warn", `notifyClose failed for ${args.position_address?.slice(0, 8)}: ${e?.message || e}`));
           // Note low-yield closes in pool memory so screener avoids redeploying
           if (args.reason && args.reason.toLowerCase().includes("yield")) {
             const poolAddr = result.pool || args.pool_address;
