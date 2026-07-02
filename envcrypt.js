@@ -1,10 +1,9 @@
 import fs from "fs";
 import path from "path";
 import dotenv from "dotenv";
-import { repoPath } from "./repo-root.js";
 
-const DEFAULT_ENV_PATH = repoPath(".env");
-const DEFAULT_KEY_PATH = repoPath(".envrypt");
+const DEFAULT_ENV_PATH = path.join(process.cwd(), ".env");
+const DEFAULT_KEY_PATH = path.join(process.cwd(), ".envrypt");
 
 function isEncryptedMarker(line) {
   return line.trim().toLowerCase() === "# encrypted";
@@ -68,7 +67,6 @@ export function envryptDecrypt(value, key) {
 }
 
 export function loadEnv({ envPath = DEFAULT_ENV_PATH, keyPath = DEFAULT_KEY_PATH, override = true } = {}) {
-  // override=true so repo .env wins over stale PM2-injected env on restart
   dotenv.config({ path: envPath, override, quiet: true });
 
   const encryptedKeys = parseEncryptedKeys(envPath);
@@ -92,7 +90,7 @@ export function loadEnv({ envPath = DEFAULT_ENV_PATH, keyPath = DEFAULT_KEY_PATH
 }
 
 export function encryptEnvRaw({
-  rawPath = repoPath(".env.raw"),
+  rawPath = path.join(process.cwd(), ".env.raw"),
   outPath = DEFAULT_ENV_PATH,
   keyPath = DEFAULT_KEY_PATH,
 } = {}) {

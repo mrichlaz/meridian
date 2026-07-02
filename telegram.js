@@ -1,11 +1,10 @@
 import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import { log } from "./logger.js";
-import { repoPath } from "./repo-root.js";
 import { PATHS } from "./utils/paths.js";
 
-// user-config lives in the persistent data volume (see utils/paths.js). Reads
-// and writes must use PATHS.userConfig so the file the agent reads at boot
-// is the same file the agent writes to from /settings and update_config.
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const USER_CONFIG_PATH = PATHS.userConfig;
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN || null;

@@ -24,13 +24,15 @@ import { getTokenInfo, getTokenHolders, getTokenNarrative } from "./token.js";
 import { config, reloadScreeningThresholds, MIN_SAFE_BINS_BELOW } from "../config.js";
 import { getRecentDecisions } from "../decision-log.js";
 import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import { execSync, spawn } from "child_process";
-import { REPO_ROOT, repoPath } from "../repo-root.js";
-import { PATHS } from "../utils/paths.js";
+
 import { normalizeTimeframe, scaleScreeningToTimeframe, getEffectiveWindowThresholds } from "../screening-scales.js";
 
-// user-config must use the persistent data path (utils/paths.js) so writes
-// from /settings / update_config land in the same file config.js reads at boot.
+import { PATHS } from "../utils/paths.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const USER_CONFIG_PATH = PATHS.userConfig;
 const POOL_DISCOVERY_BASE = "https://pool-discovery-api.datapi.meteora.ag";
 const MIN_VOLATILITY_TIMEFRAME = "30m";
@@ -49,6 +51,41 @@ import { notifyDeploy, notifyClose, notifySwap } from "../telegram.js";
 function numberOrNull(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Swap a base token back to SOL with retry. Jupiter can transiently fail (no route,
+ * quote error) and a single attempt silently leaves the token unsold — this retries
+ * with a delay, re-fetching the balance each attempt (amounts can shift on partial
+ * fills). Treats both a throw AND result.success===false / missing tx as failure.
+ * Returns { swapped, result, token } — swapped=false if nothing to do or all attempts failed.
+ */
+async function swapBaseToSolWithRetry(baseMint, label) {
+  const attempts = Math.max(1, Number(config.management.autoSwapRetryAttempts ?? 3));
+  const delayMs = Math.max(0, Number(config.management.autoSwapRetryDelayMs ?? 3000));
+  let lastErr = null;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const balances = await getWalletBalances({});
+      const token = balances.tokens?.find((t) => t.mint === baseMint);
+      if (!token || token.usd < 0.10) {
+        return { swapped: attempt > 1, result: null, token: null };
+      }
+      log("executor", `Auto-swapping ${label} ${token.symbol || baseMint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL (attempt ${attempt}/${attempts})`);
+      const swapResult = await swapToken({ input_mint: baseMint, output_mint: "SOL", amount: token.balance });
+      const ok = swapResult && swapResult.success !== false && !swapResult.error && (swapResult.tx || swapResult.amount_out);
+      if (ok) return { swapped: true, result: swapResult, token };
+      lastErr = swapResult?.error || swapResult?.reason || "swap returned no tx";
+    } catch (e) {
+      lastErr = e.message;
+    }
+    log("executor_warn", `Auto-swap ${label} attempt ${attempt}/${attempts} failed: ${lastErr}`);
+    if (attempt < attempts) await sleep(delayMs);
+  }
+  log("executor_warn", `Auto-swap ${label} failed after ${attempts} attempts — base token left unsold (${baseMint.slice(0, 8)})`);
+  return { swapped: false, result: null, token: null };
 }
 
 function getVolatilityTimeframe(sourceTimeframe) {
@@ -236,15 +273,7 @@ async function validateDeployPoolThresholds(args) {
     };
   }
 
-  const baseMint = detail?.token_x?.address || detail?.base_token_address || null;
-  const entryMarketData = {
-    entry_mcap: numberOrNull(detail?.token_x?.market_cap ?? detail?.base_token_market_cap),
-    entry_tvl: tvl,
-    entry_volume: numberOrNull(detail?.volume),
-    entry_holders: numberOrNull(detail?.base_token_holders ?? detail?.token_x?.holders),
-  };
-
-  return { pass: true, entryMarketData };
+  return { pass: true, detail };
 }
 
 // Registered by index.js so update_config can restart cron jobs when intervals change
@@ -295,14 +324,6 @@ function normalizeConfigValue(key, value) {
     "policyEnabled",
   ]);
   const arrayKeys = new Set(["allowedLaunchpads", "blockedLaunchpads"]);
-  const numberKeys = new Set([
-    "mlTrainEvery", "mlMinSamples", "mlBatchSize", "mlEpochs", "mlLearningRate",
-    "policyMinFeeVolatilityRatio", "policyMinVolumePersistence", "policyToxicFlowPenalty",
-    "policyNeutralMinScore", "policyRiskOffMinScore", "policyRiskOnMinScore", "policyShrinkRetryPct",
-    "darwinWindowDays", "darwinRecalcEvery", "darwinBoost", "darwinDecay",
-    "darwinFloor", "darwinCeiling", "darwinMinSamples",
-    "rsiLength", "indicatorCandles", "rsiOversold", "rsiOverbought",
-  ]);
   const stringKeys = new Set([
     "timeframe",
     "category",
@@ -326,6 +347,14 @@ function normalizeConfigValue(key, value) {
     "pnlRpcUrl",
     "gmgnFeeSource",
     "gmgnApiKey",
+  ]);
+  const numberKeys = new Set([
+    "mlTrainEvery", "mlMinSamples", "mlBatchSize", "mlEpochs", "mlLearningRate",
+    "policyMinFeeVolatilityRatio", "policyMinVolumePersistence", "policyToxicFlowPenalty",
+    "policyNeutralMinScore", "policyRiskOffMinScore", "policyRiskOnMinScore", "policyShrinkRetryPct",
+    "darwinWindowDays", "darwinRecalcEvery", "darwinBoost", "darwinDecay",
+    "darwinFloor", "darwinCeiling", "darwinMinSamples",
+    "rsiLength", "indicatorCandles", "rsiOversold", "rsiOverbought",
   ]);
   if (value === null) return null;
   if (booleanKeys.has(key)) return coerceBoolean(value, key);
@@ -366,7 +395,7 @@ const toolMap = {
   },
   self_update: async () => {
     try {
-      const result = execSync("git pull", { cwd: REPO_ROOT, encoding: "utf8" }).trim();
+      const result = execSync("git pull", { cwd: process.cwd(), encoding: "utf8" }).trim();
       if (result.includes("Already up to date")) {
         return { success: true, updated: false, message: "Already up to date — no restart needed." };
       }
@@ -376,7 +405,7 @@ const toolMap = {
           const child = spawn(process.execPath, process.argv.slice(1), {
             detached: true,
             stdio: "inherit",
-            cwd: REPO_ROOT,
+            cwd: process.cwd(),
           });
           child.unref();
         }
@@ -457,21 +486,18 @@ const toolMap = {
       discordSignalMode: ["screening", "discordSignalMode"],
       avoidPvpSymbols: ["screening", "avoidPvpSymbols"],
       blockPvpSymbols: ["screening", "blockPvpSymbols"],
+      maxBundlePct:     ["screening", "maxBundlePct"],
       maxBotHoldersPct: ["screening", "maxBotHoldersPct"],
       maxTop10Pct: ["screening", "maxTop10Pct"],
-      maxBundlePct: ["screening", "maxBundlePct"],
-      athFilterPct: ["screening", "athFilterPct"],
       allowedLaunchpads: ["screening", "allowedLaunchpads"],
       blockedLaunchpads: ["screening", "blockedLaunchpads"],
       minTokenAgeHours: ["screening", "minTokenAgeHours"],
       maxTokenAgeHours: ["screening", "maxTokenAgeHours"],
+      athFilterPct:     ["screening", "athFilterPct"],
       minFeePerTvl24h: ["management", "minFeePerTvl24h"],
-      loneCandidateMinDegen: ["screening", "loneCandidateMinDegen"],
       // management
       minClaimAmount: ["management", "minClaimAmount"],
       autoSwapAfterClaim: ["management", "autoSwapAfterClaim"],
-      autoSwapRetryAttempts: ["management", "autoSwapRetryAttempts"],
-      autoSwapRetryDelayMs: ["management", "autoSwapRetryDelayMs"],
       outOfRangeBinsToClose: ["management", "outOfRangeBinsToClose"],
       outOfRangeWaitMinutes: ["management", "outOfRangeWaitMinutes"],
       oorCooldownTriggerCount: ["management", "oorCooldownTriggerCount"],
@@ -489,18 +515,6 @@ const toolMap = {
       trailingTriggerPct: ["management", "trailingTriggerPct"],
       trailingDropPct: ["management", "trailingDropPct"],
       pnlSanityMaxDiffPct: ["management", "pnlSanityMaxDiffPct"],
-      // pnl poller
-      pnlConfirmTicks: ["pnl", "confirmTicks"],
-      // opportunity poller (interval/enabled changes apply on next restart)
-      opportunityPollEnabled: ["opportunity", "enabled"],
-      opportunityPollIntervalSec: ["opportunity", "pollIntervalSec"],
-      opportunityPollLimit: ["opportunity", "limit"],
-      opportunityMinScore: ["opportunity", "minScore"],
-      opportunitySmartWalletBonus: ["opportunity", "smartWalletScoreBonus"],
-      degenTargetVolRatio: ["opportunity", "targetVolRatio"],
-      degenTargetLpCount: ["opportunity", "targetLpCount"],
-      degenTargetFeeRatio: ["opportunity", "targetFeeRatio"],
-      degenTargetLiquidity: ["opportunity", "targetLiquidity"],
       solMode: ["management", "solMode"],
       evolveEnabled: ["management", "evolveEnabled"],
       minSolToOpen: ["management", "minSolToOpen"],
@@ -537,6 +551,31 @@ const toolMap = {
       publicApiKey: ["api", "publicApiKey"],
       agentMeridianApiUrl: ["api", "url"],
       lpAgentRelayEnabled: ["api", "lpAgentRelayEnabled"],
+      // policy / flow quality
+      policyEnabled: ["policy", "enabled", ["policyEnabled"]],
+      policyMinFeeVolatilityRatio: ["policy", "minFeeVolatilityRatio", ["policyMinFeeVolatilityRatio"]],
+      policyMinVolumePersistence: ["policy", "minVolumePersistence", ["policyMinVolumePersistence"]],
+      policyToxicFlowPenalty: ["policy", "toxicFlowPenalty", ["policyToxicFlowPenalty"]],
+      policyNeutralMinScore: ["policy", "neutralMinScore", ["policyNeutralMinScore"]],
+      policyRiskOffMinScore: ["policy", "riskOffMinScore", ["policyRiskOffMinScore"]],
+      policyRiskOnMinScore: ["policy", "riskOnMinScore", ["policyRiskOnMinScore"]],
+      policyShrinkRetryPct: ["policy", "shrinkRetryPct", ["policyShrinkRetryPct"]],
+      // ml / darwin
+      mlEnabled: ["ml", "enabled", ["mlEnabled"]],
+      mlTrainEvery: ["ml", "trainEvery", ["mlTrainEvery"]],
+      mlMinSamples: ["ml", "minSamples", ["mlMinSamples"]],
+      mlBatchSize: ["ml", "batchSize", ["mlBatchSize"]],
+      mlEpochs: ["ml", "epochs", ["mlEpochs"]],
+      mlLearningRate: ["ml", "learningRate", ["mlLearningRate"]],
+      mlPersonality: ["ml", "personality", ["mlPersonality"]],
+      darwinEnabled: ["darwin", "enabled", ["darwinEnabled"]],
+      darwinWindowDays: ["darwin", "windowDays", ["darwinWindowDays"]],
+      darwinRecalcEvery: ["darwin", "recalcEvery", ["darwinRecalcEvery"]],
+      darwinBoost: ["darwin", "boostFactor", ["darwinBoost"]],
+      darwinDecay: ["darwin", "decayFactor", ["darwinDecay"]],
+      darwinFloor: ["darwin", "weightFloor", ["darwinFloor"]],
+      darwinCeiling: ["darwin", "weightCeiling", ["darwinCeiling"]],
+      darwinMinSamples: ["darwin", "minSamples", ["darwinMinSamples"]],
       // pnl fetcher / poller
       pnlSource: ["pnl", "source", ["pnlSource"]],
       pnlRpcUrl: ["pnl", "rpcUrl", ["pnlRpcUrl"]],
@@ -690,7 +729,7 @@ const toolMap = {
 
     // Skip repeated volatility-driven interval changes; they are operational tuning, not reusable lessons.
     const lessonsKeys = Object.keys(applied).filter(
-      k => !k.startsWith("_") && k !== "managementIntervalMin" && k !== "screeningIntervalMin"
+      k => k !== "managementIntervalMin" && k !== "screeningIntervalMin"
     );
     if (lessonsKeys.length > 0) {
       const summary = lessonsKeys.map(k => `${k}=${applied[k]}`).join(", ");
@@ -713,42 +752,6 @@ const PROTECTED_TOOLS = new Set([
   ...WRITE_TOOLS,
   "self_update",
 ]);
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-/**
- * Swap a base token back to SOL with retry. Jupiter can transiently fail (no route,
- * quote error) and a single attempt silently leaves the token unsold — this retries
- * with a delay, re-fetching the balance each attempt (amounts can shift on partial
- * fills). Treats both a throw AND result.success===false / missing tx as failure.
- * Returns { swapped, result, token } — swapped=false if nothing to do or all attempts failed.
- */
-async function swapBaseToSolWithRetry(baseMint, label) {
-  const attempts = Math.max(1, Number(config.management.autoSwapRetryAttempts ?? 3));
-  const delayMs = Math.max(0, Number(config.management.autoSwapRetryDelayMs ?? 3000));
-  let lastErr = null;
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    try {
-      const balances = await getWalletBalances({});
-      const token = balances.tokens?.find((t) => t.mint === baseMint);
-      if (!token || token.usd < 0.10) {
-        // Nothing left to swap (already sold or dust) — treat as done.
-        return { swapped: attempt > 1, result: null, token: null };
-      }
-      log("executor", `Auto-swapping ${label} ${token.symbol || baseMint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL (attempt ${attempt}/${attempts})`);
-      const swapResult = await swapToken({ input_mint: baseMint, output_mint: "SOL", amount: token.balance });
-      const ok = swapResult && swapResult.success !== false && !swapResult.error && (swapResult.tx || swapResult.amount_out);
-      if (ok) return { swapped: true, result: swapResult, token };
-      lastErr = swapResult?.error || swapResult?.reason || "swap returned no tx";
-    } catch (e) {
-      lastErr = e.message;
-    }
-    log("executor_warn", `Auto-swap ${label} attempt ${attempt}/${attempts} failed: ${lastErr}`);
-    if (attempt < attempts) await sleep(delayMs);
-  }
-  log("executor_warn", `Auto-swap ${label} failed after ${attempts} attempts — base token left unsold (${baseMint.slice(0, 8)})`);
-  return { swapped: false, result: null, token: null };
-}
 
 /**
  * Execute a tool call with safety checks and logging.
@@ -820,7 +823,6 @@ export async function executeTool(name, args) {
         } else {
           notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, priceRange: result.price_range, rangeCoverage: result.range_coverage, binStep: result.bin_step, baseFee: result.base_fee }).catch(() => {});
         }
-        // Auto-tune management interval based on deploy-time volatility
         const v = Number(args.volatility);
         const nextInterval = Number.isFinite(v) && v >= 5 ? 3 : Number.isFinite(v) && v >= 2 ? 5 : 10;
         if (config.schedule.managementIntervalMin !== nextInterval) {
@@ -892,7 +894,6 @@ async function runSafetyChecks(name, args) {
     case "deploy_position": {
       const poolThresholds = await validateDeployPoolThresholds(args);
       if (!poolThresholds.pass) return poolThresholds;
-      if (poolThresholds.entryMarketData) Object.assign(args, poolThresholds.entryMarketData);
 
       // Inject entry market data from pool detail (captured at deploy time)
       const deployDetail = poolThresholds.detail;
