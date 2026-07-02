@@ -851,6 +851,7 @@ export async function executeTool(name, args) {
           // already moved by the original close).
           log("executor", `Skipping notifyClose + auto-swap for already-closed position ${args.position_address?.slice(0, 8)}`);
         } else {
+          log("executor", `close_position succeeded for ${args.position_address?.slice(0, 8)} — base_mint=${result.base_mint?.slice(0, 12) || "MISSING"} skip_swap=${!!args.skip_swap}`);
           notifyClose({
             pair: result.pool_name || args.position_address?.slice(0, 8),
             pnlUsd: result.pnl_usd ?? 0,
@@ -863,7 +864,12 @@ export async function executeTool(name, args) {
             if (poolAddr) addPoolNote({ pool_address: poolAddr, note: `Closed: low yield (fee/TVL below threshold) at ${new Date().toISOString().slice(0,10)}` }).catch?.(() => {});
           }
           // Auto-swap base token back to SOL unless user said to hold (retried).
-          if (!args.skip_swap && result.base_mint) {
+          if (args.skip_swap) {
+            log("executor", `Auto-swap SKIPPED for ${args.position_address?.slice(0, 8)} — args.skip_swap=true (user wanted to hold the base token)`);
+          } else if (!result.base_mint) {
+            log("executor_warn", `Auto-swap SKIPPED for ${args.position_address?.slice(0, 8)} — result.base_mint is missing! The close tool returned no base_mint, so we don't know what to swap. Report this to the developer.`);
+          } else {
+            log("executor", `Auto-swap FIRING for ${args.position_address?.slice(0, 8)} base_mint=${result.base_mint.slice(0, 12)}`);
             const { swapped, result: swapResult } = await swapBaseToSolWithRetry(result.base_mint, "after close");
             if (swapped) {
               result.auto_swapped = true;
