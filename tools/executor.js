@@ -322,6 +322,7 @@ function normalizeConfigValue(key, value) {
     "requireAllIntervals",
     "lpAgentRelayEnabled",
     "policyEnabled",
+    "disableAdaptiveOverride",
   ]);
   const arrayKeys = new Set(["allowedLaunchpads", "blockedLaunchpads"]);
   const stringKeys = new Set([
@@ -355,6 +356,7 @@ function normalizeConfigValue(key, value) {
     "darwinWindowDays", "darwinRecalcEvery", "darwinBoost", "darwinDecay",
     "darwinFloor", "darwinCeiling", "darwinMinSamples",
     "rsiLength", "indicatorCandles", "rsiOversold", "rsiOverbought",
+    "adaptiveMinAgeHours", "adaptiveMaxAgeHours", "adaptiveMinVolatility",
   ]);
   if (value === null) return null;
   if (booleanKeys.has(key)) return coerceBoolean(value, key);
@@ -542,6 +544,10 @@ const toolMap = {
       minBinsBelow: ["strategy", "minBinsBelow"],
       maxBinsBelow: ["strategy", "maxBinsBelow"],
       defaultBinsBelow: ["strategy", "defaultBinsBelow"],
+      disableAdaptiveOverride: ["strategy", "disableAdaptiveOverride"],
+      adaptiveMinAgeHours: ["strategy", "adaptiveMinAgeHours"],
+      adaptiveMaxAgeHours: ["strategy", "adaptiveMaxAgeHours"],
+      adaptiveMinVolatility: ["strategy", "adaptiveMinVolatility"],
       // hivemind
       hiveMindUrl: ["hiveMind", "url"],
       hiveMindApiKey: ["hiveMind", "apiKey"],

@@ -398,7 +398,7 @@ Management: minClaimAmount, outOfRangeBinsToClose, outOfRangeWaitMinutes, oorCoo
 Risk: maxPositions, maxDeployAmount
 Schedule: managementIntervalMin, screeningIntervalMin, healthCheckIntervalMin
 Models: managementModel, screeningModel, generalModel, temperature, maxTokens, maxSteps
-Strategy: minBinsBelow, maxBinsBelow, defaultBinsBelow
+Strategy: strategy, minBinsBelow, maxBinsBelow, defaultBinsBelow, disableAdaptiveOverride, adaptiveMinAgeHours, adaptiveMaxAgeHours, adaptiveMinVolatility
 ML (opt-in scoring + emotion): mlEnabled, mlTrainEvery, mlMinSamples, mlBatchSize, mlEpochs, mlLearningRate, mlPersonality
 Darwin (signal weighting): darwinEnabled, darwinWindowDays, darwinRecalcEvery, darwinBoost, darwinDecay, darwinFloor, darwinCeiling, darwinMinSamples
 HiveMind (cross-agent lessons): hiveMindUrl, hiveMindApiKey, agentId, hiveMindPullMode
