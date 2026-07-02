@@ -795,14 +795,43 @@ export async function executeTool(name, args) {
         } else {
           notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, priceRange: result.price_range, rangeCoverage: result.range_coverage, binStep: result.bin_step, baseFee: result.base_fee }).catch(() => {});
         }
-        // Auto-swap base token back to SOL unless user said to hold (retried).
-        if (!args.skip_swap && result.base_mint) {
-          const { swapped, result: swapResult } = await swapBaseToSolWithRetry(result.base_mint, "after close");
-          if (swapped) {
-            // Tell the model the swap already happened so it doesn't call swap_token again
-            result.auto_swapped = true;
-            result.auto_swap_note = `Base token already auto-swapped back to SOL (${result.base_mint.slice(0, 8)} → SOL). Do NOT call swap_token again.`;
-            if (swapResult?.amount_out) result.sol_received = swapResult.amount_out;
+        // Auto-tune management interval based on deploy-time volatility
+        const v = Number(args.volatility);
+        const nextInterval = Number.isFinite(v) && v >= 5 ? 3 : Number.isFinite(v) && v >= 2 ? 5 : 10;
+        if (config.schedule.managementIntervalMin !== nextInterval) {
+          config.schedule.managementIntervalMin = nextInterval;
+          if (_cronRestarter) _cronRestarter();
+          log("config", `Auto-set management interval to ${nextInterval}m after deploy volatility=${args.volatility ?? "unknown"}`);
+        }
+      } else if (name === "close_position") {
+        if (result.already_closed) {
+          // Already-closed path means the tool itself short-circuited because
+          // the on-chain account is gone or the state was already closed. The
+          // management cycle or /close command owns the user-facing message
+          // for this case; we must not double-announce "🔒 Closed" here, and
+          // we must not run the auto-swap again (the underlying tokens were
+          // already moved by the original close).
+          log("executor", `Skipping notifyClose + auto-swap for already-closed position ${args.position_address?.slice(0, 8)}`);
+        } else {
+          notifyClose({
+            pair: result.pool_name || args.position_address?.slice(0, 8),
+            pnlUsd: result.pnl_usd ?? 0,
+            pnlPct: result.pnl_pct ?? 0,
+            reason: result.reason || args.reason,
+          }).catch(() => {});
+          // Note low-yield closes in pool memory so screener avoids redeploying
+          if (args.reason && args.reason.toLowerCase().includes("yield")) {
+            const poolAddr = result.pool || args.pool_address;
+            if (poolAddr) addPoolNote({ pool_address: poolAddr, note: `Closed: low yield (fee/TVL below threshold) at ${new Date().toISOString().slice(0,10)}` }).catch?.(() => {});
+          }
+          // Auto-swap base token back to SOL unless user said to hold (retried).
+          if (!args.skip_swap && result.base_mint) {
+            const { swapped, result: swapResult } = await swapBaseToSolWithRetry(result.base_mint, "after close");
+            if (swapped) {
+              result.auto_swapped = true;
+              result.auto_swap_note = `Base token already auto-swapped back to SOL (${result.base_mint.slice(0, 8)} → SOL). Do NOT call swap_token again.`;
+              if (swapResult?.amount_out) result.sol_received = swapResult.amount_out;
+            }
           }
         }
       } else if (name === "claim_fees" && config.management.autoSwapAfterClaim && result.base_mint) {

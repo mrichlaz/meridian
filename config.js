@@ -17,7 +17,10 @@ function readJsonIfExists(filePath) {
 }
 
 const u = readJsonIfExists(USER_CONFIG_PATH);
-const gmgnUserConfig = readJsonIfExists(GMGN_CONFIG_PATH);
+const GMGN_CONFIG_PATH = repoPath("gmgn-config.json");
+const gmgnUserConfig = fs.existsSync(GMGN_CONFIG_PATH)
+  ? JSON.parse(fs.readFileSync(GMGN_CONFIG_PATH, "utf8"))
+  : {};
 export const MIN_SAFE_BINS_BELOW = 35;
 
 function numericConfig(value) {
@@ -50,14 +53,17 @@ if (u.telegramChatId) process.env.TELEGRAM_CHAT_ID ||= String(u.telegramChatId);
 
 const indicatorUserConfig = u.chartIndicators ?? {};
 
-// Optional standalone GMGN config file (mirrors user-config layering)
-const GMGN_CONFIG_PATH = repoPath("gmgn-config.json");
-const gmgnUserConfig = fs.existsSync(GMGN_CONFIG_PATH)
-  ? JSON.parse(fs.readFileSync(GMGN_CONFIG_PATH, "utf8"))
-  : {};
-if (gmgnUserConfig.apiKey || u.gmgnApiKey) {
-  process.env.GMGN_API_KEY ||= gmgnUserConfig.apiKey || u.gmgnApiKey;
+function gmgnValue(key, legacyKey, fallback) {
+  return gmgnUserConfig[key] ?? u[legacyKey] ?? fallback;
 }
+
+function gmgnArray(key, legacyKey, fallback) {
+  if (Array.isArray(gmgnUserConfig[key])) return gmgnUserConfig[key];
+  if (Array.isArray(u[legacyKey])) return u[legacyKey];
+  return fallback;
+}
+
+// Optional standalone GMGN config file (mirrors user-config layering)
 
 function nonEmptyString(...values) {
   for (const value of values) {
