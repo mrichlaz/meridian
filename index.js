@@ -2728,10 +2728,14 @@ async function enrichAndFilterCandidates({ limit = 10, liveMessage = null } = {}
   const BATCH_SIZE = 2;
   const STAGGER_MS = 120;
   const BATCH_PAUSE_MS = 120;
+  // Agent Meridian study endpoint now responds in ~3s on average with occasional
+  // 5-6s spikes. The old 3000ms cap caused every study to time out by 11ms and
+  // log a fallback warning per pool. Bump to 8000ms (safety margin 2-3x) so the
+  // study data is actually used.
   const SMART_WALLET_TIMEOUT_MS = 3500;
   const NARRATIVE_TIMEOUT_MS = 1500;
   const TOKEN_INFO_TIMEOUT_MS = 2000;
-  const STUDY_TIMEOUT_MS = 3000;
+  const STUDY_TIMEOUT_MS = 8000;
   for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
     const batch = candidates.slice(i, i + BATCH_SIZE);
     const batchResults = await Promise.all(
