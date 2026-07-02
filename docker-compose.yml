@@ -9,6 +9,11 @@ services:
       - logs:/app/logs
     environment:
       - NODE_ENV=production
+      # Pin the persistent paths the agent reads/writes — utils/paths.js
+      # honours these env vars and falls back to /app/data + /app/logs if
+      # unset, so the explicit values here are belt-and-suspenders.
+      - DATA_DIR=/app/data
+      - LOG_DIR=/app/logs
     logging:
       driver: "json-file"
       options:
