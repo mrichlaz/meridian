@@ -280,6 +280,14 @@ function normalizeConfigValue(key, value) {
     "policyEnabled",
   ]);
   const arrayKeys = new Set(["allowedLaunchpads", "blockedLaunchpads"]);
+  const numberKeys = new Set([
+    "mlTrainEvery", "mlMinSamples", "mlBatchSize", "mlEpochs", "mlLearningRate",
+    "policyMinFeeVolatilityRatio", "policyMinVolumePersistence", "policyToxicFlowPenalty",
+    "policyNeutralMinScore", "policyRiskOffMinScore", "policyRiskOnMinScore", "policyShrinkRetryPct",
+    "darwinWindowDays", "darwinRecalcEvery", "darwinBoost", "darwinDecay",
+    "darwinFloor", "darwinCeiling", "darwinMinSamples",
+    "rsiLength", "indicatorCandles", "rsiOversold", "rsiOverbought",
+  ]);
   const stringKeys = new Set([
     "timeframe",
     "category",
