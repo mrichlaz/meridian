@@ -146,7 +146,7 @@ function entryAmountPct(entry) {
 }
 
 function isPreferredKol(entry) {
-  const preferred = config.gmgn.preferredKolNames
+  const preferred = (config.gmgn?.preferredKolNames || [])
     .map((name) => String(name || "").trim().toLowerCase())
     .filter(Boolean);
   if (!preferred.length) return false;

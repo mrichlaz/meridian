@@ -324,14 +324,9 @@ export const config = {
   },
 
   // ─── GMGN (fee source for minTokenFeesSol gate) ──────────────
-  gmgn: {
-    apiKey: nonEmptyString(gmgnUserConfig.apiKey, u.gmgnApiKey, process.env.GMGN_API_KEY),
-    baseUrl: nonEmptyString(gmgnUserConfig.baseUrl, u.gmgnBaseUrl, "https://openapi.gmgn.ai"),
-    requestDelayMs: Number(gmgnUserConfig.requestDelayMs ?? u.gmgnRequestDelayMs ?? 2500),
-    maxRetries: Number(gmgnUserConfig.maxRetries ?? u.gmgnMaxRetries ?? 2),
-    // gmgn = use GMGN total_fee for global_fees_sol; jupiter = legacy Jupiter fees
-    feeSource: nonEmptyString(gmgnUserConfig.feeSource, u.gmgnFeeSource, "gmgn"),
-  },
+  // NOTE: the full GMGN config (screening/filtering settings) is defined
+  // earlier in this file; the minimal shape here is intentionally a no-op
+  // so we don't shadow it with this second `gmgn:` block.
 
   jupiter: {
     // Internal Jupiter Ultra settings; override by env only, do not expose in user-config.
