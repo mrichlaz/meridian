@@ -151,10 +151,10 @@ export const config = {
     defaultBinsBelow: strategyDefaultBinsBelow,
     // Adaptive override: for young volatile tokens (2-12h old, vol >= 5),
     // the screening auto-deploy flips the strategy to "spot" for safer
-    // price discovery. Set disableAdaptiveOverride: true in user-config.json
-    // to always use your configured strategy. Raise the thresholds to
-    // effectively disable without fully turning it off.
-    disableAdaptiveOverride: u.disableAdaptiveOverride ?? false,
+    // price discovery. Default OFF (true) — always use the configured
+    // strategy. Set disableAdaptiveOverride: false in user-config.json
+    // to re-enable the override, or tune the thresholds below.
+    disableAdaptiveOverride: u.disableAdaptiveOverride ?? true,
     adaptiveMinAgeHours:  u.adaptiveMinAgeHours  ?? 2,
     adaptiveMaxAgeHours:  u.adaptiveMaxAgeHours  ?? 12,
     adaptiveMinVolatility: u.adaptiveMinVolatility ?? 5,
