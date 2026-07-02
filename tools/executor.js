@@ -65,12 +65,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function swapBaseToSolWithRetry(baseMint, label) {
   const attempts = Math.max(1, Number(config.management.autoSwapRetryAttempts ?? 3));
   const delayMs = Math.max(0, Number(config.management.autoSwapRetryDelayMs ?? 3000));
+  const minUsdFloor = Math.max(0, Number(config.management.autoSwapMinUsdFloor ?? 0.10));
   let lastErr = null;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
       const balances = await getWalletBalances({});
       const token = balances.tokens?.find((t) => t.mint === baseMint);
-      if (!token || token.usd < 0.10) {
+      if (!token || token.usd < minUsdFloor) {
         return { swapped: attempt > 1, result: null, token: null };
       }
       log("executor", `Auto-swapping ${label} ${token.symbol || baseMint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL (attempt ${attempt}/${attempts})`);
@@ -357,6 +358,7 @@ function normalizeConfigValue(key, value) {
     "darwinFloor", "darwinCeiling", "darwinMinSamples",
     "rsiLength", "indicatorCandles", "rsiOversold", "rsiOverbought",
     "adaptiveMinAgeHours", "adaptiveMaxAgeHours", "adaptiveMinVolatility",
+    "autoSwapRetryAttempts", "autoSwapRetryDelayMs", "autoSwapMinUsdFloor",
   ]);
   if (value === null) return null;
   if (booleanKeys.has(key)) return coerceBoolean(value, key);
@@ -500,6 +502,9 @@ const toolMap = {
       // management
       minClaimAmount: ["management", "minClaimAmount"],
       autoSwapAfterClaim: ["management", "autoSwapAfterClaim"],
+      autoSwapRetryAttempts: ["management", "autoSwapRetryAttempts"],
+      autoSwapRetryDelayMs: ["management", "autoSwapRetryDelayMs"],
+      autoSwapMinUsdFloor: ["management", "autoSwapMinUsdFloor"],
       outOfRangeBinsToClose: ["management", "outOfRangeBinsToClose"],
       outOfRangeWaitMinutes: ["management", "outOfRangeWaitMinutes"],
       oorCooldownTriggerCount: ["management", "oorCooldownTriggerCount"],
