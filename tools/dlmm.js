@@ -29,7 +29,7 @@ import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { normalizeMint } from "./wallet.js";
 import { appendDecision } from "../decision-log.js";
 import { agentMeridianJson, getAgentIdForRequests, getAgentMeridianHeaders } from "./agent-meridian.js";
-import { getAndClearStagedSignals, getAndClearStagedMlFeatures } from "../signal-tracker.js";
+import { getAndClearStagedSignals } from "../signal-tracker.js";
 import { computePositions, fetchDlmmPnlForPool } from "./pnl.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
@@ -558,11 +558,6 @@ export async function deployPosition({
   entry_tvl,
   entry_volume,
   entry_holders,
-  entry_score = null,
-  entry_regime = null,
-  entry_fee_volatility_ratio = null,
-  entry_volume_persistence_ratio = null,
-  entry_toxic_flow = null,
 }) {
   pool_address = normalizeMint(pool_address);
   const activeStrategy = strategy || config.strategy.strategy;
@@ -807,16 +802,10 @@ export async function deployPosition({
           active_bin: activeBin.binId,
           initial_value_usd,
           signal_snapshot: signalSnapshot,
-          ml_snapshot: mlSnapshot,
           entry_mcap,
           entry_tvl,
           entry_volume,
           entry_holders,
-          entry_score,
-          entry_regime,
-          entry_fee_volatility_ratio,
-          entry_volume_persistence_ratio,
-          entry_toxic_flow,
         });
 
         appendDecision({
@@ -1011,16 +1000,10 @@ export async function deployPosition({
       active_bin: activeBin.binId,
       initial_value_usd,
       signal_snapshot: signalSnapshot,
-      ml_snapshot: mlSnapshot,
       entry_mcap,
       entry_tvl,
       entry_volume,
       entry_holders,
-      entry_score,
-      entry_regime,
-      entry_fee_volatility_ratio,
-      entry_volume_persistence_ratio,
-      entry_toxic_flow,
     });
 
     appendDecision({
@@ -1425,9 +1408,16 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
         const pnlPctDiff = reportedPnlPct != null && derivedPnlPct != null
           ? Math.abs(reportedPnlPct - derivedPnlPct)
           : null;
-        const pnlPctSuspicious = pnlPctDiff != null && pnlPctDiff > (config.management.pnlSanityMaxDiffPct ?? 5);
+        // Gate PnL rules ONLY when the tick is genuinely unpriceable (no real number
+        // from either method — e.g. missing deposits / data outage). Reported-vs-derived
+        // divergence is normal noise on volatile pools, so it is logged but NOT gated —
+        // gating on it froze all exits (stop-loss/trailing/close) and stranded positions.
+        const pnlPctSuspicious = reportedPnlPct == null && derivedPnlPct == null;
         if (pnlPctSuspicious) {
-          log("positions_warn", `Suspicious pnl_pct for ${positionAddress.slice(0, 8)}: reported=${reportedPnlPct.toFixed(2)} derived=${derivedPnlPct.toFixed(2)} diff=${pnlPctDiff.toFixed(2)}`);
+          log("positions_warn", `Unpriceable pnl_pct for ${positionAddress.slice(0, 8)}: no valid reported/derived value this tick — PnL rules paused`);
+        } else if (pnlPctDiff != null && pnlPctDiff > (config.management.pnlSanityMaxDiffPct ?? 5)) {
+          // Informational only — does not gate rules.
+          log("positions_warn", `pnl_pct divergence for ${positionAddress.slice(0, 8)}: reported=${reportedPnlPct.toFixed(2)} derived=${derivedPnlPct.toFixed(2)} diff=${pnlPctDiff.toFixed(2)} (informational)`);
         }
 
         const liveSnapshot = {
@@ -1993,17 +1983,17 @@ export async function closePosition({ position_address, reason }) {
 
         let exitMarket = {};
         try {
-          const exitDetail = await fetch(`https://pool-discovery-api.datapi.meteora.ag/pools?page_size=1&filter_by=pool_address=${poolAddress}&timeframe=${config.screening?.timeframe || "5m"}`).then(r => r.json()).catch(() => null);
+          const { default: fetch } = await import("node-fetch").catch(() => ({ default: globalThis.fetch }));
+          const exitDetail = await fetch(`https://pool-discovery-api.datapi.meteora.ag/pools?page_size=1&filter_by=${encodeURIComponent(`pool_address=${poolAddress}`)}&timeframe=${encodeURIComponent(config.screening?.timeframe || "5m")}`).then(r => r.json()).catch(() => null);
           const ep = exitDetail?.data?.[0];
           if (ep) {
             exitMarket = {
               exit_mcap: parseFloat(ep?.token_x?.market_cap) || null,
               exit_tvl: parseFloat(ep?.tvl ?? ep?.active_tvl) || null,
               exit_volume: parseFloat(ep?.volume) || null,
-              exit_holders: parseFloat(ep?.token_x?.holder_count) || null,
             };
           }
-        } catch {}
+        } catch { /* non-blocking */ }
 
         await recordPerformance({
           position: position_address,
@@ -2025,7 +2015,6 @@ export async function closePosition({ position_address, reason }) {
           close_reason: reason || "agent decision",
           deployed_at: tracked.deployed_at || null,
           signal_snapshot: signalSnapshot,
-          ml_snapshot: tracked.ml_snapshot || null,
           entry_mcap: tracked.entry_mcap ?? null,
           entry_tvl: tracked.entry_tvl ?? null,
           entry_volume: tracked.entry_volume ?? null,
@@ -2318,17 +2307,16 @@ export async function closePosition({ position_address, reason }) {
 
       let exitMarket = {};
       try {
-        const exitDetail = await fetch(`https://pool-discovery-api.datapi.meteora.ag/pools?page_size=1&filter_by=pool_address=${poolAddress}&timeframe=${config.screening?.timeframe || "5m"}`).then(r => r.json()).catch(() => null);
+        const exitDetail = await fetch(`https://pool-discovery-api.datapi.meteora.ag/pools?page_size=1&filter_by=${encodeURIComponent(`pool_address=${poolAddress}`)}&timeframe=${encodeURIComponent(config.screening?.timeframe || "5m")}`).then(r => r.json()).catch(() => null);
         const ep = exitDetail?.data?.[0];
         if (ep) {
           exitMarket = {
             exit_mcap: parseFloat(ep?.token_x?.market_cap) || null,
             exit_tvl: parseFloat(ep?.tvl ?? ep?.active_tvl) || null,
             exit_volume: parseFloat(ep?.volume) || null,
-            exit_holders: parseFloat(ep?.token_x?.holder_count) || null,
           };
         }
-      } catch {}
+      } catch { /* non-blocking */ }
 
       await recordPerformance({
         position: position_address,

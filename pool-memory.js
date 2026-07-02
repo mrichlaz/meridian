@@ -10,7 +10,9 @@ import { log } from "./logger.js";
 import { config } from "./config.js";
 import { PATHS } from "./utils/paths.js";
 
-const POOL_MEMORY_FILE = PATHS.poolMemory;
+import { repoPath } from "./repo-root.js";
+
+const POOL_MEMORY_FILE = repoPath("pool-memory.json");
 const MAX_NOTE_LENGTH = 280;
 
 function sanitizeStoredNote(text, maxLen = MAX_NOTE_LENGTH) {
@@ -135,6 +137,12 @@ export function recordPoolDeploy(poolAddress, deployData) {
     close_reason: deployData.close_reason || null,
     strategy: deployData.strategy || null,
     volatility_at_deploy: deployData.volatility ?? null,
+    entry_mcap: deployData.entry_mcap ?? null,
+    entry_tvl: deployData.entry_tvl ?? null,
+    entry_volume: deployData.entry_volume ?? null,
+    exit_mcap: deployData.exit_mcap ?? null,
+    exit_tvl: deployData.exit_tvl ?? null,
+    exit_volume: deployData.exit_volume ?? null,
   };
 
   entry.deploys.push(deploy);

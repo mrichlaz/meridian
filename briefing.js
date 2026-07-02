@@ -1,10 +1,10 @@
 import fs from "fs";
 import { log } from "./logger.js";
 import { getPerformanceSummary } from "./lessons.js";
-import { PATHS } from "./utils/paths.js";
+import { repoPath } from "./repo-root.js";
 
-const STATE_FILE = PATHS.state;
-const LESSONS_FILE = PATHS.lessons;
+const STATE_FILE = repoPath("state.json");
+const LESSONS_FILE = repoPath("lessons.json");
 
 export async function generateBriefing() {
   const state = loadJson(STATE_FILE) || { positions: {}, recentEvents: [] };

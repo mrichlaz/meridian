@@ -1,16 +1,12 @@
 import fs from "fs";
-import path from "path";
 import crypto from "crypto";
-import { fileURLToPath } from "url";
 import { log } from "./logger.js";
 import { config } from "./config.js";
-import { PATHS } from "./utils/paths.js";
-import { safeSetInterval } from "./utils/runtime-mode.js";
+import { repoPath } from "./repo-root.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const USER_CONFIG_PATH = PATHS.userConfig;
-const CACHE_PATH = PATHS.hivemindCache;
-const PACKAGE_JSON_PATH = path.join(__dirname, "package.json");
+const USER_CONFIG_PATH = repoPath("user-config.json");
+const CACHE_PATH = repoPath("hivemind-cache.json");
+const PACKAGE_JSON_PATH = repoPath("package.json");
 const HEARTBEAT_INTERVAL_MS = 15 * 60 * 1000;
 
 let _heartbeatTimer = null;
@@ -249,20 +245,29 @@ export function startHiveMindBackgroundSync() {
   return _heartbeatTimer;
 }
 
+function numberOrNull(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function buildMarketFields(source) {
+  const market = {
+    entryMcap: numberOrNull(source?.entry_mcap),
+    entryTvl: numberOrNull(source?.entry_tvl),
+    entryVolume: numberOrNull(source?.entry_volume),
+    exitMcap: numberOrNull(source?.exit_mcap),
+    exitTvl: numberOrNull(source?.exit_tvl),
+    exitVolume: numberOrNull(source?.exit_volume),
+  };
+  return Object.values(market).some((value) => value != null) ? market : null;
+}
+
 function buildLessonEvent(lesson) {
   const rule = sanitizeText(lesson?.rule, 400);
   if (!rule) return null;
   const sourceType = sanitizeText(lesson.sourceType || inferLessonSourceType(lesson), 24) || "manual";
+  const market = buildMarketFields(lesson);
   const context = sanitizeText(lesson?.context, 600);
-  const market = {
-    entryMcap: numberOrNullForHive(lesson?.entry_mcap),
-    entryTvl: numberOrNullForHive(lesson?.entry_tvl),
-    entryVolume: numberOrNullForHive(lesson?.entry_volume),
-    exitMcap: numberOrNullForHive(lesson?.exit_mcap),
-    exitTvl: numberOrNullForHive(lesson?.exit_tvl),
-    exitVolume: numberOrNullForHive(lesson?.exit_volume),
-  };
-  const hasMarket = Object.values(market).some((v) => v != null);
   return {
     eventId: `lesson:${getAgentId()}:${lesson.id || crypto.randomUUID()}`,
     agentId: getAgentId(),
@@ -279,7 +284,7 @@ function buildLessonEvent(lesson) {
       pool: sanitizeText(lesson.pool || "", 64) || null,
       pinned: !!lesson.pinned,
       context: context || null,
-      market: hasMarket ? market : null,
+      market,
       metrics: {
         pnlPct: Number.isFinite(Number(lesson.pnl_pct)) ? Number(lesson.pnl_pct) : null,
         feesUsd: Number.isFinite(Number(lesson.fees_earned_usd)) ? Number(lesson.fees_earned_usd) : null,
@@ -356,16 +361,7 @@ export async function pushHivePerformanceEvent(perf) {
           feesSol: Number(perf.fees_earned_sol || 0),
           minutesHeld: Number(perf.minutes_held || 0),
           countInAdjustedWinRate: shouldCountInAdjustedWinRate(perf.close_reason),
-          context: sanitizeText(perf.context, 500) || null,
-          market: {
-            entryMcap: numberOrNullForHive(perf.entry_mcap),
-            entryTvl: numberOrNullForHive(perf.entry_tvl),
-            entryVolume: numberOrNullForHive(perf.entry_volume),
-            entryHolders: numberOrNullForHive(perf.entry_holders),
-            exitMcap: numberOrNullForHive(perf.exit_mcap),
-            exitTvl: numberOrNullForHive(perf.exit_tvl),
-            exitVolume: numberOrNullForHive(perf.exit_volume),
-          },
+          market: buildMarketFields(perf),
         },
       },
     });

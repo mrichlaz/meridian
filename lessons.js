@@ -7,18 +7,13 @@
  */
 
 import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
 import { log } from "./logger.js";
 import { getSharedLessonsForPrompt, pushHiveLesson, pushHivePerformanceEvent } from "./hivemind.js";
+import { repoPath } from "./repo-root.js";
 
-import { PATHS } from "./utils/paths.js";
-import { THRESHOLD_SCHEMA, getThresholdSpec } from "./config.js";
+const USER_CONFIG_PATH = repoPath("user-config.json");
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const USER_CONFIG_PATH = PATHS.userConfig;
-
-const LESSONS_FILE = PATHS.lessons;
+const LESSONS_FILE = repoPath("lessons.json");
 const MIN_EVOLVE_POSITIONS = 5;   // don't evolve until we have real data
 const MAX_CHANGE_PER_STEP  = 0.20; // never shift a threshold more than 20% at once
 const PERFORMANCE_SIGNAL_FIELDS = [
@@ -163,6 +158,12 @@ export async function recordPerformance(perf) {
       close_reason: perf.close_reason,
       strategy: perf.strategy,
       volatility: perf.volatility,
+      entry_mcap: perf.entry_mcap,
+      entry_tvl: perf.entry_tvl,
+      entry_volume: perf.entry_volume,
+      exit_mcap: perf.exit_mcap,
+      exit_tvl: perf.exit_tvl,
+      exit_volume: perf.exit_volume,
     });
   }
 
@@ -412,8 +413,9 @@ function derivLesson(perf) {
 
   if (outcome === "neutral") return null; // nothing interesting to learn
 
-  // Build context description
-  const context = [
+  // Build context description with entry/exit market conditions
+  const fmtNum = (n) => n == null ? "?" : n >= 1_000_000 ? `${(n/1_000_000).toFixed(1)}M` : n >= 1_000 ? `${(n/1_000).toFixed(0)}K` : String(Math.round(n));
+  const contextParts = [
     `${perf.pool_name}`,
     `strategy=${perf.strategy}`,
     `bin_step=${perf.bin_step}`,
@@ -421,9 +423,14 @@ function derivLesson(perf) {
     `fee_tvl_ratio=${perf.fee_tvl_ratio}`,
     `organic=${perf.organic_score}`,
     `bin_range=${typeof perf.bin_range === 'object' ? JSON.stringify(perf.bin_range) : perf.bin_range}`,
-    perf.entry_mcap != null ? `entry_mcap=${perf.entry_mcap}` : null,
-    perf.exit_mcap != null ? `exit_mcap=${perf.exit_mcap}` : null,
-  ].filter(Boolean).join(", ");
+  ];
+  if (perf.entry_mcap != null || perf.entry_tvl != null || perf.entry_volume != null) {
+    contextParts.push(`entry(mcap=${fmtNum(perf.entry_mcap)}, tvl=${fmtNum(perf.entry_tvl)}, vol=${fmtNum(perf.entry_volume)})`);
+  }
+  if (perf.exit_mcap != null || perf.exit_tvl != null || perf.exit_volume != null) {
+    contextParts.push(`exit(mcap=${fmtNum(perf.exit_mcap)}, tvl=${fmtNum(perf.exit_tvl)}, vol=${fmtNum(perf.exit_volume)})`);
+  }
+  const context = contextParts.join(", ");
 
   let rule = "";
 
@@ -432,7 +439,8 @@ function derivLesson(perf) {
       rule = `AVOID: ${perf.pool_name}-type pools (volatility=${perf.volatility}, bin_step=${perf.bin_step}) with strategy="${perf.strategy}" — went OOR ${100 - perf.range_efficiency}% of the time. Consider wider bin_range or bid_ask strategy.`;
       tags.push("oor", perf.strategy, `volatility_${Math.round(perf.volatility)}`);
     } else if (perf.range_efficiency > 80 && outcome === "good") {
-      rule = `PREFER: ${perf.pool_name}-type pools (volatility=${perf.volatility}, bin_step=${perf.bin_step}) with strategy="${perf.strategy}" — ${perf.range_efficiency}% in-range efficiency, PnL +${perf.pnl_pct}%.`;
+      const entryNote = perf.entry_mcap != null ? ` Entry: mcap=${fmtNum(perf.entry_mcap)}, tvl=${fmtNum(perf.entry_tvl)}, vol=${fmtNum(perf.entry_volume)}.` : "";
+      rule = `PREFER: ${perf.pool_name}-type pools (volatility=${perf.volatility}, bin_step=${perf.bin_step}) with strategy="${perf.strategy}" — ${perf.range_efficiency}% in-range efficiency, PnL +${perf.pnl_pct}%.${entryNote}`;
       tags.push("efficient", perf.strategy);
     } else if (outcome === "bad" && perf.close_reason?.includes("volume")) {
       rule = `AVOID: Pools with fee_tvl_ratio=${perf.fee_tvl_ratio} that showed volume collapse — fees evaporated quickly. Minimum sustained volume check needed before deploying.`;
@@ -484,6 +492,12 @@ function derivLesson(perf) {
     range_efficiency: perf.range_efficiency,
     close_reason: perf.close_reason,
     pool: perf.pool,
+    entry_mcap: perf.entry_mcap ?? null,
+    entry_tvl: perf.entry_tvl ?? null,
+    entry_volume: perf.entry_volume ?? null,
+    exit_mcap: perf.exit_mcap ?? null,
+    exit_tvl: perf.exit_tvl ?? null,
+    exit_volume: perf.exit_volume ?? null,
     created_at: new Date().toISOString(),
   };
 }
@@ -519,56 +533,40 @@ export function evolveThresholds(perfData, config) {
   const changes   = {};
   const rationale = {};
 
-  const quantile = (values, q) => {
-    const sorted = values.filter(isFiniteNum).map(Number).sort((a, b) => a - b);
-    if (!sorted.length) return null;
-    if (sorted.length === 1) return sorted[0];
-    const pos = (sorted.length - 1) * q;
-    const base = Math.floor(pos);
-    const rest = pos - base;
-    return sorted[base + 1] !== undefined
-      ? sorted[base] + rest * (sorted[base + 1] - sorted[base])
-      : sorted[base];
-  };
-
   // ── 1. minFeeActiveTvlRatio ────────────────────────────────────
-  // Raise the floor if low-fee pools consistently underperform. Lower the
-  // floor if winners are mostly above the current floor (room to relax).
+  // Raise the floor if low-fee pools consistently underperform.
   {
-    const spec = getThresholdSpec("minFeeActiveTvlRatio");
-    if (spec) {
-      const winnerFees = winners.map((p) => p.fee_tvl_ratio).filter(isFiniteNum);
-      const loserFees  = losers.map((p) => p.fee_tvl_ratio).filter(isFiniteNum);
-      const current    = config[spec.section][spec.field];
+    const winnerFees = winners.map((p) => p.fee_tvl_ratio).filter(isFiniteNum);
+    const loserFees  = losers.map((p) => p.fee_tvl_ratio).filter(isFiniteNum);
+    const current    = config.screening.minFeeActiveTvlRatio;
 
-      if (current != null && Number.isFinite(Number(current))) {
-        // Tighten — losers cluster at low fees
-        if (loserFees.length >= 3) {
-          const loserFeeP75 = quantile(loserFees, 0.75);
-          if (loserFeeP75 != null && loserFeeP75 < Number(current) * 1.35) {
-            const target = loserFeeP75 * 1.15;
-            const proposed = clamp(nudge(Number(current), target, spec.step), spec.min, spec.max);
-            const rounded = Number(proposed.toFixed(spec.decimals));
-            if (rounded > Number(current)) {
-              changes.minFeeActiveTvlRatio = rounded;
-              rationale.minFeeActiveTvlRatio =
-                `Loser fee/aTVL 75th percentile was ${loserFeeP75.toFixed(4)} — raised floor from ${current} → ${rounded}`;
-            }
-          }
+    if (winnerFees.length >= 2) {
+      // Minimum fee/TVL among winners — we know pools below this don't work for us
+      const minWinnerFee = Math.min(...winnerFees);
+      if (minWinnerFee > current * 1.2) {
+        const target  = minWinnerFee * 0.85; // stay slightly below min winner
+        const newVal  = clamp(nudge(current, target, MAX_CHANGE_PER_STEP), 0.05, 10.0);
+        const rounded = Number(newVal.toFixed(2));
+        if (rounded > current) {
+          changes.minFeeActiveTvlRatio = rounded;
+          rationale.minFeeActiveTvlRatio = `Lowest winner fee_tvl=${minWinnerFee.toFixed(2)} — raised floor from ${current} → ${rounded}`;
         }
+      }
+    }
 
-        // Relax — winners span comfortably above the current floor
-        if (winnerFees.length >= 3) {
-          const winnerFeeP25 = quantile(winnerFees, 0.25);
-          if (winnerFeeP25 != null && winnerFeeP25 > Number(current) * 1.6) {
-            const target = winnerFeeP25 * 0.9;
-            const proposed = clamp(nudge(Number(current), target, spec.step), spec.min, spec.max);
-            const rounded = Number(proposed.toFixed(spec.decimals));
-            if (rounded < Number(current) && !changes.minFeeActiveTvlRatio) {
-              changes.minFeeActiveTvlRatio = rounded;
-              rationale.minFeeActiveTvlRatio =
-                `Winner fee/aTVL 25th percentile was ${winnerFeeP25.toFixed(4)} — relaxed floor from ${current} → ${rounded}`;
-            }
+    if (loserFees.length >= 2) {
+      // If losers all had high fee/TVL, that's noise (pumps then crash) — don't raise min
+      // But if losers had low fee/TVL, raise min
+      const maxLoserFee = Math.max(...loserFees);
+      if (maxLoserFee < current * 1.5 && winnerFees.length > 0) {
+        const minWinnerFee = Math.min(...winnerFees);
+        if (minWinnerFee > maxLoserFee) {
+          const target  = maxLoserFee * 1.2;
+          const newVal  = clamp(nudge(current, target, MAX_CHANGE_PER_STEP), 0.05, 10.0);
+          const rounded = Number(newVal.toFixed(2));
+          if (rounded > current && !changes.minFeeActiveTvlRatio) {
+            changes.minFeeActiveTvlRatio = rounded;
+            rationale.minFeeActiveTvlRatio = `Losers had fee_tvl<=${maxLoserFee.toFixed(2)}, winners higher — raised floor from ${current} → ${rounded}`;
           }
         }
       }
@@ -764,12 +762,9 @@ export function evolveThresholds(perfData, config) {
   fs.writeFileSync(USER_CONFIG_PATH, JSON.stringify(userConfig, null, 2));
 
   // Apply to live config object immediately
-  for (const [key, val] of Object.entries(changes)) {
-    const spec = getThresholdSpec(key);
-    if (spec && config[spec.section] && spec.field in config[spec.section]) {
-      config[spec.section][spec.field] = val;
-    }
-  }
+  const s = config.screening;
+  if (changes.minFeeActiveTvlRatio != null) s.minFeeActiveTvlRatio = changes.minFeeActiveTvlRatio;
+  if (changes.minOrganic       != null) s.minOrganic       = changes.minOrganic;
 
   // Log a lesson summarizing the evolution
   const data = load();

@@ -54,9 +54,8 @@ The agent harness is the runtime wrapper around every autonomous cycle. It gives
 **Data sources:**
 - `@meteora-ag/dlmm` SDK — on-chain position data, active bin, deploy/close transactions
 - Meteora DLMM PnL API — position yield, fee accrual, PnL
-- OKX Web3 — smart money signals, token risk scoring (free tier; advanced tier requires API key)
-- Jupiter API — token audit, mcap, launchpad, price stats (free, used as OKX-free-tier fallback)
-- Meteora Pool Discovery API — fee/TVL ratios, volume, organic scores, holder counts
+- Pool screening API — fee/TVL ratios, volume, organic scores, holder counts
+- Jupiter API — token audit, mcap, launchpad, price stats
 
 Agents are powered via **OpenRouter** and can be swapped for any compatible model.
 
@@ -89,7 +88,15 @@ npm install
 npm run setup
 ```
 
-The wizard walks you through creating `.env` (API keys, wallet, RPC, Telegram) and `user-config.json` (risk preset, deploy size, thresholds, models). Takes about 2 minutes.
+The wizard writes **both** files at the repo root:
+
+| Goes in `.env` | Goes in `user-config.json` |
+|---|---|
+| `WALLET_PRIVATE_KEY`, `OPENROUTER_API_KEY`, `RPC_URL`, `HELIUS_API_KEY` | Risk preset, deploy size, max positions |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `TELEGRAM_ALLOWED_USER_IDS` | Strategy, screening filters, exit rules, trailing TP |
+| `DRY_RUN` | Position sizing, cycle intervals, per-role LLM models, `solMode` |
+
+`TELEGRAM_CHAT_ID` only needs to live in `.env` — setup also copies it to `user-config.json` when provided. Takes about 2 minutes.
 
 **Or set up manually:**
 
@@ -124,14 +131,21 @@ npm start      # live mode
 
 On startup Meridian fetches your wallet balance, open positions, and top pool candidates, then begins autonomous cycles immediately.
 
-### Run with PM2
+### Run with PM2 (VPS / always-on)
 
-PM2 is the recommended way to keep Meridian alive on a VPS:
+PM2 is the recommended way to keep Telegram control online on a VPS. **Always start via the ecosystem file** so the working directory and script path stay pinned to the repo:
 
 ```bash
 npm install
-npm run pm2:start
+npm run pm2:start    # uses ecosystem.config.cjs — do NOT use "pm2 start index.js"
 pm2 save
+```
+
+After `.env`, `user-config.json`, or code changes:
+
+```bash
+npm run pm2:restart  # re-reads .env on each restart
+npm run pm2:logs
 ```
 
 To update an existing PM2 install:
@@ -140,15 +154,41 @@ To update an existing PM2 install:
 git pull
 npm install
 npm run pm2:restart
+pm2 save
 ```
 
-If the process restarts repeatedly after an update, inspect the app error first:
+If a previous PM2 run was started incorrectly, reset it once:
 
 ```bash
-npm run pm2:logs
+pm2 delete meridian
+npm run pm2:start
+pm2 save
 ```
 
-Most post-update PM2 crashes are app startup errors, commonly from skipping `npm install` after `package-lock.json` changed, starting PM2 from the wrong directory, or missing `.env` / `user-config.json` values. Avoid `nohup`; it runs outside PM2 and can leave Telegram polling in a duplicate unmanaged process.
+**PM2 vs `npm start`**
+
+| | `npm start` | PM2 |
+|---|---|---|
+| Terminal | Interactive REPL | Headless daemon |
+| Cron / Telegram | Starts after REPL banner | Starts immediately on boot |
+| First screening | On cron schedule | May run one cycle right at startup |
+| Best for | Local dev / testing | VPS / 24-7 operation |
+
+On startup, logs show `Repo: ... | cwd: ... | PM2 id: ...`. **Repo and cwd must match.** If they differ, delete the process and use `npm run pm2:start` again.
+
+**Common PM2 issues**
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| Crash loop after `git pull` | `npm install` skipped | `npm install && npm run pm2:restart` |
+| Missing wallet / API keys | Started with `pm2 start index.js` from wrong directory | `pm2 delete meridian && npm run pm2:start` |
+| `.env` changes ignored | Old PM2 env snapshot | `npm run pm2:restart` (`.env` now overrides stale PM2 env) |
+| Telegram `401 Unauthorized` | Invalid `TELEGRAM_BOT_TOKEN` (not chat ID) | Fix token in `.env`; if encrypted, ensure `.envrypt` exists |
+| Telegram commands ignored | Missing/wrong `TELEGRAM_CHAT_ID` | Set in `.env` (or `telegramChatId` in `user-config.json`) |
+| Duplicate polling / 409 errors | `nohup node index.js` or second PM2 instance running | Kill stray processes; run only one PM2 app |
+| Encrypted env crash at boot | `# encrypted` lines without `.envrypt` key | Add `.envrypt` or use plain `.env` values |
+
+Avoid `nohup node index.js` — it runs outside PM2 and can leave a duplicate Telegram poller fighting the managed process.
 
 ---
 
@@ -216,7 +256,20 @@ There are also two specialized Claude Code agents:
 - **screener** — pool screening specialist. Invoke when evaluating candidates, analysing token risk, or deciding whether to deploy.
 - **manager** — position management specialist. Invoke when reviewing open positions, assessing PnL, claiming fees, or closing positions.
 
-Loop mode runs screening or management on a timer:
+**`screener`** — pool screening specialist. Invoke when you want to evaluate candidates, analyse token risk, or deploy a position. Has access to Jupiter token audit, smart-wallet checks, and all strategy logic.
+
+**`manager`** — position management specialist. Invoke when reviewing open positions, assessing PnL, claiming fees, or closing positions.
+
+To trigger an agent directly, just describe what you want:
+```
+> screen for new pools and deploy if you find something good
+> review all my positions and close anything out of range
+> what do you think of the SOL/BONK pool?
+```
+
+#### Loop mode
+
+Run screening or management on a timer inside Claude Code:
 
 ```
 /loop 30m /screen     # screen every 30 minutes
@@ -311,7 +364,29 @@ Add known rug/farm deployer wallet addresses to `deployer-blacklist.json`:
 
 The bot supports a wide range of commands grouped by category. The help text auto-generated by `/help` is the source of truth, but the highlights are:
 
-### Wallet & portfolio
+1. Create a bot via [@BotFather](https://t.me/BotFather) and copy the token
+2. Add to `.env`:
+
+```env
+TELEGRAM_BOT_TOKEN=<token>
+TELEGRAM_CHAT_ID=<your chat id>          # .env alone is enough; also saved to user-config by setup
+TELEGRAM_ALLOWED_USER_IDS=<user id>    # required for group/supergroup control
+```
+
+Meridian does **not** auto-register the first chat for safety — you must set `TELEGRAM_CHAT_ID` explicitly. For groups, also set `TELEGRAM_ALLOWED_USER_IDS` or inbound commands are ignored.
+
+`401 Unauthorized` in logs means a bad `TELEGRAM_BOT_TOKEN` (invalid, revoked, or encrypted without a working `.envrypt` key) — not a chat ID problem.
+
+### Notifications
+
+Meridian sends notifications automatically for:
+- Management cycle reports (reasoning + decisions)
+- Screening cycle reports (what it found, whether it deployed)
+- OOR alerts when a position leaves range past `outOfRangeWaitMinutes`
+- Deploy: pair, amount, position address, tx hash
+- Close: pair and PnL
+
+### Telegram commands
 
 | Command | Action |
 |---|---|
@@ -321,55 +396,7 @@ The bot supports a wide range of commands grouped by category. The help text aut
 | `/positions` | List open DLMM positions (one card per position with action buttons) |
 | `/pool <n>` | Detail card for one position |
 
-### Screening & deploy
-
-| Command | Action |
-|---|---|
-| `/screen`, `/candidates` | Refresh deterministic candidate list (no deploy) |
-| `/autoscreen` | Run full AI screening cycle (may deploy) |
-| `/deploy <n>` | Deploy into cached candidate N |
-
-### Position management
-
-| Command | Action |
-|---|---|
-| `/close <n>` | Close position by index |
-| `/closeall` | Close all open positions |
-| `/set <n> <note>` | Attach a note to a position |
-
-### Configuration
-
-| Command | Action |
-|---|---|
-| `/config` | Full config snapshot |
-| `/thresholds` | Show current screening thresholds + performance summary |
-| `/settings` | Button-driven config menu |
-| `/setcfg <key> <value>` | Update persisted config |
-
-### Learning & adaptation
-
-| Command | Action |
-|---|---|
-| `/learn` | Study top LPers from current pool |
-| `/lessons` | Recent saved lessons |
-| `/performance` | Win rate / avg PnL / total fees / recent closes |
-| `/screening-stats` | Today's screening funnel: cycles, screened, eligible, timeframes, top rejections |
-| `/ml-status` | Model generation, blend λ, emotion state, personality |
-| `/ml-train` | Force an immediate ML training pass |
-| `/evolve` | Manually run threshold evolution |
-
-### HiveMind & lifecycle
-
-| Command | Action |
-|---|---|
-| `/hive`, `/hive pull` | HiveMind sync status / manual pull |
-| `/briefing` | Morning briefing (HTML) |
-| `/pause`, `/resume` | Pause / resume cron cycles |
-| `/stop` | Shut down the agent |
-
-### Inline buttons
-
-Every Telegram reply has inline buttons where useful. Position cards show `🔗 Pool` (Solscan), `📊 PnL`, `💰 Claim`, `🔒 Close`. Screening reports show `👥 Refresh Candidates`, `📊 Status`, `⚙️ Settings`, `🔄 Force Screen`. The settings menu is fully button-driven.
+You can also chat freely via Telegram using the same interface as the REPL. Only allowed user IDs can issue commands in groups.
 
 ---
 
@@ -431,58 +458,39 @@ All fields are optional — defaults shown. Edit `user-config.json`.
 
 | Field | Default | Description |
 |---|---|---|
-| `screeningSource` | `meteora` | `meteora` (free) or `gmgn` (paid, more fields) |
-| `timeframe` | `5m` | Window for fee/TVL and volume. The 5m endpoint often returns 0 pools, so the agent automatically steps up to 15m → 30m → 1h → 4h → 24h if needed. |
-| `category` | `trending` | Meteora pool category filter |
-| `minFeeActiveTvlRatio` | `0.05` | Minimum fee/active-TVL ratio (in percent) |
-| `minTvl` | `10000` | Minimum pool TVL in USD |
-| `maxTvl` | `150000` | Maximum pool TVL in USD (filters mega-pools) |
-| `minVolume` | `500` | Minimum volume in USD within the timeframe |
-| `minOrganic` | `60` | Minimum organic score (0–100) for the base token |
-| `minQuoteOrganic` | `60` | Same for the quote token |
-| `minHolders` | `500` | Minimum holder count for the base token |
-| `minMcap` | `150000` | Minimum market cap in USD |
-| `maxMcap` | `10000000` | Maximum market cap in USD |
-| `minBinStep` | `80` | Minimum DLMM bin step |
-| `maxBinStep` | `125` | Maximum DLMM bin step |
-| `minTokenFeesSol` | `30` | Minimum all-time fees paid in SOL (filters bundled/scam tokens) |
-| `maxBundlePct` | `30` | Max bundle holding % (OKX advanced-info) |
-| `maxBotHoldersPct` | `30` | Max bot holder % |
-| `maxTop10Pct` | `60` | Max top-10 holder concentration % |
-| `allowedLaunchpads` | `[]` | Allow-list of launchpads (empty = no allow-list) |
-| `blockedLaunchpads` | `[]` | Block-list of launchpads (e.g. `["letsbonk.fun", "pump.fun"]`) |
-| `minTokenAgeHours` | `null` | Minimum token age in hours (null = no minimum) |
-| `maxTokenAgeHours` | `null` | Maximum token age in hours (null = no maximum) |
-| `athFilterPct` | `null` | Reject pools where price is above `(100 + value)%` of ATH (e.g. `-20` rejects above 80% of ATH) |
-| `excludeHighSupplyConcentration` | `true` | Reject tokens with high single-owner supply |
-| `useDiscordSignals` | `false` | Pick up queued Discord signals as priority candidates |
-| `discordSignalMode` | `merge` | `merge` (with normal) or `only` (ignore other sources) |
-| `avoidPvpSymbols` | `true` | Soft-penalize tokens with rival pools of the same symbol |
-| `blockPvpSymbols` | `false` | Hard-filter rival-symbol tokens |
+| `minFeeActiveTvlRatio` | `0.05` | Minimum fee/active-TVL ratio |
+| `minTvl` | `10000` | Minimum pool TVL (USD) |
+| `maxTvl` | `150000` | Maximum pool TVL (USD) |
+| `minVolume` | `500` | Minimum pool volume |
+| `minOrganic` | `60` | Minimum organic score (0–100) |
+| `minHolders` | `500` | Minimum token holder count |
+| `minMcap` | `150000` | Minimum market cap (USD) |
+| `maxMcap` | `10000000` | Maximum market cap (USD) |
+| `minBinStep` | `80` | Minimum bin step |
+| `maxBinStep` | `125` | Maximum bin step |
+| `timeframe` | `5m` | Candle timeframe for screening |
+| `category` | `trending` | Pool category filter |
+| `minTokenFeesSol` | `30` | Minimum all-time fees in SOL |
+| `maxBotHoldersPct` | `30` | Maximum bot holder % (Jupiter audit) |
+| `maxTop10Pct` | `60` | Maximum top-10 holder concentration |
+| `blockedLaunchpads` | `[]` | Launchpad names to never deploy into |
 
 ### Management
 
 | Field | Default | Description |
 |---|---|---|
-| `takeProfitPct` | `5` | Close when PnL ≥ this % |
-| `stopLossPct` | `-50` | Close when PnL ≤ this % (set to a smaller magnitude like `-18` for tighter risk) |
-| `minFeePerTvl24h` | `7` | Floor for 24h fee/TVL — below this and the position may be closed for low yield |
-| `minAgeBeforeYieldCheck` | `60` | Minutes before low-yield close rule is evaluated |
-| `outOfRangeBinsToClose` | `10` | Close immediately if active bin is this many bins above upper bin |
-| `outOfRangeWaitMinutes` | `30` | Otherwise wait this many minutes OOR before closing |
-| `oorCooldownTriggerCount` | `3` | After this many consecutive OOR closes on the same pool, add a cooldown |
-| `oorCooldownHours` | `12` | How long the OOR cooldown lasts |
-| `repeatDeployCooldownEnabled` | `true` | Cooldown repeated deploys on pools/tokens that just closed unprofitably |
-| `repeatDeployCooldownTriggerCount` | `3` | Threshold closes before cooldown kicks in |
-| `repeatDeployCooldownHours` | `12` | Cooldown duration |
-| `repeatDeployCooldownScope` | `token` | `pool` / `token` / `both` |
-| `repeatDeployCooldownMinFeeEarnedPct` | `0` | Don't apply cooldown if the position earned at least this % in fees |
-| `minClaimAmount` | `5` | Auto-claim fees when unclaimed amount exceeds this |
-| `autoSwapAfterClaim` | `false` | After claim, auto-swap the base token to SOL |
+| `deployAmountSol` | `0.5` | Base SOL per new position |
+| `positionSizePct` | `0.35` | Fraction of deployable balance to use |
+| `maxDeployAmount` | `50` | Maximum SOL cap per position |
+| `gasReserve` | `0.2` | Minimum SOL to keep for gas |
+| `minSolToOpen` | `0.55` | Minimum wallet SOL before opening |
+| `outOfRangeWaitMinutes` | `30` | Minutes OOR before acting |
+| `stopLossPct` | `-15` | Close position if price drops by this % |
+| `takeProfitPct` | `5` | Close when fees earned reach this % of capital |
 | `trailingTakeProfit` | `true` | Enable trailing take-profit |
-| `trailingTriggerPct` | `3` | Activate trailing at this % PnL |
-| `trailingDropPct` | `1.5` | Close when PnL drops this much from the peak |
-| `pnlSanityMaxDiffPct` | `5` | Reject reported PnL that diverges from derived by more than this |
+| `trailingTriggerPct` | `3` | Activate trailing TP at this PnL % |
+| `trailingDropPct` | `1.5` | Close when PnL drops this % from peak |
+| `strategy` | `bid_ask` | LP strategy: `spot`, `bid_ask`, or `curve` |
 
 ### Schedule
 
@@ -505,72 +513,28 @@ All fields are optional — defaults shown. Edit `user-config.json`.
 
 ### Strategy
 
-| Field | Default | Description |
+### Jupiter swap fee (referral)
+
+Every token swap the agent makes (auto-swap base→SOL after a close/claim, manual `swap_token`) goes through **Jupiter Ultra**. Jupiter's referral program lets a referral wallet collect a small fee, expressed in **basis points (bps)** — `1 bps = 0.01%`, so `50 bps = 0.5%`. Meridian ships with this enabled by default.
+
+**Settings** (env only — *not* in `user-config.json`):
+
+| Env var | Default | Description |
 |---|---|---|
-| `strategy` | `bid_ask` | LP strategy: `bid_ask` / `spot` / `curve` |
-| `minBinsBelow` | `35` | Min bins below the active bin for deploy range |
-| `maxBinsBelow` | `69` | Max bins below the active bin for deploy range |
-| `defaultBinsBelow` | `69` | Default bins below when not adjusted for volatility |
+| `JUPITER_REFERRAL_ACCOUNT` | built-in account | A **Jupiter referral account** (not just any wallet). Create one on the Jupiter referral dashboard (`referral.jup.ag`) — it generates a referral account and the per-token fee accounts that actually collect the fee. Paste that referral account address here to collect the fee yourself. |
+| `JUPITER_REFERRAL_FEE_BPS` | `50` | Fee in basis points. **Jupiter Ultra requires 50–255 bps** — values outside that range (or `0`) are ignored and the swap runs with no referral fee. |
 
-### Machine learning (opt-in)
+```bash
+# .env — collect the referral fee on your own Jupiter referral account
+JUPITER_REFERRAL_ACCOUNT=<your-jupiter-referral-account>
+JUPITER_REFERRAL_FEE_BPS=50
+```
 
-ML is **off by default** because it requires closed-position data to be useful. With fewer than 5 closed positions, training is skipped. With 10+ it runs a k-fold cross-validated training pass. With 30+ it starts to be reliable.
+**To turn the referral off**, just remove/blank it — set `JUPITER_REFERRAL_ACCOUNT=` (empty) **or** `JUPITER_REFERRAL_FEE_BPS=0`. Either one drops the referral and the swap proceeds at Jupiter's normal rate. The referral is also silently dropped if the fee is below `50`, above `255`, or the account isn't a valid Solana address (`tools/wallet.js#getJupiterReferralParams`). **`50` is the minimum Jupiter allows and the Meridian default.**
 
-| Field | Default | Description |
-|---|---|---|
-| `mlEnabled` | `false` | Master switch for ML scoring + emotion context + training |
-| `mlTrainEvery` | `5` | Run a full training pass every N closes |
-| `mlMinSamples` | `10` | Minimum samples required to train |
-| `mlBatchSize` | `16` | Mini-batch size |
-| `mlEpochs` | `5` | Training epochs per pass |
-| `mlLearningRate` | `0.001` | Optimizer learning rate |
-| `mlPersonality` | `balanced` | `conservador` / `balanzed` / `aggressive` / `explorador` / `momentumum` / `survivor` |
+> If you leave the referral enabled on the **built-in default account**, the fee goes toward **Meridian server maintenance** (HiveMind, Agent Meridian API, hosting). Override `JUPITER_REFERRAL_ACCOUNT` with your own Jupiter referral account to collect it yourself instead, or disable it entirely as above. Either way, on new tokens (<24h) it's the same 0.5% Jupiter charges regardless — so leaving the default on costs you nothing extra there.
 
-### Darwin signal weighting (opt-in)
-
-Darwinian weights adjust each screening signal's influence based on whether winners or losers tend to show that signal.
-
-| Field | Default | Description |
-|---|---|---|
-| `darwinEnabled` | `true` | Master switch for Darwinian weight adjustment |
-| `darwinWindowDays` | `60` | Rolling window in days for performance data |
-| `darwinRecalcEvery` | `5` | Recalculate every N closes |
-| `darwinBoost` | `1.05` | Multiplier for top-quartile signals |
-| `darwinDecay` | `0.95` | Multiplier for bottom-quartile signals |
-| `darwinFloor` | `0.3` | Min allowed weight |
-| `darwinCeiling` | `2.5` | Max allowed weight |
-| `darwinMinSamples` | `10` | Min samples before adjustment |
-
-### HiveMind (cross-agent lessons)
-
-| Field | Default | Description |
-|---|---|---|
-| `hiveMindUrl` | `https://api.agentmeridian.xyz` | HiveMind server |
-| `hiveMindApiKey` | embedded default | Auth key (you can override with your own) |
-| `agentId` | auto-generated | Unique agent identifier |
-| `hiveMindPullMode` | `auto` | `auto` (pull on cron) or `manual` (only via `/hive pull`) |
-
-### Chart indicators (opt-in)
-
-| Field | Default | Description |
-|---|---|---|
-| `chartIndicatorsEnabled` | `false` | Master switch |
-| `indicatorEntryPreset` | `supertrend_break` | Indicator preset for entry signals |
-| `indicatorExitPreset` | `supertrend_break` | Indicator preset for exit signals |
-| `rsiLength` | `2` | RSI period |
-| `indicatorIntervals` | `["5_MINUTE"]` | Timeframes to check |
-| `indicatorCandles` | `298` | Number of candles to load |
-| `rsiOversold` | `30` | RSI oversold threshold |
-| `rsiOverbought` | `80` | RSI overbought threshold |
-| `requireAllIntervals` | `false` | Require all intervals to agree before entry |
-
-### Agent Meridian API (optional)
-
-| Field | Default | Description |
-|---|---|---|
-| `publicApiKey` | embedded default | Public API key for Agent Meridian's enrichment endpoints |
-| `agentMeridianApiUrl` | `https://api.agentmeridian.xyz/api` | Endpoint for server-side enrichment (token risk, clusters) |
-| `lpAgentRelayEnabled` | `false` | Use the LP Agent relay for deploy/close transactions (paid service) |
+> **Why 50 bps is effectively free on new tokens.** Jupiter's own platform fee already varies by pair — and for **new tokens (within 24h of token age) Jupiter charges 50 bps (0.5%)** on its UI regardless. So on those tokens the swap costs the same 0.5% **whether or not you attach a referral** — adding the referral just redirects that fee to your wallet instead of leaving it at Jupiter's default. (Jupiter's full platform-fee schedule: `0` bps buying Jupiter tokens / pegged LST-LST & stable-stable, `2` SOL-stable, `5` LST-stable, `10` everything else, `50` new tokens <24h.)
 
 ---
 
@@ -701,6 +665,55 @@ LLM_MODEL=your-local-model-name
 ```
 
 Any OpenAI-compatible endpoint works.
+
+---
+
+## Architecture
+
+```
+index.js            Main entry: REPL + cron orchestration + Telegram bot polling
+agent.js            ReAct loop: LLM → tool call → repeat
+config.js           Runtime config from user-config.json + .env (repo-root paths)
+repo-root.js        Stable absolute repo path — used by PM2, state files, and .env loading
+prompt.js           System prompt builder (SCREENER / MANAGER / GENERAL roles)
+state.js            Position registry (state.json)
+decision-log.js     Structured decision log for deploy, close, skip, and no-deploy rationale
+lessons.js          Learning engine: records performance, derives lessons, evolves thresholds
+pool-memory.js      Per-pool deploy history + snapshots
+strategy-library.js Saved LP strategies
+telegram.js         Telegram bot: polling + notifications
+hivemind.js         Agent Meridian HiveMind sync
+smart-wallets.js    KOL/alpha wallet tracker
+token-blacklist.js  Permanent token blacklist
+cli.js              Direct CLI — every tool as a subcommand with JSON output
+
+tools/
+  definitions.js    Tool schemas (OpenAI format)
+  executor.js       Tool dispatch + safety checks
+  dlmm.js           Meteora DLMM SDK wrapper
+  screening.js      Pool discovery
+  wallet.js         SOL/token balances + Jupiter swap
+  token.js          Token info, holders, narrative
+  study.js          Top LPer study via LPAgent API
+
+discord-listener/
+  index.js          Selfbot Discord listener
+  pre-checks.js     Signal pre-check pipeline
+
+.claude/
+  agents/
+    screener.md     Claude Code screener sub-agent
+    manager.md      Claude Code manager sub-agent
+  commands/
+    screen.md       /screen slash command
+    manage.md       /manage slash command
+    balance.md      /balance slash command
+    positions.md    /positions slash command
+    candidates.md   /candidates slash command
+    study-pool.md   /study-pool slash command
+    pool-ohlcv.md   /pool-ohlcv slash command
+    pool-compare.md /pool-compare slash command
+```
 
 ---
 
