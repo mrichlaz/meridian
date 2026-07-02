@@ -1,8 +1,8 @@
 import fs from "fs";
 import path from "path";
-import { repoPath } from "./repo-root.js";
+import { PATHS } from "./utils/paths.js";
 
-const LOG_DIR = repoPath("logs");
+const LOG_DIR = PATHS.logs;
 const LOG_LEVEL = process.env.LOG_LEVEL || "info";
 
 const LEVELS = { debug: 0, info: 1, warn: 2, error: 3 };
