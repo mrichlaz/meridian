@@ -1318,8 +1318,15 @@ Summarize the current portfolio health, total fees earned, and performance of al
   let _sweepBusy = false;
   const sweepIntervalMs = Math.max(60_000, Number(config.management.walletSweepIntervalSec ?? 300) * 1000);
   const sweepTimer = safeSetInterval(async () => {
-    if (_managementBusy || _screeningBusy || _pnlPollBusy || _sweepBusy) return;
-    if (getTrackedPositions(true).length > 0) return;  // don't sweep while positions are open
+    if (_managementBusy || _screeningBusy || _pnlPollBusy || _sweepBusy) {
+      log("sweep_debug", `Sweep tick skipped: management=${_managementBusy} screening=${_screeningBusy} pnlPoll=${_pnlPollBusy} sweep=${_sweepBusy}`);
+      return;
+    }
+    const openPositions = getTrackedPositions(true);
+    if (openPositions.length > 0) {
+      log("sweep_debug", `Sweep tick skipped: ${openPositions.length} open position(s) (${openPositions.map((p) => p.pair || p.pool_name || "unknown").join(", ")})`);
+      return;
+    }
     _sweepBusy = true;
     try {
       const balances = await getWalletBalances({});
@@ -1340,7 +1347,10 @@ Summarize the current portfolio health, total fees earned, and performance of al
         if (Number(t.balance) <= 0) return false;
         return true;
       });
-      if (candidates.length === 0) return;
+      if (candidates.length === 0) {
+        log("sweep_debug", `Sweep tick: no candidates (floor=$${floor.toFixed(2)}, ${(balances.tokens || []).length} tokens in wallet, all below floor or SOL)`);
+        return;
+      }
       log("sweep", `Wallet sweep: ${candidates.length} token(s) above $${floor.toFixed(2)} floor — ${candidates.map((t) => `${t.symbol} ($${t.usd.toFixed(2)})`).join(", ")}`);
       const { swapToken } = await import("./tools/wallet.js");
       for (const t of candidates) {
