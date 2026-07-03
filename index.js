@@ -7,6 +7,7 @@ import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
+import { normalizeMint } from "./tools/wallet.js";
 import { getTopCandidates, chooseAdaptiveDeployProfile } from "./tools/screening.js";
 import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
@@ -1312,12 +1313,21 @@ Summarize the current portfolio health, total fees earned, and performance of al
       const balances = await getWalletBalances({});
       const SOL_MINT = config.tokens.SOL;
       const floor = Math.max(0, Number(config.management.autoSwapMinUsdFloor ?? 0.10));
-      const candidates = (balances.tokens || []).filter((t) =>
-        t.mint !== SOL_MINT &&
-        t.usd != null &&
-        t.usd >= floor &&
-        Number(t.balance) > 0
-      );
+      // Build the SOL-mint set: native SOL + wrapped SOL variants. The
+      // wallet may return both So111...1112 (native) and So111...1111
+      // (wrapped) as separate entries. swapToken() normalizes both to
+      // native SOL, so calling it with input_mint = wrapped SOL and
+      // output_mint = "SOL" produces inputMint == outputMint after
+      // normalization, and Jupiter rejects with "inputMint cannot be
+      // same as outputMint". Skip any mint that normalizes to SOL.
+      const candidates = (balances.tokens || []).filter((t) => {
+        if (!t.mint) return false;
+        // Skip if this token would normalize to SOL (native or wrapped).
+        if (normalizeMint(t.mint) === SOL_MINT) return false;
+        if (t.usd == null || t.usd < floor) return false;
+        if (Number(t.balance) <= 0) return false;
+        return true;
+      });
       if (candidates.length === 0) return;
       log("sweep", `Wallet sweep: ${candidates.length} token(s) above $${floor.toFixed(2)} floor — ${candidates.map((t) => `${t.symbol} ($${t.usd.toFixed(2)})`).join(", ")}`);
       const { swapToken } = await import("./tools/wallet.js");
