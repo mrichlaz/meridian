@@ -241,6 +241,10 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
       // Force a tool call on step 0 for action intents — prevents the model from inventing deploy/close outcomes
       const ACTION_INTENTS = /\b(deploy|open|add liquidity|close|exit|withdraw|claim|swap|block|unblock)\b/i;
       let toolChoice = (step === 0 && (ACTION_INTENTS.test(goal) || mustUseRealTool)) ? "required" : "auto";
+      // Tracks whether the active provider supports tool_choice: "required".
+      // First attempt that hits a "required" rejection flips this false and
+      // avoids re-logging the same fallback on every subsequent attempt.
+      let providerSupportsRequired = true;
 
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
@@ -279,8 +283,14 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             continue;
           }
           if (toolChoice === "required" && isToolChoiceRequiredError(error)) {
+            // The provider doesn't support tool_choice: "required". Switch
+            // to "auto" for the rest of this cycle and remember the fact so
+            // we don't log the same fallback on every subsequent attempt.
             toolChoice = "auto";
-            log("agent", "Provider rejected tool_choice=required — retrying with tool_choice=auto");
+            if (!providerSupportsRequired) {
+              providerSupportsRequired = false;
+              log("agent_warn", "Provider does not support tool_choice=required — using tool_choice=auto for this cycle (forcing the LLM to make a tool call on action intents will be best-effort; if the LLM produces text instead, the system rejects the text answer and retries up to 2x)");
+            }
             attempt -= 1;
             continue;
           }
