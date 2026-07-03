@@ -928,7 +928,7 @@ STEPS:
    <name or none>
 
    WHY SKIPPED
-   <must cite a specific comparative or qualitative data point from the pool/verdict blocks above. Do NOT claim that a shown survivor failed CONFIG minimums, because shown survivors already passed those hard checks. Good examples: "no smart-wallet confirmation while the other survivor had strong confirmation", "narrative is materially weaker than the other survivor", "momentum/volume persistence is weaker than the alternative despite passing minimums"> 
+   <must cite a specific comparative or qualitative data point from the pool/verdict blocks above. Do NOT claim that a shown survivor failed CONFIG minimums, because shown survivors already passed those hard checks. Good examples: "no smart-wallet confirmation while the other survivor had strong confirmation", "narrative is materially weaker than the other survivor", "momentum/volume persistence is weaker than the alternative despite passing minimums">
 
    REJECTED
    <short flat list of top candidate names and the SPECIFIC qualitative/comparative reason each was skipped>
@@ -938,13 +938,17 @@ IMPORTANT:
 - If you cite a CONFIG threshold, copy the EXACT number from the CONFIG section above. Do not paraphrase.
       `, config.llm.maxSteps, [], "SCREENER", config.llm.screeningModel, 2048, {
         onToolStart: async ({ name }) => {
-          if (name === "deploy_position") deployAttempted = true;
+          if (name === "deploy_position") {
+            deployAttempted = true;
+            log("screening", `LLM invoked deploy_position tool (pool=${(result?.pool || "unknown").slice(0, 12)})`);
+          }
           await liveMessage?.toolStart(name);
         },
         onToolFinish: async ({ name, result, success }) => {
           if (name === "deploy_position") {
             deployAttempted = true;
             deploySucceeded = Boolean(success && result?.success !== false && !result?.error && !result?.blocked);
+            log("screening", `Deploy attempt finished: success=${deploySucceeded} pool=${result?.pool_name || result?.pool || "unknown"}` + (deploySucceeded ? "" : ` error=${result?.error || "unknown"}`));
             if (deploySucceeded) {
               deployPool = result?.pool || null;
               deployPoolName = result?.pool_name || null;
@@ -954,6 +958,14 @@ IMPORTANT:
         },
       });
     screenReport = content;
+    // Log the LLM's verdict so the operator can see what the model decided
+    // (the actual narrative goes to Telegram; this is the binary outcome).
+    const llmVerdict = /⛔\s*NO DEPLOY/i.test(content) ? "NO DEPLOY"
+                     : /🚀\s*DEPLOY/i.test(content) ? "DEPLOY"
+                     : deployAttempted ? "DEPLOY_ATTEMPTED"
+                     : "AMBIGUOUS";
+    log("screening", `LLM verdict: ${llmVerdict} (${content.length} chars, ${passing.length} hard-filter survivor(s))`);
+
     if (/⛔\s*NO DEPLOY/i.test(content)) {
       // Data-anchored audit: when the LLM chose no deploy, surface the actual
       // hard-filter verdict on the top survivor alongside the LLM's narrative.
