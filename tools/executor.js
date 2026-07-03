@@ -797,7 +797,23 @@ export async function executeTool(name, args) {
 
   // ─── Execute ──────────────────────────────
   try {
-    let result = await fn(args);
+    // For deploy_position, strip the LLM's strategy field if the user has
+    // explicitly disabled the adaptive override. The LLM tool description
+    // tells the model to omit the strategy field, but models like deepseek
+    // can still pass 'spot' on their own. When the user has configured
+    // disableAdaptiveOverride: true (default), honor that — always use
+    // the configured strategy. The CLI sets _fromCli to bypass this
+    // guard so manual `meridian deploy --strategy spot` still works.
+    let deployArgs = args;
+    if (name === "deploy_position" && !args._fromCli && config.strategy?.disableAdaptiveOverride === true) {
+      if (args.strategy && args.strategy !== config.strategy?.strategy) {
+        log("executor_warn", `LLM passed strategy=${args.strategy} for deploy of ${args.pool_address?.slice(0, 12)} — overriding to config default ${config.strategy.strategy} (disableAdaptiveOverride=true)`);
+      }
+      deployArgs = { ...args };
+      delete deployArgs.strategy;
+    }
+
+    let result = await fn(deployArgs);
     if (
       name === "deploy_position" &&
       (result?.success === false || result?.error) &&

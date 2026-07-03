@@ -474,6 +474,7 @@ switch (subcommand) {
 
     const { executeTool } = await import("./tools/executor.js");
     out(await executeTool("deploy_position", {
+      _fromCli: true,  // bypass the LLM-override guard so --strategy is honored
       pool_address: flags.pool,
       amount_y: flags.amount ? parseFloat(flags.amount) : undefined,
       amount_x: amountX,
