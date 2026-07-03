@@ -113,7 +113,7 @@ export const config = {
   // ─── Position Management ────────────────
   management: {
     minClaimAmount:        u.minClaimAmount        ?? 5,
-    autoSwapAfterClaim:    u.autoSwapAfterClaim    ?? false,
+    autoSwapAfterClaim:    u.autoSwapAfterClaim    ?? true,   // default ON: swap base token portion of claimed fees to SOL
     autoSwapRetryAttempts: u.autoSwapRetryAttempts ?? 3,    // retries for base→SOL auto-swap on Jupiter failure
     autoSwapRetryDelayMs:  u.autoSwapRetryDelayMs  ?? 3000, // delay between auto-swap retries
     autoSwapMinUsdFloor:   u.autoSwapMinUsdFloor   ?? 0.10, // skip swap when base token USD value is below this

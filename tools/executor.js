@@ -879,7 +879,15 @@ export async function executeTool(name, args) {
           }
         }
       } else if (name === "claim_fees" && config.management.autoSwapAfterClaim && result.base_mint) {
-        await swapBaseToSolWithRetry(result.base_mint, "after claim");
+        log("executor", `Auto-swap FIRING for claim ${args.position_address?.slice(0, 8)} base_mint=${result.base_mint.slice(0, 12)}`);
+        const { swapped, result: swapResult } = await swapBaseToSolWithRetry(result.base_mint, "after claim");
+        if (swapped) {
+          result.auto_swapped = true;
+          result.auto_swap_note = `Claimed base token auto-swapped to SOL (${result.base_mint.slice(0, 8)} → SOL). Do NOT call swap_token again.`;
+          if (swapResult?.amount_out) result.sol_received = swapResult.amount_out;
+        }
+      } else if (name === "claim_fees" && config.management.autoSwapAfterClaim && !result.base_mint) {
+        log("executor_warn", `Auto-swap after claim SKIPPED for ${args.position_address?.slice(0, 8)} — claim returned no base_mint`);
       }
     }
 
