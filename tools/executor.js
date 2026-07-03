@@ -359,6 +359,7 @@ function normalizeConfigValue(key, value) {
     "rsiLength", "indicatorCandles", "rsiOversold", "rsiOverbought",
     "adaptiveMinAgeHours", "adaptiveMaxAgeHours", "adaptiveMinVolatility",
     "autoSwapRetryAttempts", "autoSwapRetryDelayMs", "autoSwapMinUsdFloor",
+    "walletSweepIntervalSec",
   ]);
   if (value === null) return null;
   if (booleanKeys.has(key)) return coerceBoolean(value, key);
@@ -505,6 +506,7 @@ const toolMap = {
       autoSwapRetryAttempts: ["management", "autoSwapRetryAttempts"],
       autoSwapRetryDelayMs: ["management", "autoSwapRetryDelayMs"],
       autoSwapMinUsdFloor: ["management", "autoSwapMinUsdFloor"],
+      walletSweepIntervalSec: ["management", "walletSweepIntervalSec"],
       outOfRangeBinsToClose: ["management", "outOfRangeBinsToClose"],
       outOfRangeWaitMinutes: ["management", "outOfRangeWaitMinutes"],
       oorCooldownTriggerCount: ["management", "oorCooldownTriggerCount"],

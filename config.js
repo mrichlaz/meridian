@@ -117,6 +117,7 @@ export const config = {
     autoSwapRetryAttempts: u.autoSwapRetryAttempts ?? 3,    // retries for base→SOL auto-swap on Jupiter failure
     autoSwapRetryDelayMs:  u.autoSwapRetryDelayMs  ?? 3000, // delay between auto-swap retries
     autoSwapMinUsdFloor:   u.autoSwapMinUsdFloor   ?? 0.10, // skip swap when base token USD value is below this
+    walletSweepIntervalSec: u.walletSweepIntervalSec ?? 300, // 5min: how often to scan the wallet for stray base tokens to sweep
     outOfRangeBinsToClose: u.outOfRangeBinsToClose ?? 10,
     outOfRangeWaitMinutes: u.outOfRangeWaitMinutes ?? 30,
     oorCooldownTriggerCount: u.oorCooldownTriggerCount ?? 3,

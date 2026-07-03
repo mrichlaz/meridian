@@ -238,8 +238,11 @@ async function maybeRunMissedBriefing() {
 }
 
 function stopCronJobs() {
-  for (const task of _cronTasks) task.stop();
+  for (const task of _cronTasks) {
+    if (task && typeof task.stop === "function") task.stop();
+  }
   if (_cronTasks._pnlPollInterval) clearInterval(_cronTasks._pnlPollInterval);
+  if (_cronTasks._sweepInterval) clearInterval(_cronTasks._sweepInterval);
   _cronTasks = [];
 }
 
@@ -1292,9 +1295,56 @@ Summarize the current portfolio health, total fees earned, and performance of al
     }
   }, pnlPollMs);
 
-  _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog];
-  // Store interval ref so stopCronJobs can clear it
+  // ─── Wallet sweeper ──────────────────────────────────────────────
+  // Periodically scans the wallet for base tokens (above the dust floor)
+  // and swaps them to SOL. This is the missing complement to the
+  // close/claim auto-swap — the close/claim auto-swap only fires on
+  // those events, but if base tokens are already in the wallet
+  // (from old closes before the fix, or from manual transfers), they
+  // need a separate sweep to consolidate.
+  let _sweepBusy = false;
+  const sweepIntervalMs = Math.max(60_000, Number(config.management.walletSweepIntervalSec ?? 300) * 1000);
+  const sweepTimer = safeSetInterval(async () => {
+    if (_managementBusy || _screeningBusy || _pnlPollBusy || _sweepBusy) return;
+    if (getTrackedPositions(true).length > 0) return;  // don't sweep while positions are open
+    _sweepBusy = true;
+    try {
+      const balances = await getWalletBalances({});
+      const SOL_MINT = config.tokens.SOL;
+      const floor = Math.max(0, Number(config.management.autoSwapMinUsdFloor ?? 0.10));
+      const candidates = (balances.tokens || []).filter((t) =>
+        t.mint !== SOL_MINT &&
+        t.usd != null &&
+        t.usd >= floor &&
+        Number(t.balance) > 0
+      );
+      if (candidates.length === 0) return;
+      log("sweep", `Wallet sweep: ${candidates.length} token(s) above $${floor.toFixed(2)} floor — ${candidates.map((t) => `${t.symbol} ($${t.usd.toFixed(2)})`).join(", ")}`);
+      const { swapToken } = await import("./tools/wallet.js");
+      for (const t of candidates) {
+        try {
+          log("sweep", `Sweeping ${t.symbol} ($${t.usd.toFixed(2)}, ${t.balance} tokens) → SOL`);
+          const res = await swapToken({ input_mint: t.mint, output_mint: "SOL", amount: t.balance });
+          if (res?.success) {
+            log("sweep", `✓ ${t.symbol} → SOL: tx ${res.tx}`);
+          } else {
+            log("sweep_warn", `✗ ${t.symbol} sweep failed: ${res?.error || "no tx"}`);
+          }
+        } catch (e) {
+          log("sweep_warn", `Sweep error on ${t.symbol}: ${e.message}`);
+        }
+      }
+    } catch (e) {
+      log("sweep_warn", `Sweep cycle error: ${e.message}`);
+    } finally {
+      _sweepBusy = false;
+    }
+  }, sweepIntervalMs);
+
+  _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog, sweepTimer];
+  // Store interval refs so stopCronJobs can clear them
   _cronTasks._pnlPollInterval = pnlPollInterval;
+  _cronTasks._sweepInterval = sweepTimer;
   log("cron", `Cycles started — management every ${config.schedule.managementIntervalMin}m, screening every ${config.schedule.screeningIntervalMin}m`);
 }
 
