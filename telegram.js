@@ -109,6 +109,14 @@ async function postTelegram(method, body) {
     });
     if (!res.ok) {
       const err = await res.text();
+      // Telegram returns 400 "message is not modified" when editMessageText
+      // is called with the same content as the current message. This is
+      // benign and happens routinely in the live-message update loop
+      // (every poll/sweep tick). Suppress the log so the operator isn't
+      // spammed with hundreds of identical warnings.
+      if (method === "editMessageText" && err.includes("not modified")) {
+        return { _notModified: true };
+      }
       if (res.status === 401) {
         log("telegram_error", `${method} 401 Unauthorized — check TELEGRAM_BOT_TOKEN in .env (invalid, revoked, or encrypted without .envrypt key)`);
       } else {
