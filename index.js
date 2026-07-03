@@ -1318,6 +1318,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
   let _sweepBusy = false;
   const sweepIntervalMs = Math.max(60_000, Number(config.management.walletSweepIntervalSec ?? 300) * 1000);
   const sweepTimer = safeSetInterval(async () => {
+    log("sweep_debug", `Sweep tick fired (interval=${sweepIntervalMs / 1000}s)`);
     if (_managementBusy || _screeningBusy || _pnlPollBusy || _sweepBusy) {
       log("sweep_debug", `Sweep tick skipped: management=${_managementBusy} screening=${_screeningBusy} pnlPoll=${_pnlPollBusy} sweep=${_sweepBusy}`);
       return;
@@ -1377,7 +1378,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
   // Store interval refs so stopCronJobs can clear them
   _cronTasks._pnlPollInterval = pnlPollInterval;
   _cronTasks._sweepInterval = sweepTimer;
-  log("cron", `Cycles started — management every ${config.schedule.managementIntervalMin}m, screening every ${config.schedule.screeningIntervalMin}m`);
+  log("cron", `Cycles started — management every ${config.schedule.managementIntervalMin}m, screening every ${config.schedule.screeningIntervalMin}m, pnlPoll every ${config.pnl.pollIntervalSec}s, wallet sweep every ${sweepIntervalMs / 1000}s`);
 }
 
 // ═══════════════════════════════════════════
