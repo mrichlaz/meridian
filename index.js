@@ -1346,11 +1346,6 @@ export async function runWalletSweepOnce({ source = "manual" } = {}) {
     log("sweep_debug", `[${source}] Sweep skipped: management=${_managementBusy} screening=${_screeningBusy} pnlPoll=${_pnlPollBusy}`);
     return { candidates: [], swapped: [], skipped: ["busy"], error: "busy" };
   }
-  const openPositions = getTrackedPositions(true);
-  if (openPositions.length > 0) {
-    log("sweep_debug", `[${source}] Sweep skipped: ${openPositions.length} open position(s) (${openPositions.map((p) => p.pair || p.pool_name || "unknown").join(", ")})`);
-    return { candidates: [], swapped: [], skipped: ["open_positions"], error: "open_positions" };
-  }
   if (_sweepBusy) {
     log("sweep_debug", `[${source}] Sweep skipped: another sweep in progress`);
     return { candidates: [], swapped: [], skipped: ["already_running"], error: "already_running" };
@@ -1360,15 +1355,30 @@ export async function runWalletSweepOnce({ source = "manual" } = {}) {
     const balances = await getWalletBalances({});
     const SOL_MINT = config.tokens.SOL;
     const floor = Math.max(0, Number(config.management.autoSwapMinUsdFloor ?? 0.10));
+    // Build a set of base mints that have open positions. We can still
+    // sweep stray tokens that AREN'T the base of an open position (e.g.
+    // Potato leftovers in the wallet don't conflict with a CATWIF LP).
+    const openPositions = getTrackedPositions(true);
+    const openBaseMints = new Set(
+      openPositions
+        .map((p) => normalizeMint(p.base_mint || p.baseMint || ""))
+        .filter(Boolean)
+    );
     const candidates = (balances.tokens || []).filter((t) => {
       if (!t.mint) return false;
       if (normalizeMint(t.mint) === SOL_MINT) return false;
       if (t.usd == null || t.usd < floor) return false;
       if (Number(t.balance) <= 0) return false;
+      // Skip tokens that are the base of an open position — swapping
+      // them away could affect the position's x_token balance.
+      if (openBaseMints.has(normalizeMint(t.mint))) return false;
       return true;
     });
     if (candidates.length === 0) {
-      log("sweep_debug", `[${source}] Sweep: no candidates (floor=$${floor.toFixed(2)}, ${(balances.tokens || []).length} tokens in wallet, all below floor or SOL)`);
+      const reason = openPositions.length > 0
+        ? `${openPositions.length} open position(s) covering all candidates, or all below floor`
+        : `all below floor or SOL`;
+      log("sweep_debug", `[${source}] Sweep: no candidates (floor=$${floor.toFixed(2)}, ${(balances.tokens || []).length} tokens in wallet, ${reason})`);
       return { candidates: [], swapped: [], skipped: ["no_candidates"], error: null };
     }
     log("sweep", `[${source}] Wallet sweep: ${candidates.length} token(s) above $${floor.toFixed(2)} floor — ${candidates.map((t) => `${t.symbol} ($${t.usd.toFixed(2)})`).join(", ")}`);
