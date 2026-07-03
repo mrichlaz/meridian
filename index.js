@@ -940,7 +940,7 @@ IMPORTANT:
         onToolStart: async ({ name }) => {
           if (name === "deploy_position") {
             deployAttempted = true;
-            log("screening", `LLM invoked deploy_position tool (pool=${(result?.pool || "unknown").slice(0, 12)})`);
+            log("screening", `LLM invoked deploy_position tool`);
           }
           await liveMessage?.toolStart(name);
         },
