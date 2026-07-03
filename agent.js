@@ -51,7 +51,7 @@ const INTENT_PATTERNS = [
   { intent: "deploy",      re: /\b(deploy|open|add liquidity|lp into|invest in)\b/i },
   { intent: "close",       re: /\b(close|exit|withdraw|remove liquidity|shut down)\b/i },
   { intent: "claim",       re: /\b(claim|harvest|collect)\b.*\bfee/i },
-  { intent: "swap",        re: /\b(swap|convert|sell|exchange)\b/i },
+  { intent: "swap",        re: /\b(swap|convert|sell|exchange|sweep|sweep wallet|consolidate|dust)\b/i },
   { intent: "selfupdate",  re: /\b(self.?update|git pull|pull latest|update (the )?bot|update (the )?agent|update yourself)\b/i },
   { intent: "blocklist",   re: /\b(blacklist|block|unblock|blocklist|blocked deployer|rugger|block dev|block deployer)\b/i },
   { intent: "config",      re: /\b(config|setting|threshold|update|set\s|change|trailingTrigger|trailingDrop|trailing\b|stopLoss|takeProfit|deployAmount|gasReserve|maxTvl|minTvl|maxMcap|minMcap|positionSize|minBin|maxBin|minFee|maxPositions|cooldown|oor|solMode|pnl)\b/i },
