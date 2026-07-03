@@ -135,6 +135,8 @@ let _managementBusy = false; // prevents overlapping management cycles
 let _screeningBusy = false;  // prevents overlapping screening cycles
 let _screeningLastTriggered = 0; // epoch ms — prevents management from spamming screening
 let _pollTriggeredAt = 0; // epoch ms — cooldown for poller-triggered management
+let _pnlPollBusy = false;   // module-level so runWalletSweepOnce can read it
+let _sweepBusy = false;     // module-level so runWalletSweepOnce can read/write it
 const _peakConfirmTimers = new Map();
 const _trailingDropConfirmTimers = new Map();
 const TRAILING_PEAK_CONFIRM_DELAY_MS = 15_000;
@@ -1254,7 +1256,6 @@ Summarize the current portfolio health, total fees earned, and performance of al
   // Lightweight PnL poller — updates trailing TP state between management cycles, no LLM.
   // Runs on public infra (RPC + Jupiter + Meteora deposits) so it can poll aggressively.
   const pnlPollMs = Math.max(1, Number(config.pnl.pollIntervalSec ?? 3)) * 1000;
-  let _pnlPollBusy = false;
   const pnlPollInterval = safeSetInterval(async () => {
     if (_managementBusy || _screeningBusy || _pnlPollBusy) return;
     if (getTrackedPositions(true).length === 0) return;
@@ -1315,7 +1316,6 @@ Summarize the current portfolio health, total fees earned, and performance of al
   // those events, but if base tokens are already in the wallet
   // (from old closes before the fix, or from manual transfers), they
   // need a separate sweep to consolidate.
-  let _sweepBusy = false;
   const sweepIntervalMs = Math.max(60_000, Number(config.management.walletSweepIntervalSec ?? 300) * 1000);
   const sweepTimer = safeSetInterval(async () => {
     log("sweep_debug", `Sweep tick fired (interval=${sweepIntervalMs / 1000}s)`);
