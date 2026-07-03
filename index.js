@@ -1319,59 +1319,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
   const sweepIntervalMs = Math.max(60_000, Number(config.management.walletSweepIntervalSec ?? 300) * 1000);
   const sweepTimer = safeSetInterval(async () => {
     log("sweep_debug", `Sweep tick fired (interval=${sweepIntervalMs / 1000}s)`);
-    if (_managementBusy || _screeningBusy || _pnlPollBusy || _sweepBusy) {
-      log("sweep_debug", `Sweep tick skipped: management=${_managementBusy} screening=${_screeningBusy} pnlPoll=${_pnlPollBusy} sweep=${_sweepBusy}`);
-      return;
-    }
-    const openPositions = getTrackedPositions(true);
-    if (openPositions.length > 0) {
-      log("sweep_debug", `Sweep tick skipped: ${openPositions.length} open position(s) (${openPositions.map((p) => p.pair || p.pool_name || "unknown").join(", ")})`);
-      return;
-    }
-    _sweepBusy = true;
-    try {
-      const balances = await getWalletBalances({});
-      const SOL_MINT = config.tokens.SOL;
-      const floor = Math.max(0, Number(config.management.autoSwapMinUsdFloor ?? 0.10));
-      // Build the SOL-mint set: native SOL + wrapped SOL variants. The
-      // wallet may return both So111...1112 (native) and So111...1111
-      // (wrapped) as separate entries. swapToken() normalizes both to
-      // native SOL, so calling it with input_mint = wrapped SOL and
-      // output_mint = "SOL" produces inputMint == outputMint after
-      // normalization, and Jupiter rejects with "inputMint cannot be
-      // same as outputMint". Skip any mint that normalizes to SOL.
-      const candidates = (balances.tokens || []).filter((t) => {
-        if (!t.mint) return false;
-        // Skip if this token would normalize to SOL (native or wrapped).
-        if (normalizeMint(t.mint) === SOL_MINT) return false;
-        if (t.usd == null || t.usd < floor) return false;
-        if (Number(t.balance) <= 0) return false;
-        return true;
-      });
-      if (candidates.length === 0) {
-        log("sweep_debug", `Sweep tick: no candidates (floor=$${floor.toFixed(2)}, ${(balances.tokens || []).length} tokens in wallet, all below floor or SOL)`);
-        return;
-      }
-      log("sweep", `Wallet sweep: ${candidates.length} token(s) above $${floor.toFixed(2)} floor — ${candidates.map((t) => `${t.symbol} ($${t.usd.toFixed(2)})`).join(", ")}`);
-      const { swapToken } = await import("./tools/wallet.js");
-      for (const t of candidates) {
-        try {
-          log("sweep", `Sweeping ${t.symbol} ($${t.usd.toFixed(2)}, ${t.balance} tokens) → SOL`);
-          const res = await swapToken({ input_mint: t.mint, output_mint: "SOL", amount: t.balance });
-          if (res?.success) {
-            log("sweep", `✓ ${t.symbol} → SOL: tx ${res.tx}`);
-          } else {
-            log("sweep_warn", `✗ ${t.symbol} sweep failed: ${res?.error || "no tx"}`);
-          }
-        } catch (e) {
-          log("sweep_warn", `Sweep error on ${t.symbol}: ${e.message}`);
-        }
-      }
-    } catch (e) {
-      log("sweep_warn", `Sweep cycle error: ${e.message}`);
-    } finally {
-      _sweepBusy = false;
-    }
+    await runWalletSweepOnce({ source: "cron" });
   }, sweepIntervalMs);
 
   _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog, sweepTimer];
@@ -1385,6 +1333,73 @@ Summarize the current portfolio health, total fees earned, and performance of al
 //  GRACEFUL SHUTDOWN
 // ═══════════════════════════════════════════
 let _shuttingDown = false;
+
+/**
+ * Run a single wallet sweep cycle. Used by:
+ *  - the periodic cron (every walletSweepIntervalSec)
+ *  - the /sweep Telegram command (manual one-off trigger)
+ *
+ * Returns a summary object: { candidates: [...], swapped: [...], skipped: [...], error: null|string }
+ */
+export async function runWalletSweepOnce({ source = "manual" } = {}) {
+  if (_managementBusy || _screeningBusy || _pnlPollBusy) {
+    log("sweep_debug", `[${source}] Sweep skipped: management=${_managementBusy} screening=${_screeningBusy} pnlPoll=${_pnlPollBusy}`);
+    return { candidates: [], swapped: [], skipped: ["busy"], error: "busy" };
+  }
+  const openPositions = getTrackedPositions(true);
+  if (openPositions.length > 0) {
+    log("sweep_debug", `[${source}] Sweep skipped: ${openPositions.length} open position(s) (${openPositions.map((p) => p.pair || p.pool_name || "unknown").join(", ")})`);
+    return { candidates: [], swapped: [], skipped: ["open_positions"], error: "open_positions" };
+  }
+  if (_sweepBusy) {
+    log("sweep_debug", `[${source}] Sweep skipped: another sweep in progress`);
+    return { candidates: [], swapped: [], skipped: ["already_running"], error: "already_running" };
+  }
+  _sweepBusy = true;
+  try {
+    const balances = await getWalletBalances({});
+    const SOL_MINT = config.tokens.SOL;
+    const floor = Math.max(0, Number(config.management.autoSwapMinUsdFloor ?? 0.10));
+    const candidates = (balances.tokens || []).filter((t) => {
+      if (!t.mint) return false;
+      if (normalizeMint(t.mint) === SOL_MINT) return false;
+      if (t.usd == null || t.usd < floor) return false;
+      if (Number(t.balance) <= 0) return false;
+      return true;
+    });
+    if (candidates.length === 0) {
+      log("sweep_debug", `[${source}] Sweep: no candidates (floor=$${floor.toFixed(2)}, ${(balances.tokens || []).length} tokens in wallet, all below floor or SOL)`);
+      return { candidates: [], swapped: [], skipped: ["no_candidates"], error: null };
+    }
+    log("sweep", `[${source}] Wallet sweep: ${candidates.length} token(s) above $${floor.toFixed(2)} floor — ${candidates.map((t) => `${t.symbol} ($${t.usd.toFixed(2)})`).join(", ")}`);
+    const { swapToken } = await import("./tools/wallet.js");
+    const swapped = [];
+    const failed = [];
+    for (const t of candidates) {
+      try {
+        log("sweep", `Sweeping ${t.symbol} ($${t.usd.toFixed(2)}, ${t.balance} tokens) → SOL`);
+        const res = await swapToken({ input_mint: t.mint, output_mint: "SOL", amount: t.balance });
+        if (res?.success) {
+          log("sweep", `✓ ${t.symbol} → SOL: tx ${res.tx}`);
+          swapped.push({ symbol: t.symbol, tx: res.tx });
+        } else {
+          log("sweep_warn", `✗ ${t.symbol} sweep failed: ${res?.error || "no tx"}`);
+          failed.push({ symbol: t.symbol, error: res?.error || "no tx" });
+        }
+      } catch (e) {
+        log("sweep_warn", `Sweep error on ${t.symbol}: ${e.message}`);
+        failed.push({ symbol: t.symbol, error: e.message });
+      }
+    }
+    return { candidates: candidates.map((t) => ({ symbol: t.symbol, usd: t.usd, balance: t.balance })), swapped, failed, error: null };
+  } catch (e) {
+    log("sweep_warn", `Sweep cycle error: ${e.message}`);
+    return { candidates: [], swapped: [], skipped: [], error: e.message };
+  } finally {
+    _sweepBusy = false;
+  }
+}
+
 
 function withTimeout(promise, ms) {
   let timer = null;
@@ -2405,6 +2420,30 @@ async function telegramHandler(msg) {
       await sendMessage("▶️ Autonomous cycles resumed.").catch(() => {});
     } else {
       await sendMessage("Autonomous cycles are already running.").catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/sweep") {
+    await sendMessage("🔄 Running wallet sweep…").catch(() => {});
+    const result = await runWalletSweepOnce({ source: "telegram" });
+    if (result.error === "busy") {
+      await sendMessage("Sweep skipped: another cycle (mgmt/screening/pnl poll) is in progress.").catch(() => {});
+    } else if (result.error === "open_positions") {
+      await sendMessage("Sweep skipped: there are open positions (won't sweep while LP is active).").catch(() => {});
+    } else if (result.error === "already_running") {
+      await sendMessage("Sweep skipped: a sweep is already running.").catch(() => {});
+    } else if (result.error) {
+      await sendMessage(`Sweep error: ${result.error}`).catch(() => {});
+    } else if (result.candidates.length === 0) {
+      await sendMessage("Sweep: no candidates above the dust floor.").catch(() => {});
+    } else {
+      const lines = result.candidates.map((c) => `• ${c.symbol} ($${Number(c.usd).toFixed(2)})`);
+      const ok = result.swapped.map((s) => `✅ ${s.symbol}: tx ${(s.tx || "").slice(0, 12)}…`);
+      const ko = result.failed.map((f) => `❌ ${f.symbol}: ${f.error}`);
+      await sendMessage(
+        `Wallet sweep results\n\nCandidates:\n${lines.join("\n")}\n\n${ok.join("\n")}${ko.length ? "\n\n" + ko.join("\n") : ""}`
+      ).catch(() => {});
     }
     return;
   }
