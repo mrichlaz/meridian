@@ -615,6 +615,47 @@ export function formatConfigSnapshot(config, options = {}) {
   lines.push(`  • screening: ${esc(config.llm?.screeningModel || "—")}`);
   lines.push(`  • management: ${esc(config.llm?.managementModel || "—")}`);
   lines.push(`  • general: ${esc(config.llm?.generalModel || "—")}`);
+
+  // ─── Auto-swap / Wallet sweep ──────────────────────────────────────
+  const hasAutoSwap = m.autoSwapAfterClaim != null
+    || m.autoSwapRetryAttempts != null
+    || m.autoSwapMinUsdFloor != null
+    || m.walletSweepIntervalSec != null;
+  if (hasAutoSwap) {
+    lines.push("");
+    lines.push(b("Auto-swap & wallet sweep"));
+    if (m.autoSwapAfterClaim != null) {
+      lines.push(`  • autoSwap on claim: ${m.autoSwapAfterClaim ? "ON" : "OFF"}`);
+    }
+    if (m.autoSwapRetryAttempts != null) {
+      lines.push(`  • autoSwap retries: ${m.autoSwapRetryAttempts} × ${(Number(m.autoSwapRetryDelayMs || 3000) / 1000).toFixed(1)}s delay`);
+    }
+    if (m.autoSwapMinUsdFloor != null) {
+      lines.push(`  • dust floor: $${Number(m.autoSwapMinUsdFloor).toFixed(2)} USD (below this = skip swap)`);
+    }
+    if (m.walletSweepIntervalSec != null) {
+      const minutes = Math.round(Number(m.walletSweepIntervalSec) / 60);
+      lines.push(`  • wallet sweep: every ${minutes}m (stray base tokens → SOL)`);
+    }
+  }
+
+  // ─── Strategy overrides ──────────────────────────────────────────────
+  if (config.strategy?.disableAdaptiveOverride != null
+    || config.strategy?.adaptiveMinAgeHours != null
+    || config.strategy?.adaptiveMaxAgeHours != null
+    || config.strategy?.adaptiveMinVolatility != null) {
+    lines.push("");
+    lines.push(b("Strategy overrides"));
+    if (config.strategy.disableAdaptiveOverride != null) {
+      lines.push(`  • adaptive override: ${config.strategy.disableAdaptiveOverride ? "DISABLED (always use configured strategy)" : "ENABLED (spot for young volatile tokens)"}`);
+    }
+    if (config.strategy?.adaptiveMinAgeHours != null
+        || config.strategy?.adaptiveMaxAgeHours != null
+        || config.strategy?.adaptiveMinVolatility != null) {
+      lines.push(`  • adaptive window: age ${config.strategy?.adaptiveMinAgeHours ?? "?"}–${config.strategy?.adaptiveMaxAgeHours ?? "?"}h, vol ≥ ${config.strategy?.adaptiveMinVolatility ?? "?"}`);
+    }
+  }
+
   return { text: lines.join("\n").slice(0, 3900), buttons: ACTION_BUTTONS.status() };
 }
 
