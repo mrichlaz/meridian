@@ -698,6 +698,14 @@ const toolMap = {
     for (const [key, val] of Object.entries(applied)) {
       if (key.startsWith("_")) continue;
       const [section, field] = CONFIG_MAP[key];
+      // minSafeBinsBelow is a top-level number, not a nested object.
+      // Special-case it so we write directly to config.minSafeBinsBelow.
+      if (key === "minSafeBinsBelow") {
+        const before = config.minSafeBinsBelow;
+        config.minSafeBinsBelow = val;
+        log("config", `update_config: config.minSafeBinsBelow ${before} → ${val} (verify: ${config.minSafeBinsBelow})`);
+        continue;
+      }
       const before = config[section][field];
       config[section][field] = val;
       log("config", `update_config: config.${section}.${field} ${before} → ${val} (verify: ${config[section][field]})`);
