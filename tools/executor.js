@@ -21,7 +21,7 @@ import { addToBlacklist, removeFromBlacklist, listBlacklist } from "../token-bla
 import { blockDev, unblockDev, listBlockedDevs } from "../dev-blocklist.js";
 import { addSmartWallet, removeSmartWallet, listSmartWallets, checkSmartWalletsOnPool } from "../smart-wallets.js";
 import { getTokenInfo, getTokenHolders, getTokenNarrative } from "./token.js";
-import { config, reloadScreeningThresholds, MIN_SAFE_BINS_BELOW } from "../config.js";
+import { config, reloadScreeningThresholds } from "../config.js";
 import { getRecentDecisions } from "../decision-log.js";
 import fs from "fs";
 import path from "path";
@@ -359,7 +359,7 @@ function normalizeConfigValue(key, value) {
     "rsiLength", "indicatorCandles", "rsiOversold", "rsiOverbought",
     "adaptiveMinAgeHours", "adaptiveMaxAgeHours", "adaptiveMinVolatility",
     "autoSwapRetryAttempts", "autoSwapRetryDelayMs", "autoSwapMinUsdFloor",
-    "walletSweepIntervalSec",
+    "walletSweepIntervalSec", "minSafeBinsBelow",
   ]);
   if (value === null) return null;
   if (booleanKeys.has(key)) return coerceBoolean(value, key);
@@ -555,6 +555,11 @@ const toolMap = {
       adaptiveMinAgeHours: ["strategy", "adaptiveMinAgeHours"],
       adaptiveMaxAgeHours: ["strategy", "adaptiveMaxAgeHours"],
       adaptiveMinVolatility: ["strategy", "adaptiveMinVolatility"],
+      // bin floor override (default 35) — allows testing tighter ranges (e.g. 25).
+      // Lives at config.minSafeBinsBelow (mutable, refreshed by reloadScreeningThresholds).
+      // Deploy code reads config.minSafeBinsBelow dynamically so the change takes
+      // effect immediately, no restart needed.
+      minSafeBinsBelow: ["minSafeBinsBelow", "value"],
       // hivemind
       hiveMindUrl: ["hiveMind", "url"],
       hiveMindApiKey: ["hiveMind", "apiKey"],
@@ -654,7 +659,7 @@ const toolMap = {
           if (!Number.isFinite(numericVal)) {
             throw new Error(`${match[0]} must be a finite number`);
           }
-          normalizedVal = Math.max(MIN_SAFE_BINS_BELOW, Math.round(numericVal));
+          normalizedVal = Math.max(config.minSafeBinsBelow, Math.round(numericVal));
         } else {
           normalizedVal = normalizeConfigValue(match[0], val);
         }
@@ -703,7 +708,7 @@ const toolMap = {
       applied.maxBinsBelow != null ||
       applied.defaultBinsBelow != null
     ) {
-      config.strategy.minBinsBelow = Math.max(MIN_SAFE_BINS_BELOW, Math.round(Number(config.strategy.minBinsBelow ?? MIN_SAFE_BINS_BELOW)));
+      config.strategy.minBinsBelow = Math.max(config.minSafeBinsBelow, Math.round(Number(config.strategy.minBinsBelow ?? config.minSafeBinsBelow)));
       config.strategy.maxBinsBelow = Math.max(config.strategy.minBinsBelow, Math.round(Number(config.strategy.maxBinsBelow ?? config.strategy.minBinsBelow)));
       config.strategy.defaultBinsBelow = Math.max(
         config.strategy.minBinsBelow,
@@ -977,7 +982,7 @@ async function runSafetyChecks(name, args) {
       }
       const requestedBinsBelow = Number(args.bins_below ?? config.strategy.defaultBinsBelow ?? config.strategy.minBinsBelow);
       const requestedBinsAbove = Number(args.bins_above ?? 0);
-      const minBinsBelow = Math.max(MIN_SAFE_BINS_BELOW, Number(config.strategy.minBinsBelow ?? MIN_SAFE_BINS_BELOW));
+      const minBinsBelow = Math.max(config.minSafeBinsBelow, Number(config.strategy.minBinsBelow ?? config.minSafeBinsBelow));
       const isSingleSidedSol = deployAmountY > 0 && deployAmountX <= 0;
       const requestedTotalBins = requestedBinsBelow + requestedBinsAbove;
       const requestedVolatility = args.volatility == null ? null : Number(args.volatility);

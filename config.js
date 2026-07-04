@@ -78,6 +78,11 @@ function nonEmptyString(...values) {
 }
 
 export const config = {
+  // Mutable runtime view of MIN_SAFE_BINS_BELOW. The const below
+  // captures the module-load default; this property gets refreshed
+  // by reloadScreeningThresholds() when the user changes the override.
+  // Deploy code reads config.minSafeBinsBelow (dynamic) not the const.
+  minSafeBinsBelow: numericConfig(u.minSafeBinsBelow ?? u.binsFloor) ?? 35,
   // ─── Risk Limits ─────────────────────────
   risk: {
     maxPositions:    u.maxPositions    ?? 3,
@@ -533,6 +538,11 @@ export function reloadScreeningThresholds() {
   try {
     if (!fs.existsSync(USER_CONFIG_PATH)) return;
     const fresh = JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8"));
+    // Refresh the bin floor if the user changed it. Defaults to 35 if absent.
+    if (fresh.minSafeBinsBelow != null || fresh.binsFloor != null) {
+      const v = numericConfig(fresh.minSafeBinsBelow ?? fresh.binsFloor);
+      if (v != null) config.minSafeBinsBelow = v;
+    }
     const s = config.screening;
     if (fresh.minFeeActiveTvlRatio != null) s.minFeeActiveTvlRatio = fresh.minFeeActiveTvlRatio;
     if (fresh.minTokenFeesSol  != null) s.minTokenFeesSol  = fresh.minTokenFeesSol;

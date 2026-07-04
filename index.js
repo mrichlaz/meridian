@@ -10,7 +10,7 @@ import { getWalletBalances } from "./tools/wallet.js";
 import { normalizeMint } from "./tools/wallet.js";
 import { getTopCandidates, chooseAdaptiveDeployProfile } from "./tools/screening.js";
 import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
-import { config, reloadScreeningThresholds, computeDeployAmount, MIN_SAFE_BINS_BELOW } from "./config.js";
+import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { checkCircuitBreaker, getMarketRegime, rankCandidates, sizeMultiplierForScore, scoreCandidate } from "./policy-engine.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
@@ -1016,7 +1016,7 @@ IMPORTANT:
             if (deployProfile.deployable) {
               const deployAmountOverride = Number((deployAmount * (deployProfile.sizeMultiplier || 1) * sizeMultiplierForScore(passing[0]?.policy?.score || 66, regime)).toFixed(2));
               const initialValueUsd = currentBalance.sol_price ? deployAmountOverride * currentBalance.sol_price : null;
-              const binsBelow = Math.max(MIN_SAFE_BINS_BELOW, Math.round(computeBinsBelow(topSurvivor.volatility) * (deployProfile.binsMultiplier || 1)));
+              const binsBelow = Math.max(config.minSafeBinsBelow, Math.round(computeBinsBelow(topSurvivor.volatility) * (deployProfile.binsMultiplier || 1)));
               const fallbackResult = await executeTool("deploy_position", {
                 pool_address: topSurvivor.pool,
                 amount_y: deployAmountOverride,
@@ -1097,7 +1097,7 @@ IMPORTANT:
           if (deployProfile.deployable) {
             const deployAmountOverride = Number((screeningDeployAmount * (deployProfile.sizeMultiplier || 1) * sizeMultiplierForScore(passingForFallback[0]?.policy?.score || 66)).toFixed(2));
             const initialValueUsd = screeningBalance?.sol_price ? deployAmountOverride * screeningBalance.sol_price : null;
-            const binsBelow = Math.max(MIN_SAFE_BINS_BELOW, Math.round(computeBinsBelow(topSurvivor.volatility) * (deployProfile.binsMultiplier || 1)));
+            const binsBelow = Math.max(config.minSafeBinsBelow, Math.round(computeBinsBelow(topSurvivor.volatility) * (deployProfile.binsMultiplier || 1)));
             const fallbackResult = await executeTool("deploy_position", {
               pool_address: topSurvivor.pool,
               amount_y: deployAmountOverride,
@@ -1819,7 +1819,7 @@ async function applySettingsMenuCallback(msg) {
     if (key === "repeatDeployCooldownTriggerCount") value = Math.max(1, Math.round(value));
     if (key === "repeatDeployCooldownHours") value = Math.max(0, Math.round(value));
     if (key === "repeatDeployCooldownMinFeeEarnedPct") value = Math.max(0, value);
-    if (["minBinsBelow", "maxBinsBelow", "defaultBinsBelow"].includes(key)) value = Math.max(MIN_SAFE_BINS_BELOW, Math.round(value));
+    if (["minBinsBelow", "maxBinsBelow", "defaultBinsBelow"].includes(key)) value = Math.max(config.minSafeBinsBelow, Math.round(value));
     if (["deployAmountSol", "gasReserve", "maxDeployAmount"].includes(key)) value = Math.max(0, value);
     if (["policyNeutralMinScore", "policyRiskOffMinScore", "policyRiskOnMinScore"].includes(key)) value = Math.max(0, Math.min(100, Math.round(value)));
     if (["policyMinFeeVolatilityRatio", "policyMinVolumePersistence", "policyToxicFlowPenalty"].includes(key)) value = Math.max(0, value);
@@ -1987,7 +1987,7 @@ async function deployLatestCandidate(index) {
   const baseDeployAmount = computeDeployAmount(wallet.sol);
   const deployAmount = Number((baseDeployAmount * (deployProfile.sizeMultiplier || 1) * sizeMultiplierForScore(manualPolicy.score)).toFixed(2));
   const initialValueUsd = wallet.sol_price ? deployAmount * wallet.sol_price : null;
-  const binsBelow = Math.max(MIN_SAFE_BINS_BELOW, Math.round(computeBinsBelow(candidate.volatility) * (deployProfile.binsMultiplier || 1)));
+  const binsBelow = Math.max(config.minSafeBinsBelow, Math.round(computeBinsBelow(candidate.volatility) * (deployProfile.binsMultiplier || 1)));
   const result = await executeTool("deploy_position", {
     pool_address: candidate.pool,
     amount_y: deployAmount,
