@@ -85,7 +85,7 @@ Deploy safety is centralized in `tools/executor.js` around `deploy_position`. Ex
 - fee/active-TVL threshold checks, with DLMM fallback for missing discovery API data
 - positive, finite volatility requirement using at least a `30m` volatility timeframe
 - bin step range checks
-- minimum safe range width (`MIN_SAFE_BINS_BELOW`, currently 35)
+- minimum safe range width (`MIN_SAFE_BINS_BELOW`, default 35, overridable via `user-config.json → minSafeBinsBelow` or `binsFloor`)
 - max position count and duplicate pool/base-token prevention
 - single-sided SOL deploy enforcement (`amount_x > 0` rejected)
 - SOL balance plus gas reserve check

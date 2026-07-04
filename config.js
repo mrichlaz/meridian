@@ -18,7 +18,13 @@ function readJsonIfExists(filePath) {
 
 const u = readJsonIfExists(USER_CONFIG_PATH);
 const gmgnUserConfig = readJsonIfExists(GMGN_CONFIG_PATH);
-export const MIN_SAFE_BINS_BELOW = 35;
+
+// Floor for bins_below on deploy. Default 35 (matches the documented
+// safety guardrail for typical meme-coin volatility + 80-125 bin_step).
+// Overridable via user-config.json → "minSafeBinsBelow" (or the legacy
+// "binsFloor" alias). Lower values are allowed (e.g. 25) but increase
+// the chance of going OOR during normal price wicks — tune with care.
+export const MIN_SAFE_BINS_BELOW = numericConfig(u.minSafeBinsBelow ?? u.binsFloor) ?? 35;
 
 function numericConfig(value) {
   const n = Number(value);
