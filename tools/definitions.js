@@ -398,7 +398,7 @@ Management: minClaimAmount, outOfRangeBinsToClose, outOfRangeWaitMinutes, oorCoo
 Risk: maxPositions, maxDeployAmount
 Schedule: managementIntervalMin, screeningIntervalMin, healthCheckIntervalMin
 Models: managementModel, screeningModel, generalModel, temperature, maxTokens, maxSteps
-Strategy: strategy, minBinsBelow, maxBinsBelow, defaultBinsBelow, disableAdaptiveOverride, adaptiveMinAgeHours, adaptiveMaxAgeHours, adaptiveMinVolatility
+Strategy: strategy, minBinsBelow, maxBinsBelow, defaultBinsBelow, disableAdaptiveOverride, adaptiveMinAgeHours, adaptiveMaxAgeHours, adaptiveMinVolatility, minSafeBinsBelow
 Auto-swap (base→SOL on close/claim): autoSwapAfterClaim, autoSwapRetryAttempts, autoSwapRetryDelayMs, autoSwapMinUsdFloor
 Wallet sweep (periodic scan for stray base tokens): walletSweepIntervalSec
 ML (opt-in scoring + emotion): mlEnabled, mlTrainEvery, mlMinSamples, mlBatchSize, mlEpochs, mlLearningRate, mlPersonality
