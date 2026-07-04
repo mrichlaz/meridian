@@ -21,6 +21,9 @@ const TIMEFRAME_MINUTES = {
   "12h": 720,
   "24h": 1440,
 };
+// Degen Score normalizes window-dependent inputs (volume/fee/LP) to this reference
+// window, so its targets stay valid regardless of the configured screening timeframe.
+const DEGEN_REFERENCE_MINUTES = 30;
 const PVP_SHORTLIST_LIMIT = 2;
 const PVP_RIVAL_LIMIT = 2;
 const PVP_MIN_ACTIVE_TVL = 5_000;
@@ -32,10 +35,41 @@ function normalizeSymbol(symbol) {
 }
 
 function scoreCandidate(pool) {
-  const feeTvl = Number(pool.fee_active_tvl_ratio || 0);
-  const organic = Number(pool.organic_score || 0);
-  const volume = Number(pool.volume_window || 0);
-  const holders = Number(pool.holders || 0);
+  // ── Degen Score: 4-factor geometric mean (0-100 base) ───────────────
+  // Inputs (volume, fees, LPs) are normalized to a 30m reference window
+  // via tfScale, so the targets stay calibrated across timeframes.
+  // Geometric mean enforces balance — a pool can't win on one metric alone.
+  const La = Number(pool.active_tvl ?? pool.tvl ?? 0);
+  if (!Number.isFinite(La) || La <= 0) return 0;
+
+  const tfMinutes = TIMEFRAME_MINUTES[config.screening.timeframe] || DEGEN_REFERENCE_MINUTES;
+  const tfScale = DEGEN_REFERENCE_MINUTES / tfMinutes;
+
+  const opp = config.opportunity || {};
+  const T_VOL = Number(opp.targetVolRatio ?? 20);
+  const T_LP = Number(opp.targetLpCount ?? 40);
+  const T_FEE = Number(opp.targetFeeRatio ?? 0.20);
+  const T_LIQ = Number(opp.targetLiquidity ?? 20000);
+
+  const clamp01 = (x) => (Number.isFinite(x) ? Math.min(1, Math.max(0, x)) : 0);
+
+  const volRatio = (Number.isFinite(Number(pool.volume_active_tvl_ratio))
+    ? Number(pool.volume_active_tvl_ratio)
+    : Number(pool.volume_window || 0) / La) * tfScale;
+  const feeRatio = (Number.isFinite(Number(pool.fee_active_tvl_ratio))
+    ? Number(pool.fee_active_tvl_ratio)
+    : Number(pool.fee_window || 0) / La) * tfScale;
+  const lpActivity = (Number(pool.unique_lps || 0) + Number(pool.positions_created || 0)) * tfScale;
+
+  const sTrading = clamp01(volRatio / T_VOL);
+  const sLp = clamp01(lpActivity / T_LP);
+  const sFees = clamp01(feeRatio / T_FEE);
+  const sLiq = clamp01(Math.log10(La) / Math.log10(T_LIQ));
+
+  // Geometric mean — any zero sub-score pulls the whole score down
+  const baseScore = (sTrading * sLp * sFees * sLiq) ** 0.25 * 100;
+
+  // ── Safety penalties (calibrated for the 0-100 range) ───────────────
   // Bundle / sniper / top10 — accept either the OKX/Jupiter flat fields
   // (bundle_pct, sniper_pct, top10_pct) or the GMGN-prefixed equivalents.
   const bundlePct = Number(
@@ -54,10 +88,20 @@ function scoreCandidate(pool) {
   );
   const volatility = Number(pool.volatility || 0);
   const priceVsAthPct = Number(pool.price_vs_ath_pct || 0);
-  const pvpPenalty = pool.is_pvp ? 120 : 0;
-  const volatilityPenalty = Number.isFinite(volatility) && volatility > 5 ? (volatility - 5) * 18 : 0;
-  const athPenalty = Number.isFinite(priceVsAthPct) && priceVsAthPct > 85 ? (priceVsAthPct - 85) * 2.5 : 0;
-  return (feeTvl * 1200) + (organic * 12) + (Math.log10(volume + 1) * 80) + (Math.log10(holders + 1) * 60) - (bundlePct * 8) - (top10Pct * 5) - (sniperPct * 6) - pvpPenalty - volatilityPenalty - athPenalty;
+  const pvpPenalty = pool.is_pvp ? 8 : 0;
+  const volatilityPenalty = Number.isFinite(volatility) && volatility > 5 ? (volatility - 5) * 1.2 : 0;
+  const athPenalty = Number.isFinite(priceVsAthPct) && priceVsAthPct > 85 ? (priceVsAthPct - 85) * 0.17 : 0;
+  // Cap safety penalty so a pool can never go fully negative from penalties alone —
+  // the geometric mean base already enforces a quality floor.
+  const safetyPenalty = Math.min(baseScore * 0.9,
+    (bundlePct * 0.5) +
+    (top10Pct * 0.3) +
+    (sniperPct * 0.4) +
+    pvpPenalty +
+    volatilityPenalty +
+    athPenalty
+  );
+  return Math.max(0, baseScore - safetyPenalty);
 }
 
 function hasMinimumConviction(pool) {

@@ -177,6 +177,17 @@ export const config = {
     healthCheckIntervalMin: u.healthCheckIntervalMin ?? 60,
   },
 
+  // ─── Degen Score Targets ─────────────────
+  // Used by the new geometric-mean pool scoring in tools/screening.js.
+  // Inputs are normalized to a fixed 30m reference window inside the scorer,
+  // so these targets are timeframe-independent.
+  opportunity: {
+    targetVolRatio:    Number(u.degenTargetVolRatio    ?? 20),    // (30m) volume/active_tvl for full trading sub-score
+    targetLpCount:     Number(u.degenTargetLpCount     ?? 40),    // (30m) unique_lps + positions_created for full LP sub-score
+    targetFeeRatio:    Number(u.degenTargetFeeRatio    ?? 0.20),  // (30m) fee/active_tvl for full fee sub-score
+    targetLiquidity:   Number(u.degenTargetLiquidity   ?? 20000), // active_tvl ($) floor for full liquidity sub-score (not timeframe-scaled)
+  },
+
   // ─── GMGN Configuration ────────────────
   gmgn: {
     apiKey: nonEmptyString(gmgnUserConfig.apiKey, u.gmgnApiKey, process.env.GMGN_API_KEY),
