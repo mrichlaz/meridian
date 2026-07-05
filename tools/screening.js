@@ -293,16 +293,13 @@ function getRawPoolScreeningRejectReason(pool, s) {
       : `${fmtThresholdValue(s.minFeeActiveTvlRatio, 4)}`;
     return `fee/active-TVL ${fmtThresholdValue(feeActiveTvlRatio, 4)} below minFeeActiveTvlRatio ${feeFloor}`;
   }
-  // The volatility hard filter is only meaningful for the short-term (5m)
-  // data. For longer timeframes (30m+) the API frequently returns
-  // volatility=null because the token is too new or hasn't traded in
-  // that window. Skipping the hard filter at >=30m lets those pools
-  // through; downstream code (chooseAdaptiveDeployProfile,
-  // computeBinsBelow) already handles null volatility gracefully
-  // by using a sensible default for bin placement.
-  const tf = TIMEFRAME_MINUTES[s.timeframe] ?? 5;
-  if (!isUsableVolatility(volatility) && tf < 30) {
-    return `volatility ${volatility ?? "unknown"} is unusable`;
+  // Volatility filter: only reject when API returns null/undefined (no data
+  // returned at all). volatility=0 is treated as a real value (often returned
+  // by Meteora's pool-discovery API when CEX reference prices are missing for
+  // a memecoin — the pool itself can still be actively traded on DEX; the
+  // scoring layer penalises vol=0 with a neutral score rather than a hard reject).
+  if (volatility == null) {
+    return `volatility unknown (null/undefined)`;
   }
   if (baseOrganic == null || baseOrganic < s.minOrganic) {
     return `base organic ${baseOrganic ?? "unknown"} below minOrganic ${s.minOrganic}`;
