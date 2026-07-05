@@ -2005,6 +2005,9 @@ export async function closePosition({ position_address, reason }) {
           }
         } catch {}
 
+        // Learning layer must never fail the close: the on-chain close already
+        // happened by this point, and a throw here makes the tool report
+        // failure → no notify, no auto-swap, retry hits already_closed.
         await recordPerformance({
           position: position_address,
           pool: poolAddress,
@@ -2031,7 +2034,7 @@ export async function closePosition({ position_address, reason }) {
           entry_volume: tracked.entry_volume ?? null,
           entry_holders: tracked.entry_holders ?? null,
           ...exitMarket,
-        });
+        }).catch((e) => log("close_warn", `recordPerformance failed (close still succeeded): ${e.message}`));
 
         appendDecision({
           type: "close",
@@ -2361,7 +2364,7 @@ export async function closePosition({ position_address, reason }) {
         entry_volume: tracked.entry_volume ?? null,
         entry_holders: tracked.entry_holders ?? null,
         ...exitMarket,
-      });
+      }).catch((e) => log("close_warn", `recordPerformance failed (close still succeeded): ${e.message}`));
 
       appendDecision({
         type: "close",

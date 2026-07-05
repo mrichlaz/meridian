@@ -13,7 +13,7 @@ import { log } from "./logger.js";
 import { getSharedLessonsForPrompt, pushHiveLesson, pushHivePerformanceEvent } from "./hivemind.js";
 
 import { PATHS } from "./utils/paths.js";
-import { THRESHOLD_SCHEMA, getThresholdSpec } from "./config.js";
+import { config, reloadScreeningThresholds, THRESHOLD_SCHEMA, getThresholdSpec } from "./config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const USER_CONFIG_PATH = PATHS.userConfig;
@@ -168,7 +168,6 @@ export async function recordPerformance(perf) {
 
   // Evolve thresholds every 5 closed positions
   if (data.performance.length % MIN_EVOLVE_POSITIONS === 0 && config.management.evolveEnabled !== false) {
-    const { config, reloadScreeningThresholds } = await import("./config.js");
     const result = evolveThresholds(data.performance, config);
     if (result?.changes && Object.keys(result.changes).length > 0) {
       reloadScreeningThresholds();
