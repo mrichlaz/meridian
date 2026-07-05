@@ -427,6 +427,20 @@ export function getStateSummary() {
  * @param {object} mgmtConfig
  * Returns { action, reason } or null if no exit needed.
  */
+// A "suspicious" tick means reported vs derived PnL disagree by more than
+// pnlSanityMaxDiffPct. A phantom loss (bad API tick) shows up in only one of
+// the two sources; a real crash shows up in both — and crashes are exactly
+// when they diverge most (reported lags the derived mark). So for loss-side
+// exits we act on the MORE OPTIMISTIC of the two: if even that one is past
+// the threshold, the breach is real. Returns null when there is no
+// corroborated value to act on.
+export function effectiveLossPnlPct(positionData) {
+  const { pnl_pct, pnl_pct_derived, pnl_pct_suspicious } = positionData;
+  if (!pnl_pct_suspicious) return pnl_pct ?? null;
+  if (pnl_pct == null || pnl_pct_derived == null) return null;
+  return Math.max(pnl_pct, pnl_pct_derived);
+}
+
 export function updatePnlAndCheckExits(position_address, positionData, mgmtConfig) {
   const { pnl_pct: currentPnlPct, pnl_pct_suspicious, in_range, fee_per_tvl_24h } = positionData;
   const state = load();
@@ -468,24 +482,28 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   if (changed) save(state);
 
   // ── Stop loss ──────────────────────────────────────────────────
-  if (!pnl_pct_suspicious && currentPnlPct != null && mgmtConfig.stopLossPct != null && currentPnlPct <= mgmtConfig.stopLossPct) {
+  // Loss-side exits use the corroborated PnL: on a suspicious tick this is
+  // the more optimistic of reported/derived, so a phantom tick can't fire
+  // the stop but a real crash can't hide behind the sanity flag either.
+  const lossPnlPct = effectiveLossPnlPct(positionData);
+  if (lossPnlPct != null && mgmtConfig.stopLossPct != null && lossPnlPct <= mgmtConfig.stopLossPct) {
     return {
       action: "STOP_LOSS",
-      reason: `Stop loss: PnL ${currentPnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}%`,
+      reason: `Stop loss: PnL ${lossPnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}%${pnl_pct_suspicious ? " (both PnL sources agree despite suspicious tick)" : ""}`,
     };
   }
 
   // ── Trailing TP ────────────────────────────────────────────────
-  if (!pnl_pct_suspicious && pos.trailing_active) {
-    const dropFromPeak = pos.peak_pnl_pct - currentPnlPct;
+  if (pos.trailing_active && lossPnlPct != null) {
+    const dropFromPeak = pos.peak_pnl_pct - lossPnlPct;
     const effectiveDropPct = getEffectiveTrailingDropPct(pos.peak_pnl_pct, mgmtConfig);
     if (dropFromPeak >= effectiveDropPct) {
       return {
         action: "TRAILING_TP",
-        reason: `Trailing TP: peak ${pos.peak_pnl_pct.toFixed(2)}% → current ${currentPnlPct.toFixed(2)}% (dropped ${dropFromPeak.toFixed(2)}% >= ${effectiveDropPct.toFixed(2)}%)`,
+        reason: `Trailing TP: peak ${pos.peak_pnl_pct.toFixed(2)}% → current ${lossPnlPct.toFixed(2)}% (dropped ${dropFromPeak.toFixed(2)}% >= ${effectiveDropPct.toFixed(2)}%)`,
         needs_confirmation: true,
         peak_pnl_pct: pos.peak_pnl_pct,
-        current_pnl_pct: currentPnlPct,
+        current_pnl_pct: lossPnlPct,
         drop_from_peak_pct: dropFromPeak,
       };
     }

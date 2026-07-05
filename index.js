@@ -1494,6 +1494,18 @@ export function getDeterministicCloseRule(position, managementConfig) {
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= managementConfig.stopLossPct) {
     return { action: "CLOSE", rule: 1, reason: "stop loss" };
   }
+  // Suspicious-tick override for the stop loss only: a phantom loss shows in
+  // one PnL source, a real crash shows in both. If even the more optimistic
+  // of reported/derived is past the stop, close — otherwise a fast dump keeps
+  // the sanity flag raised for its entire duration and the stop never fires.
+  if (
+    pnlSuspect &&
+    position.pnl_pct != null &&
+    position.pnl_pct_derived != null &&
+    Math.max(position.pnl_pct, position.pnl_pct_derived) <= managementConfig.stopLossPct
+  ) {
+    return { action: "CLOSE", rule: 1, reason: "stop loss (both PnL sources agree despite suspicious tick)" };
+  }
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct >= managementConfig.takeProfitPct) {
     return { action: "CLOSE", rule: 2, reason: "take profit" };
   }
