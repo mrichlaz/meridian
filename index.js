@@ -136,6 +136,7 @@ let _screeningBusy = false;  // prevents overlapping screening cycles
 let _screeningLastTriggered = 0; // epoch ms — prevents management from spamming screening
 let _studyFailStreak = 0;    // consecutive LP-study timeouts across candidates
 let _studySkipUntil = 0;     // epoch ms — circuit breaker: skip LP studies until then
+let _pnlPollCalmSkips = 0;   // ticks to skip while all positions are calm (CPU saver)
 let _pollTriggeredAt = 0; // epoch ms — cooldown for poller-triggered management
 let _pnlPollBusy = false;   // module-level so runWalletSweepOnce can read it
 let _sweepBusy = false;     // module-level so runWalletSweepOnce can read/write it
@@ -1292,14 +1293,29 @@ export function startCronJobs() {
 
   // Lightweight PnL poller — updates trailing TP state between management cycles, no LLM.
   // Runs on public infra (RPC + Jupiter + Meteora deposits) so it can poll aggressively.
-  const pnlPollMs = Math.max(1, Number(config.pnl.pollIntervalSec ?? 3)) * 1000;
+  const pnlPollMs = Math.max(1, Number(config.pnl.pollIntervalSec ?? 10)) * 1000;
   const pnlPollInterval = safeSetInterval(async () => {
     if (_managementBusy || _screeningBusy || _pnlPollBusy) return;
     if (getTrackedPositions(true).length === 0) return;
+    // Calm-skip: each poll is a full RPC position decode (the main steady CPU
+    // cost of the daemon). When the last poll showed every position in range,
+    // not trailing, and well clear of the stop, skip 2 ticks (3x slower).
+    // Any hot signal on the next real poll restores full cadence.
+    if (_pnlPollCalmSkips > 0) {
+      _pnlPollCalmSkips -= 1;
+      return;
+    }
     _pnlPollBusy = true;
     try {
       const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
       if (!result?.positions?.length) return;
+      const stopLoss = Number(config.management.stopLossPct ?? -50);
+      const allCalm = result.positions.every((p) =>
+        p.in_range !== false &&
+        !getTrackedPosition(p.position)?.trailing_active &&
+        p.pnl_pct != null && p.pnl_pct > stopLoss + 4
+      );
+      _pnlPollCalmSkips = allCalm ? 2 : 0;
       for (const p of result.positions) {
         if (
           !p.pnl_pct_suspicious &&

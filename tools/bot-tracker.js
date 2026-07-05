@@ -19,8 +19,9 @@ const BOTS = (process.env.BOT_WALLETS || "3QUnrcMqCQoiGB73s1A6uDzxziywaNFpTLiZii
   .split(",").map(a => a.trim()).filter(Boolean);
 const DEX_API = "https://api.dexscreener.com/latest/dex/tokens";
 const W = 4 * 3600 * 1000;       // 4h window
-const POLL_INTERVAL = 10_000;     // poll every 10s
+const POLL_INTERVAL = 30_000;     // poll every 30s — feeds a 4h window, 10s freshness bought nothing
 const ENRICH_INTERVAL = 60_000;   // enrich every 60s
+const PRUNE_INTERVAL = 300_000;   // prune + WAL checkpoint every 5 min (fsync-heavy, was every cycle)
 const SIG_LIMIT = 25;
 const BATCH_SIZE = 30;
 const WSOL = "So11111111111111111111111111111111111111112";
@@ -304,6 +305,7 @@ export function startBotTracker() {
   const sigrl = new RateLimiter(100);  // 100ms between sig fetches
 
   let lastEnrich = 0;
+  let lastPrune = 0;
 
   log("bot_tracker", `Started tracking ${BOTS.length} wallet(s)...`);
 
@@ -343,13 +345,18 @@ export function startBotTracker() {
           lastEnrich = Date.now();
         }
 
-        // Prune old events + orphaned tokens outside 4h window
-        const cutoff = Date.now() - W;
-        db.prepare("DELETE FROM events WHERE timestamp < ?").run(cutoff);
-        db.prepare("DELETE FROM tokens WHERE NOT EXISTS (SELECT 1 FROM events WHERE events.token_mint = tokens.mint)").run();
-        db.prepare("DELETE FROM seen_sigs WHERE timestamp < ?").run(cutoff);
-        // Fold the WAL back into the main db so it can't accumulate unbounded
-        try { db.pragma("wal_checkpoint(TRUNCATE)"); } catch {}
+        // Prune old events + orphaned tokens outside 4h window. Table scans +
+        // a TRUNCATE checkpoint (exclusive lock + fsync) are too heavy to run
+        // every cycle — batch them on their own interval.
+        if (Date.now() - lastPrune > PRUNE_INTERVAL) {
+          const cutoff = Date.now() - W;
+          db.prepare("DELETE FROM events WHERE timestamp < ?").run(cutoff);
+          db.prepare("DELETE FROM tokens WHERE NOT EXISTS (SELECT 1 FROM events WHERE events.token_mint = tokens.mint)").run();
+          db.prepare("DELETE FROM seen_sigs WHERE timestamp < ?").run(cutoff);
+          // Fold the WAL back into the main db so it can't accumulate unbounded
+          try { db.pragma("wal_checkpoint(TRUNCATE)"); } catch {}
+          lastPrune = Date.now();
+        }
 
         if (stats.newEvents > 0) {
           log("bot_tracker", `${stats.newEvents} new events, ${db.prepare("SELECT COUNT(*) as c FROM tokens").get().c} tokens tracked`);

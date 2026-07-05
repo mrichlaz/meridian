@@ -333,7 +333,9 @@ export const config = {
     // never burns the main RPC_URL or the LPAgent sponsor budget.
     rpcUrl: nonEmptyString(u.pnlRpcUrl, process.env.PNL_RPC_URL, "https://pump.helius-rpc.com"),
     source: nonEmptyString(u.pnlSource, "rpc"), // rpc | meteora (fallback-only)
-    pollIntervalSec: Number(u.pnlPollIntervalSec ?? 3),
+    // 10s base — the emergency close cooldown is 90s, so polling faster than
+    // ~10s burns CPU (full RPC position decode per tick) without acting faster.
+    pollIntervalSec: Number(u.pnlPollIntervalSec ?? 10),
     depositCacheTtlSec: Number(u.pnlDepositCacheTtlSec ?? 300),
   },
 
