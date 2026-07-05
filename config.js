@@ -588,7 +588,10 @@ export function reloadScreeningThresholds() {
     const minBinsBelow = numericConfig(fresh.minBinsBelow) ?? config.strategy.minBinsBelow;
     const maxBinsBelow = numericConfig(fresh.maxBinsBelow) ?? numericConfig(fresh.binsBelow) ?? config.strategy.maxBinsBelow;
     const defaultBinsBelow = numericConfig(fresh.defaultBinsBelow) ?? numericConfig(fresh.binsBelow) ?? config.strategy.defaultBinsBelow ?? maxBinsBelow;
-    config.strategy.minBinsBelow = Math.max(MIN_SAFE_BINS_BELOW, Math.round(minBinsBelow));
+    // Clamp against the MUTABLE floor (config.minSafeBinsBelow, refreshed just
+    // above), not the boot-time const — otherwise lowering minSafeBinsBelow at
+    // runtime gets silently reverted on the next evolve/reload.
+    config.strategy.minBinsBelow = Math.max(config.minSafeBinsBelow ?? MIN_SAFE_BINS_BELOW, Math.round(minBinsBelow));
     config.strategy.maxBinsBelow = Math.max(config.strategy.minBinsBelow, Math.round(maxBinsBelow));
     config.strategy.defaultBinsBelow = Math.max(
       config.strategy.minBinsBelow,
