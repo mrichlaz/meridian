@@ -8,9 +8,17 @@ const CRYPTO_DB = path.resolve(__dirname, "../data/bot-tracker.db");
 
 /**
  * Read top tokens from the crypto bot tracker SQLite DB.
- * Returns tokens with the most trade events, optionally filtered by recency.
+ * Returns tokens with the most trade events, optionally filtered by recency
+ * and liquidity/volume thresholds. Defaults are more permissive than the
+ * previous hardcoded values so quiet wallets still produce candidates.
  */
-export function getCryptoBotTokens({ limit = 20, maxAgeMinutes = 240 } = {}) {
+export function getCryptoBotTokens({
+  limit = 20,
+  maxAgeMinutes = 1440,    // was 240 — extend to 24h so quiet wallets still surface
+  minLiquidityUsd = 5000,  // was 50000 — allow smaller caps to surface
+  minVolume24h = 50000,    // was 500000 — allow lower-volume pools
+  requireDexData = false,  // set true if you only want DexScreener-enriched tokens
+} = {}) {
   let db;
   try {
     db = new Database(CRYPTO_DB, { readonly: true });
@@ -23,6 +31,21 @@ export function getCryptoBotTokens({ limit = 20, maxAgeMinutes = 240 } = {}) {
     const cutoff = maxAgeMinutes
       ? Date.now() - maxAgeMinutes * 60 * 1000
       : null;
+
+    // SQL parameter ORDER must match the SQL template's `?` placeholders in
+    // source order. Template renders (when requireDexData=false, cutoff set):
+    //   AND (liquidity >= ?)
+    //   AND (volume >= ?)
+    //   AND e.timestamp >= ?
+    //   LIMIT ?
+    // So params must be: [minLiquidityUsd, minVolume24h, cutoff, limit]
+    const params = [];
+    if (!requireDexData) {
+      params.push(minLiquidityUsd);
+      params.push(minVolume24h);
+    }
+    if (cutoff) params.push(cutoff);
+    params.push(limit);
 
     const rows = db.prepare(`
       SELECT
@@ -38,15 +61,14 @@ export function getCryptoBotTokens({ limit = 20, maxAgeMinutes = 240 } = {}) {
       FROM events e
       JOIN tokens t ON t.mint = e.token_mint
       WHERE t.symbol IS NOT NULL
-        AND t.liquidity_usd IS NOT NULL
-        AND t.volume_h24 IS NOT NULL
-        AND t.liquidity_usd > 50000
-        AND t.volume_h24 > 500000
+        ${requireDexData ? "AND t.liquidity_usd IS NOT NULL AND t.volume_h24 IS NOT NULL" : ""}
+        ${requireDexData ? "" : "AND (t.liquidity_usd IS NULL OR t.liquidity_usd >= ?)"}
+        ${requireDexData ? "" : "AND (t.volume_h24 IS NULL OR t.volume_h24 >= ?)"}
         ${cutoff ? "AND e.timestamp >= ?" : ""}
       GROUP BY e.token_mint
       ORDER BY trade_count DESC
       LIMIT ?
-    `).all(...(cutoff ? [cutoff, limit] : [limit]));
+    `).all(...params);
 
     db.close();
 

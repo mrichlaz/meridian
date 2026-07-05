@@ -220,12 +220,22 @@ async function processSignature(db, txrl, sig, stats) {
     if (!mints.length) return;
     const ts = t.blockTime ? t.blockTime * 1000 : Date.now();
     const ins = db.prepare("INSERT OR IGNORE INTO events VALUES (?,?,?)");
+    const tokPlace = db.prepare(`
+      INSERT INTO tokens (mint, last_seen, occurrence_count)
+      VALUES (?, ?, 1)
+      ON CONFLICT(mint) DO UPDATE SET
+        last_seen = excluded.last_seen,
+        occurrence_count = tokens.occurrence_count + 1
+    `);
     db.transaction(() => {
       for (const m of mints) {
         ins.run(sig, m, ts);
         stats.newEvents++;
-        // Insert placeholder token row if not exists
-        db.prepare("INSERT OR IGNORE INTO tokens (mint,last_seen) VALUES (?,?)").run(m, ts);
+        // Insert/increment token occurrence_count so the enrich query can
+        // find it. Previously this used a no-op INSERT OR IGNORE that left
+        // occurrence_count at 0 (default), so enrichTokens' WHERE
+        // occurrence_count > 0 predicate skipped new tokens forever.
+        tokPlace.run(m, ts);
       }
     })();
     stats.newMints.push(...mints);
@@ -236,7 +246,19 @@ async function processSignature(db, txrl, sig, stats) {
 
 // ─── Enrich token metadata from DexScreener ───
 async function enrichTokens(db) {
-  const tokens = db.prepare("SELECT mint FROM tokens WHERE occurrence_count > 0 ORDER BY occurrence_count DESC LIMIT 50").all();
+  // Pick tokens that need enrichment (no liquidity data yet OR are popular
+  // enough to warrant a fresh fetch). The old filter `occurrence_count > 0`
+  // skipped tokens with 1 event that had no DexScreener match — they were
+  // stuck with NULL fields forever.
+  const tokens = db.prepare(`
+    SELECT mint FROM tokens
+    WHERE occurrence_count > 0
+    ORDER BY
+      CASE WHEN liquidity_usd IS NULL THEN 0 ELSE 1 END,  -- enrich NULLs first
+      occurrence_count DESC,
+      last_seen DESC
+    LIMIT 50
+  `).all();
   if (!tokens.length) return;
   const mints = tokens.map(r => r.mint);
   const data = await fetchDexData(mints);
@@ -266,6 +288,9 @@ async function enrichTokens(db) {
 // ─── Main background loop ───
 let _stopped = false;
 
+let _trackerStartedAt = 0;
+let _lastSuccessfulCycle = 0;
+
 export function startBotTracker() {
   const db = initDB();
   if (!db) {
@@ -274,6 +299,7 @@ export function startBotTracker() {
   }
 
   _stopped = false;
+  _trackerStartedAt = Date.now();
   const txrl = new RateLimiter(200);  // 200ms between txs
   const sigrl = new RateLimiter(100);  // 100ms between sig fetches
 

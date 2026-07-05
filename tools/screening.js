@@ -110,11 +110,22 @@ function scoreCandidate(pool) {
 // overrode user config). Returns null when the pool passes, else the reason.
 function getConvictionRejectReason(pool) {
   const s = config.screening || {};
-  const minFeeTvl = Math.max(0.03, Number(s.minFeeActiveTvlRatio) || 0);
-  const minOrganic = Math.max(70, Number(s.minOrganic) || 0);
-  const minVolume = Math.max(1000, Number(s.minVolume) || 0);
-  const minHolders = Math.max(700, Number(s.minHolders) || 0);
-  const maxTop10 = Math.min(50, Number(s.maxTop10Pct) || 50);
+  // Hardcoded floors were intentionally loose (organic >= 70, vol >= 1000,
+  // etc.) to guard against bad user config. But they ALSO shadowed user
+  // config: setting minOrganic=60 in user-config did nothing because the
+  // floor enforced 70. These have been removed so user config wins.
+  // The hard minimums (≥100 volume, ≥50 organic, etc. for genuinely dust
+  // tokens) live in the user-config; the conviction floor is now a faithful
+  // reflection of what the user has set.
+  const minFeeTvl = Number(s.minFeeActiveTvlRatio) || 0;
+  const minOrganic = Number(s.minOrganic) || 0;
+  const minVolume = Number(s.minVolume) || 0;
+  const minHolders = Number(s.minHolders) || 0;
+  const maxTop10 = Number(s.maxTop10Pct) || 50;
+  // Volatility ceiling stays a safety rail against sudden-vol tokens
+  // (the user's deployed position could OOR the moment a buy enters).
+  // Threshold raised to 12 to be more permissive for normal memecoins.
+  const maxVolatility = 12;
 
   const feeTvl = Number(pool.fee_active_tvl_ratio || 0);
   const organic = Number(pool.organic_score || 0);
@@ -128,24 +139,22 @@ function getConvictionRejectReason(pool) {
   if (!(volume >= minVolume)) return `volume ${volume} below conviction floor ${minVolume}`;
   if (!(holders >= minHolders)) return `holders ${holders} below conviction floor ${minHolders}`;
   if (top10Pct && top10Pct > maxTop10) return `top10 ${top10Pct}% above conviction ceiling ${maxTop10}%`;
-  if (Number.isFinite(volatility) && volatility > 8 && !smartMoneyBuy) return `volatility ${volatility} above 8 without smart-money confirmation`;
+  if (Number.isFinite(volatility) && volatility > maxVolatility && !smartMoneyBuy) {
+    return `volatility ${volatility.toFixed(2)} above ${maxVolatility} without smart-money confirmation`;
+  }
   return null;
 }
 
 function hasVolumePersistence(pool) {
-  const volume5m = Number(pool.volume_5m ?? pool.volume_window ?? 0);
-  const volume15m = Number(pool.volume_15m ?? 0);
-  const volume30m = Number(pool.volume_30m ?? pool.volume_window ?? 0);
-  const volume1h = Number(pool.volume_1h ?? 0);
-  const reference = volume30m > 0 ? volume30m : volume1h;
-
-  // If we have a longer-window reference but no 5m snapshot yet (cold start / upstream gap),
-  // allow if the longer-window volume is materially positive.
-  if (!(volume5m > 0)) {
-    return reference >= 500;
-  }
-  if (!(reference > 0)) return true;
-  return reference >= Math.max(volume5m * 1.5, 100);
+  // The original "1.5x ratio" check assumed 5m vs 30m data points, but for
+  // most timeframes the discovery API only returns the requested window, so
+  // the comparison was unreliable. Now we simply require the timeframe's
+  // own volume to clear a minimum threshold — catches genuinely inactive
+  // pools without producing false rejects at longer windows. The threshold
+  // scales with the user's minVolume so they can tune them together.
+  const minVolume = Math.max(100, Number(config.screening.minVolume) || 100);
+  const volume = Number(pool.volume_window ?? pool.volume_5m ?? pool.volume_30m ?? 0);
+  return volume >= minVolume;
 }
 
 export function chooseAdaptiveDeployProfile(pool, strategyConfig = {}) {
@@ -284,7 +293,15 @@ function getRawPoolScreeningRejectReason(pool, s) {
       : `${fmtThresholdValue(s.minFeeActiveTvlRatio, 4)}`;
     return `fee/active-TVL ${fmtThresholdValue(feeActiveTvlRatio, 4)} below minFeeActiveTvlRatio ${feeFloor}`;
   }
-  if (!isUsableVolatility(volatility)) {
+  // The volatility hard filter is only meaningful for the short-term (5m)
+  // data. For longer timeframes (30m+) the API frequently returns
+  // volatility=null because the token is too new or hasn't traded in
+  // that window. Skipping the hard filter at >=30m lets those pools
+  // through; downstream code (chooseAdaptiveDeployProfile,
+  // computeBinsBelow) already handles null volatility gracefully
+  // by using a sensible default for bin placement.
+  const tf = TIMEFRAME_MINUTES[s.timeframe] ?? 5;
+  if (!isUsableVolatility(volatility) && tf < 30) {
     return `volatility ${volatility ?? "unknown"} is unusable`;
   }
   if (baseOrganic == null || baseOrganic < s.minOrganic) {
@@ -1360,7 +1377,17 @@ async function buildBotTrackerCandidates({ existingPools = [], timeframe, limit 
   const filteredExamples = [];
   try {
     const { getCryptoBotTokens } = await import("./crypto-signals.js");
-    const botData = getCryptoBotTokens({ limit });
+    // Use configurable time window so quiet wallets still surface candidates.
+    // Defaults: 24h lookback, $5K liquidity, $50K 24h volume (loose enough
+    // for small-cap meme tokens; tighten via user-config.json if you want
+    // only mature pools).
+    const botConfig = config.botTracker || {};
+    const botData = getCryptoBotTokens({
+      limit,
+      maxAgeMinutes: Number(botConfig.maxAgeMinutes ?? 1440),
+      minLiquidityUsd: Number(botConfig.minLiquidityUsd ?? 5000),
+      minVolume24h: Number(botConfig.minVolume24h ?? 50000),
+    });
     if (!botData.success || botData.tokens.length === 0) {
       return { pools: injectedPools, filtered_examples: filteredExamples };
     }
@@ -1379,10 +1406,41 @@ async function buildBotTrackerCandidates({ existingPools = [], timeframe, limit 
     }
 
     const results = await Promise.allSettled(botData.tokens.map(async (t) => {
-      const res = await fetch(`https://dlmm.datapi.meteora.ag/pools?query=${t.mint}&limit=1`, { signal: AbortSignal.timeout(8000) });
-      if (!res.ok) return null;
-      const d = await res.json();
-      const raw = d?.data?.[0];
+      // Fetch all DLMM pools for this token (limit=10), then pick the best
+      // LP-suitable one: prefer pools within the user's configured bin_step
+      // range, then highest TVL. This avoids picking low-bin_step pools
+      // (e.g. bin=20) that wouldn't pass the user's screening filter and
+      // wouldn't be ideal for LPing anyway (small price range per bin).
+      const poolRes = await fetch(`https://dlmm.datapi.meteora.ag/pools?query=${t.mint}&limit=10`, { signal: AbortSignal.timeout(8000) });
+      if (!poolRes.ok) return null;
+      const poolD = await poolRes.json();
+      const allPools = poolD?.data || [];
+      if (allPools.length === 0) return null;
+
+      // Pick the best LP pool. Prefer pools where the bot-tracked token is
+      // `token_x` (the volatile base) rather than `token_y` (the stable quote).
+      // The screening requires token_y=SOL for single-sided bid, so a pool
+      // like SOL-USDC has token_x=SOL, token_y=USDC which fails the filter;
+      // bot-tracker tokens like USDC/ANSEM/manlet should pick pools where
+      // token_x = the tracked token (e.g. ANSEM-SOL, manlet-SOL).
+      const minBin = Number(config.screening.minBinStep ?? 1);
+      const maxBin = Number(config.screening.maxBinStep ?? 1000);
+      // First prefer: token_x == tracked mint, in user's bin_step range, highest TVL
+      const sameBaseInRange = allPools.filter(p => {
+        const bs = p.pool_config?.bin_step;
+        return p.token_x?.address === t.mint && bs != null && bs >= minBin && bs <= maxBin;
+      });
+      // Next: any in-range (token_x might be SOL, but quote might be the tracked mint
+      // — usually invalid for screening unless token_y=SOL).
+      const inRange = allPools.filter(p => {
+        const bs = p.pool_config?.bin_step;
+        return bs != null && bs >= minBin && bs <= maxBin;
+      });
+      // Pick sameBase first, then any in-range, fall back to highest TVL overall
+      const candidates = sameBaseInRange.length > 0
+        ? sameBaseInRange
+        : (inRange.length > 0 ? inRange : allPools);
+      const raw = candidates.slice().sort((a, b) => (b.tvl || 0) - (a.tvl || 0))[0];
       if (!raw) return null;
 
       let vol = null, volVolume = null, vTime = null;

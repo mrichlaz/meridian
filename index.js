@@ -2904,11 +2904,17 @@ function getLoneCandidateSkipReason({ pool, sw, n, ti } = {}) {
 
 function computeBinsBelow(volatility) {
   const parsedVolatility = Number(volatility);
-  if (!Number.isFinite(parsedVolatility) || parsedVolatility <= 0) {
-    throw new Error(`Invalid volatility ${volatility ?? "unknown"} — refusing volatility-scaled deploy.`);
-  }
   const lo = config.strategy.minBinsBelow;
   const hi = config.strategy.maxBinsBelow;
+  const defaultBins = config.strategy.defaultBinsBelow ?? Math.round((lo + hi) / 2);
+  // When volatility is missing (e.g. 30m+ timeframe data, or token too new),
+  // use the user's defaultBinsBelow as a reasonable fallback. This is safer
+  // than throwing — it lets the deploy proceed with a middle-of-range bin
+  // count, and the position can be re-tuned if volatility becomes available
+  // on a later refresh.
+  if (!Number.isFinite(parsedVolatility) || parsedVolatility <= 0) {
+    return Math.max(lo, Math.min(hi, defaultBins));
+  }
   return Math.max(lo, Math.min(hi, Math.round(lo + (parsedVolatility / 5) * (hi - lo))));
 }
 
