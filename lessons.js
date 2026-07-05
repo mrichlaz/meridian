@@ -501,8 +501,17 @@ function derivLesson(perf) {
  * @param {Object} config   - Live config object (mutated in place)
  * @returns {{ changes: Object, rationale: Object } | null}
  */
+// Evolve learns from the last N closes only. Full-history learning meant a
+// month of trades under an OLD rule regime (different stops/exits/strategy)
+// kept dominating the statistics long after the rules changed — thresholds
+// were being fit to a distribution that no longer exists. ~200 records is a
+// few days at typical trade rates: current-regime data, still enough for
+// stable quantiles.
+const EVOLVE_WINDOW_RECORDS = 200;
+
 export function evolveThresholds(perfData, config) {
   if (!perfData || perfData.length < MIN_EVOLVE_POSITIONS) return null;
+  perfData = perfData.slice(-EVOLVE_WINDOW_RECORDS);
 
   // Use robust subsets/statistics instead of fragile edge values (e.g. min
   // winner pnl = 0.0%). This keeps evolution from ratcheting thresholds lower
