@@ -27,6 +27,17 @@ export function getCryptoBotTokens({
     return { success: false, error: "Crypto tracker DB not found — has it been running on /crypto?", tokens: [] };
   }
 
+  // Stables and majors are plumbing, not signals — bot wallets touch these on
+  // every route hop, so counting them as "bot-traded tokens" is pure noise.
+  const EXCLUDED_MINTS = new Set([
+    "So11111111111111111111111111111111111111112",  // WSOL
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
+    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", // USDT
+    "7dHbWXmci3dT8UFYWYZweBLXgycu7Y3iL6trKn1Y7ARj", // stSOL
+    "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn", // jitoSOL
+    "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So",  // mSOL
+  ]);
+
   try {
     const cutoff = maxAgeMinutes
       ? Date.now() - maxAgeMinutes * 60 * 1000
@@ -75,7 +86,7 @@ export function getCryptoBotTokens({
     return {
       success: true,
       source: "bot-tracker (crypto)",
-      tokens: rows.map(r => ({
+      tokens: rows.filter(r => !EXCLUDED_MINTS.has(r.mint)).map(r => ({
         symbol: r.symbol,
         name: r.name,
         mint: r.mint,

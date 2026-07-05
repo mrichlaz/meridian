@@ -1172,11 +1172,25 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     }
   }
 
+  // Full reject distribution — the 3-example cap hid which filter was doing
+  // the killing. Group reasons by category (numbers stripped) with counts so
+  // NO DEPLOY cycles are diagnosable from the report alone.
+  const rejectSummary = {};
+  for (const f of filteredOut) {
+    const category = String(f.reason || "unknown")
+      .replace(/\(scaled from base[^)]*\)/g, "")
+      .replace(/\bat \d+[smh]\b/g, "")
+      .replace(/[\d,.$]+%?/g, "")
+      .replace(/\s+/g, " ").trim();
+    rejectSummary[category] = (rejectSummary[category] || 0) + 1;
+  }
+
   return {
     candidates: eligible,
     total_eligible: eligible.length,
     total_screened: pools.length,
     filtered_examples: filteredOut.slice(0, 3),
+    reject_summary: rejectSummary,
     discovery_timeframe: discovery.discovery_timeframe || config.screening.timeframe,
     bot_tracked_injected: pools.some((p) => p.bot_traded),
   };

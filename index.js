@@ -630,13 +630,22 @@ export async function runScreeningCycle({ silent = false } = {}) {
       const combinedExamples = combined.slice(0, 5)
         .map((entry) => `- ${entry.name}: ${entry.reason}`)
         .join("\n");
+      // Per-reason kill counts across the whole funnel — the examples alone
+      // can't show which filter is doing most of the rejecting.
+      const rejectCounts = topCandidates?.reject_summary && Object.keys(topCandidates.reject_summary).length
+        ? "Reject counts:\n" + Object.entries(topCandidates.reject_summary)
+            .sort((a, b) => b[1] - a[1]).slice(0, 6)
+            .map(([reason, count]) => `- ${count}× ${reason}`).join("\n")
+        : null;
       const funnelBlock = buildGmgnFunnelReport(gmgnStageCounts, gmgnAllFiltered, { fromStage: 2 });
       const thresholds = `Thresholds: tvl>$${config.screening.minTvl} | vol>$${config.screening.minVolume} | organic>${config.screening.minOrganic}% | holders>${config.screening.minHolders} | fee/tvl>${config.screening.minFeeActiveTvlRatio}%`;
-      screenReport = funnelBlock
-        ? `No candidates available.\n\n${funnelBlock}`
-        : combinedExamples
-          ? `No candidates available.\nFiltered examples:\n${combinedExamples}`
-          : `No candidates available (all filtered).\n${thresholds}`;
+      screenReport = [
+        "No candidates available.",
+        funnelBlock,
+        rejectCounts,
+        !funnelBlock && combinedExamples ? `Filtered examples:\n${combinedExamples}` : null,
+        !funnelBlock && !combinedExamples && !rejectCounts ? thresholds : null,
+      ].filter(Boolean).join("\n\n");
       appendDecision({
         type: "no_deploy",
         actor: "SCREENER",
