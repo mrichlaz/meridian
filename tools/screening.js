@@ -293,6 +293,17 @@ function getRawPoolScreeningRejectReason(pool, s) {
       : `${fmtThresholdValue(s.minFeeActiveTvlRatio, 4)}`;
     return `fee/active-TVL ${fmtThresholdValue(feeActiveTvlRatio, 4)} below minFeeActiveTvlRatio ${feeFloor}`;
   }
+  // Fee persistence: the 5m fee ratio swings 4x between ticks, so a pool can
+  // qualify on one lucky snapshot. When the longer-window fee ratio is known
+  // (captured for free from the volatility-timeframe fetch), require it to
+  // show at least half the scaled floor for that window — filters one-tick
+  // spikes without penalising young pools that are genuinely ramping.
+  if (s._minFeePersist != null && s._persistTimeframe) {
+    const persistFee = numeric(pool[`fee_active_tvl_ratio_${s._persistTimeframe}`]);
+    if (persistFee != null && persistFee < s._minFeePersist) {
+      return `fee/active-TVL ${fmtThresholdValue(persistFee, 4)} at ${s._persistTimeframe} below persistence floor ${fmtThresholdValue(s._minFeePersist, 4)} (one-tick spike)`;
+    }
+  }
   // Volatility filter: only reject when API returns null/undefined (no data
   // returned at all). volatility=0 is treated as a real value (often returned
   // by Meteora's pool-discovery API when CEX reference prices are missing for
@@ -393,6 +404,7 @@ async function applyVolatilityTimeframe(rawPools, sourceTimeframe) {
           poolAddress,
           volatility: numeric(pool?.volatility),
           volume: numeric(pool?.volume),
+          feeActiveTvlRatio: numeric(pool?.fee_active_tvl_ratio),
         }))
     )
   );
@@ -410,6 +422,7 @@ async function applyVolatilityTimeframe(rawPools, sourceTimeframe) {
 
     pool[`volume_${volatilityTimeframe}`] = metrics.volume;
     pool[`volatility_${volatilityTimeframe}`] = metrics.volatility;
+    pool[`fee_active_tvl_ratio_${volatilityTimeframe}`] = metrics.feeActiveTvlRatio;
 
     // Use longer-timeframe values as the canonical ones for filtering
     if (metrics.volatility != null) pool.volatility = metrics.volatility;
@@ -644,6 +657,35 @@ export async function discoverPools({
     log("screening", `${candidate} window also empty — escalating`);
   }
 
+  // Sparse-window merge: with only 1-2 survivors per cycle the LLM has no
+  // comparative choice and the lone-candidate skip rule blocks most deploys.
+  // When the window is thin, also pull the next window up and merge — pools
+  // qualifying on a longer window are MORE persistent, not less, so this
+  // widens the funnel without loosening any threshold.
+  const SPARSE_MERGE_MIN = 5;
+  if (rawPools.length > 0 && rawPools.length < SPARSE_MERGE_MIN) {
+    const nextIdx = ladder.indexOf(usedTimeframe) + 1;
+    if (nextIdx > 0 && nextIdx < ladder.length) {
+      const nextTf = ladder[nextIdx];
+      try {
+        const extra = await fetchPoolDiscoveryPage({ page_size, filters, timeframe: nextTf, category: s.category });
+        const extraPools = Array.isArray(extra?.data) ? extra.data : [];
+        const known = new Set(rawPools.map((p) => p.pool_address));
+        let added = 0;
+        for (const pool of extraPools) {
+          if (!pool?.pool_address || known.has(pool.pool_address)) continue;
+          pool.discovery_timeframe = nextTf;
+          rawPools.push(pool);
+          known.add(pool.pool_address);
+          added += 1;
+        }
+        if (added > 0) log("screening", `Sparse ${usedTimeframe} window (${rawPools.length - added} pool(s)) — merged ${added} more from ${nextTf}`);
+      } catch (e) {
+        log("screening", `Sparse-merge ${nextTf} fetch failed: ${e.message}`);
+      }
+    }
+  }
+
   if (config.screening.useDiscordSignals) {
     const signalCandidates = await fetchDiscordSignalCandidates().catch((error) => {
       log("screening", `Discord signal fetch failed: ${error.message}`);
@@ -702,6 +744,12 @@ export async function discoverPools({
   rawPools = await applyVolatilityTimeframe(rawPools, s.timeframe);
   await enrichDiscordSignalLaunchpads(rawPools);
 
+  const persistTimeframe = getVolatilityTimeframe(usedTimeframe);
+  const persistFloor = persistTimeframe !== usedTimeframe
+    ? numeric(getEffectiveWindowThresholds({
+        minFeeActiveTvlRatio: numeric(s.minFeeActiveTvlRatio),
+      }, persistTimeframe).minFeeActiveTvlRatio)
+    : null;
   const effectiveS = {
     ...s,
     ...getEffectiveWindowThresholds({
@@ -711,6 +759,10 @@ export async function discoverPools({
     _baseMinFeeActiveTvlRatio: numeric(s.minFeeActiveTvlRatio),
     _baseMinVolume: numeric(s.minVolume),
     _timeframe: usedTimeframe,
+    // Fee-persistence floor: half the scaled floor at the volatility timeframe
+    // (30m+). Null when the discovery window IS the longer window already.
+    _minFeePersist: persistFloor != null ? persistFloor * 0.5 : null,
+    _persistTimeframe: persistFloor != null ? persistTimeframe : null,
   };
 
   const filteredExamples = [];

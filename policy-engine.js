@@ -32,7 +32,12 @@ export function getFlowQuality(pool = {}, context = {}) {
   if (top10 > 50 && priceChange1h < 0) toxicReasons.push("concentrated holders while price is falling");
   if (bots > 35 && priceChange1h < 5) toxicReasons.push("bot-heavy holders without strong price confirmation");
   if (priceVsAth != null && priceVsAth > 88 && priceChange1h > 20) toxicReasons.push("overextended near ATH after vertical move");
-  if (volume5m > 0 && reference > 0 && volumePersistenceRatio < (config.policy?.minVolumePersistence ?? 1.5)) toxicReasons.push("weak volume persistence");
+  // A 30m window CONTAINS the 5m window, so reference must exceed volume5m
+  // for the ratio to be meaningful. ratio < 1 means the two fields came from
+  // incomparable sources (e.g. both fell back to volume_window, or the 30m
+  // backfill used a different measure) — flagging on that is noise, observed
+  // as false "weak volume persistence" toxic flags at ratio ~0.9.
+  if (volume5m > 0 && reference > volume5m && volumePersistenceRatio < (config.policy?.minVolumePersistence ?? 1.5)) toxicReasons.push("weak volume persistence");
   return {
     feeVolatilityRatio,
     volumePersistenceRatio,
