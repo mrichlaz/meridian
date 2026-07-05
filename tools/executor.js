@@ -325,7 +325,7 @@ function normalizeConfigValue(key, value) {
     "policyEnabled",
     "disableAdaptiveOverride",
   ]);
-  const arrayKeys = new Set(["allowedLaunchpads", "blockedLaunchpads"]);
+  const arrayKeys = new Set(["allowedLaunchpads", "blockedLaunchpads", "indicatorIntervals"]);
   const stringKeys = new Set([
     "timeframe",
     "category",
@@ -363,6 +363,15 @@ function normalizeConfigValue(key, value) {
   ]);
   if (value === null) return null;
   if (booleanKeys.has(key)) return coerceBoolean(value, key);
+  if (key === "indicatorIntervals") {
+    // Filter to valid interval values (must be "5_MINUTE" or "15_MINUTE")
+    if (!Array.isArray(value)) {
+      throw new Error(`${key} must be an array of strings like ["5_MINUTE", "15_MINUTE"]`);
+    }
+    return value
+      .map((v) => String(v || "").trim().toUpperCase())
+      .filter((v) => v === "5_MINUTE" || v === "15_MINUTE");
+  }
   if (arrayKeys.has(key)) return coerceStringArray(value, key);
   if (stringKeys.has(key)) return coerceString(value, key);
   if (numberKeys.has(key)) return coerceFiniteNumber(value, key);
