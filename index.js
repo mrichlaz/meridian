@@ -1767,6 +1767,7 @@ function renderSettingsMenu(page = "main") {
         settingButton("TF: both", "cfg:set:indicatorIntervals:both"),
       ],
       [
+        settingButton("Entry: NoDT", "cfg:set:indicatorEntryPreset:no_downtrend"),
         settingButton("Entry: ST", "cfg:set:indicatorEntryPreset:supertrend_break"),
         settingButton("Entry: RSI", "cfg:set:indicatorEntryPreset:rsi_reversal"),
         settingButton("Entry: ST/RSI", "cfg:set:indicatorEntryPreset:supertrend_or_rsi"),

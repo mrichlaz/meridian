@@ -42,7 +42,8 @@ function buildSignalSummary(payload) {
   };
 }
 
-function evaluatePreset(side, preset, payload) {
+// Exported for tests — production callers go through confirmIndicatorPreset.
+export function evaluatePreset(side, preset, payload) {
   const summary = buildSignalSummary(payload);
   const oversold = Number(config.indicators.rsiOversold ?? 30);
   const overbought = Number(config.indicators.rsiOverbought ?? 80);
@@ -67,6 +68,39 @@ function evaluatePreset(side, preset, payload) {
     close <= level;
 
   switch (preset) {
+    case "no_downtrend":
+      // Designed for the single-sided-below LP book. A bid ladder earns fees
+      // in sideways chop and gentle uptrends; its only fatal regime is a
+      // sustained downtrend (ladder fills into falling inventory). So instead
+      // of demanding a bullish breakout (supertrend_break — which rejects the
+      // sideways-chop candidates that pay LPs best), this preset only VETOES
+      // confirmed downtrends: fresh bearish flip, or established bearish
+      // supertrend with price below the line while RSI shows no reversal.
+      // Unknown/missing data confirms (fail-open, consistent with the module).
+      if (side === "entry") {
+        const freshBearishFlip = summary.supertrendBreakDown;
+        const establishedDowntrend =
+          isBearish &&
+          close != null &&
+          summary.supertrendValue != null &&
+          close <= summary.supertrendValue &&
+          !(rsi != null && rsi <= oversold); // deep-oversold = reversal setup, allow
+        return {
+          confirmed: !freshBearishFlip && !establishedDowntrend,
+          reason: freshBearishFlip
+            ? "Supertrend flipped bearish — active downtrend"
+            : establishedDowntrend
+              ? "Price below bearish Supertrend without oversold reversal"
+              : "No confirmed downtrend (sideways or up)",
+          signal: summary,
+        };
+      }
+      // Exit side mirrors supertrend_break: a confirmed downtrend is the exit.
+      return {
+        confirmed: summary.supertrendBreakDown || (isBearish && close != null && summary.supertrendValue != null && close <= summary.supertrendValue),
+        reason: summary.supertrendBreakDown ? "Supertrend flipped bearish" : "Price is below bearish Supertrend",
+        signal: summary,
+      };
     case "supertrend_break":
       return side === "entry"
         ? {
