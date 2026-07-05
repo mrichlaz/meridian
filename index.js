@@ -134,6 +134,8 @@ let _cronTasks = [];
 let _managementBusy = false; // prevents overlapping management cycles
 let _screeningBusy = false;  // prevents overlapping screening cycles
 let _screeningLastTriggered = 0; // epoch ms — prevents management from spamming screening
+let _studyFailStreak = 0;    // consecutive LP-study timeouts across candidates
+let _studySkipUntil = 0;     // epoch ms — circuit breaker: skip LP studies until then
 let _pollTriggeredAt = 0; // epoch ms — cooldown for poller-triggered management
 let _pnlPollBusy = false;   // module-level so runWalletSweepOnce can read it
 let _sweepBusy = false;     // module-level so runWalletSweepOnce can read/write it
@@ -400,13 +402,22 @@ export async function runManagementCycle({ silent = false, triggerScreening = tr
         }
       } else if (result?.already_closed) {
         // Position was already closed when the tool ran (on-chain account
-        // gone, or local state already marked closed). The executor
-        // already suppressed the "🔒 Closed" card for this case, and we
-        // must not claim "⚡ CLOSE executed" either — that would be a
-        // false success that misleads the operator.
-        log("cron", `Management: ${act.action} for ${p.pair} was already closed — skipping Telegram notification`);
+        // gone, or local state already marked closed). Don't claim
+        // "⚡ CLOSE executed" — but don't stay silent either: if the original
+        // close failed after the on-chain part, this is the operator's only
+        // signal that the position is gone. Include PnL when the tool has it.
+        log("cron", `Management: ${act.action} for ${p.pair} was already closed`);
+        if (act.action === "CLOSE" && telegramEnabled()) {
+          const pnlStr = result.pnl_pct != null ? ` (PnL ${result.pnl_pct >= 0 ? "+" : ""}${Number(result.pnl_pct).toFixed(2)}%)` : "";
+          await sendMessage(`ℹ️ ${p.pair} was already closed${pnlStr}${result.auto_swapped ? " — leftover base token swapped back to SOL" : ""}\nReason: ${act.reason || "rule triggered"}`).catch(() => {});
+        }
       } else {
         log("cron_error", `Management: Failed to execute ${act.action} for ${p.pair}: ${result?.error || "Unknown error"}`);
+        // A silent close failure is how positions bleed past their stop with
+        // zero operator feedback — always surface it.
+        if (telegramEnabled()) {
+          await sendMessage(`❌ ${act.action} FAILED for ${p.pair}: ${result?.error || "unknown error"}\nReason it was triggered: ${act.reason || "rule"}\nWill retry next cycle.`).catch(() => {});
+        }
       }
     }
 
@@ -943,6 +954,8 @@ IMPORTANT:
 - Keep the whole report compact and highly scannable for Telegram.
 - If you cite a CONFIG threshold, copy the EXACT number from the CONFIG section above. Do not paraphrase.
       `, config.llm.maxSteps, [], "SCREENER", config.llm.screeningModel, 2048, {
+        candidatesPreloaded: true,
+        candidateCount: passing.length,
         onToolStart: async ({ name }) => {
           if (name === "deploy_position") {
             deployAttempted = true;
@@ -1230,16 +1243,36 @@ export function startCronJobs() {
     }
   });
 
+  // Deterministic hourly health check — no LLM. The old version asked the
+  // MANAGER agent to write a report whose return value was discarded; the
+  // model often produced an empty markdown table. Real data, logged directly.
   const healthTask = cron.schedule(`0 * * * *`, async () => {
     if (_managementBusy) return;
     _managementBusy = true;
     log("cron", "Starting health check");
     try {
-      await agentLoop(`
-HEALTH CHECK
-
-Summarize the current portfolio health, total fees earned, and performance of all open positions. Recommend any high-level adjustments if needed.
-      `, config.llm.maxSteps, [], "MANAGER");
+      const [balances, mine] = await Promise.all([
+        getWalletBalances().catch(() => null),
+        getMyPositions({ force: true }).catch(() => null),
+      ]);
+      const lines = ["HEALTH CHECK"];
+      if (balances) {
+        const tokenUsd = (balances.tokens || []).reduce((s, t) => s + (Number(t.usd) || 0), 0);
+        lines.push(`Wallet: ${Number(balances.sol ?? 0).toFixed(3)} SOL${tokenUsd > 0.5 ? ` + $${tokenUsd.toFixed(2)} in tokens` : ""}`);
+      } else {
+        lines.push("Wallet: balance lookup failed");
+      }
+      const positions = mine?.positions || [];
+      lines.push(`Open positions: ${positions.length}/${config.risk.maxPositions}`);
+      for (const p of positions) {
+        const pnl = p.pnl_pct != null ? `${p.pnl_pct >= 0 ? "+" : ""}${Number(p.pnl_pct).toFixed(2)}%` : "?";
+        const fees = p.unclaimed_fees_usd != null ? ` | fees $${Number(p.unclaimed_fees_usd).toFixed(2)}` : "";
+        const oor = p.in_range === false ? ` | OOR ${p.minutes_out_of_range ?? "?"}m` : "";
+        lines.push(`  ${p.pair}: ${pnl}${fees}${oor}`);
+      }
+      const perf = getPerformanceSummary();
+      if (perf) lines.push(String(perf).split("\n")[0]);
+      log("cron", lines.join("\n"));
     } catch (error) {
       log("cron_error", `Health check failed: ${error.message}`);
     } finally {
@@ -2204,6 +2237,10 @@ async function telegramHandler(msg) {
         const posAddr = data.slice(6);
         await answerCallbackQuery(msg.callbackQueryId, "Closing...").catch(() => {});
         const result = await closePosition({ position_address: posAddr });
+        if (result?.success && result.base_mint) {
+          const { swapBaseToSolWithRetry } = await import("./tools/executor.js");
+          await swapBaseToSolWithRetry(result.base_mint, "after close (button)").catch(() => {});
+        }
         const { formatCloseResult } = await import("./utils/telegram-formatter.js");
         const tracked = getTrackedPosition(posAddr);
         const { text, buttons } = formatCloseResult(result, {
@@ -2331,6 +2368,10 @@ async function telegramHandler(msg) {
       await sendMessage(`Closing ${pos.pair}...`);
       const result = await closePosition({ position_address: pos.position });
       if (result.success) {
+        if (result.base_mint) {
+          const { swapBaseToSolWithRetry } = await import("./tools/executor.js");
+          await swapBaseToSolWithRetry(result.base_mint, "after /close").catch(() => {});
+        }
         const closeTxs = result.close_txs?.length ? result.close_txs : result.txs;
         const { formatCloseResult } = await import("./utils/telegram-formatter.js");
         const { text, buttons } = formatCloseResult(result, { pair: pos.pair, reason: "/close" });
@@ -2351,6 +2392,10 @@ async function telegramHandler(msg) {
       for (const pos of positions) {
         try {
           const result = await closePosition({ position_address: pos.position });
+          if (result?.success && result.base_mint) {
+            const { swapBaseToSolWithRetry } = await import("./tools/executor.js");
+            await swapBaseToSolWithRetry(result.base_mint, "after /closeall").catch(() => {});
+          }
           results.push(`${pos.pair}: ${result.success ? "closed" : `failed (${result.error || "unknown"})`}`);
         } catch (error) {
           results.push(`${pos.pair}: failed (${error.message})`);
@@ -2980,6 +3025,10 @@ async function enrichAndFilterCandidates({ limit = 10, liveMessage = null } = {}
   const NARRATIVE_TIMEOUT_MS = 1500;
   const TOKEN_INFO_TIMEOUT_MS = 2000;
   const STUDY_TIMEOUT_MS = 8000;
+  const studySkipped = _studySkipUntil > Date.now();
+  if (studySkipped) {
+    log("screening", `LP study circuit open (${Math.round((_studySkipUntil - Date.now()) / 1000)}s left) — skipping studies this cycle`);
+  }
   for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
     const batch = candidates.slice(i, i + BATCH_SIZE);
     const batchResults = await Promise.all(
@@ -2997,10 +3046,12 @@ async function enrichAndFilterCandidates({ limit = 10, liveMessage = null } = {}
           mint
             ? withTimeout(getTokenInfo({ query: mint }).catch(() => null), TOKEN_INFO_TIMEOUT_MS)
             : Promise.resolve(null),
-          withTimeout(
-            studyTopLPers({ pool_address: pool.pool, limit: 3 }).catch(() => null),
-            STUDY_TIMEOUT_MS,
-          ),
+          studySkipped
+            ? Promise.resolve(null)
+            : withTimeout(
+                studyTopLPers({ pool_address: pool.pool, limit: 3 }).catch(() => null),
+                STUDY_TIMEOUT_MS,
+              ),
         ]);
 
         const swValue = smartWallets.status === "fulfilled" ? smartWallets.value : null;
@@ -3008,8 +3059,17 @@ async function enrichAndFilterCandidates({ limit = 10, liveMessage = null } = {}
         const tokenInfoValue = tokenInfo.status === "fulfilled" ? tokenInfo.value : null;
         const studyValue = study.status === "fulfilled" ? study.value : null;
 
-        if (study.status === "fulfilled" && study.value == null) {
+        if (!studySkipped && study.status === "fulfilled" && study.value == null) {
           log("screening", `Study timeout: ${pool.name} exceeded ${STUDY_TIMEOUT_MS}ms — continuing without LP study`);
+          _studyFailStreak += 1;
+          // Two consecutive timeouts = the study API is slow/down, not a blip.
+          // Open the circuit for 10 min instead of eating 8s per candidate.
+          if (_studyFailStreak >= 2 && _studySkipUntil <= Date.now()) {
+            _studySkipUntil = Date.now() + 10 * 60 * 1000;
+            log("screening", "LP study circuit opened for 10 min after consecutive timeouts");
+          }
+        } else if (!studySkipped && study.status === "fulfilled" && study.value != null) {
+          _studyFailStreak = 0;
         }
         if (tokenInfo.status === "fulfilled" && tokenInfo.value == null) {
           log("screening", `Token info timeout: ${pool.name} exceeded ${TOKEN_INFO_TIMEOUT_MS}ms — continuing with partial data`);

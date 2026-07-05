@@ -62,7 +62,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * fills). Treats both a throw AND result.success===false / missing tx as failure.
  * Returns { swapped, result, token } — swapped=false if nothing to do or all attempts failed.
  */
-async function swapBaseToSolWithRetry(baseMint, label) {
+export async function swapBaseToSolWithRetry(baseMint, label) {
   const attempts = Math.max(1, Number(config.management.autoSwapRetryAttempts ?? 3));
   const delayMs = Math.max(0, Number(config.management.autoSwapRetryDelayMs ?? 3000));
   const minUsdFloor = Math.max(0, Number(config.management.autoSwapMinUsdFloor ?? 0.10));
@@ -885,13 +885,22 @@ export async function executeTool(name, args) {
         }
       } else if (name === "close_position") {
         if (result.already_closed) {
-          // Already-closed path means the tool itself short-circuited because
-          // the on-chain account is gone or the state was already closed. The
-          // management cycle or /close command owns the user-facing message
-          // for this case; we must not double-announce "🔒 Closed" here, and
-          // we must not run the auto-swap again (the underlying tokens were
-          // already moved by the original close).
-          log("executor", `Skipping notifyClose + auto-swap for already-closed position ${args.position_address?.slice(0, 8)}`);
+          // Already-closed path: the tool short-circuited because the on-chain
+          // account is gone or state was already closed. The management cycle
+          // or /close command owns the user-facing message, so no notifyClose.
+          // But the ORIGINAL close may have failed after the on-chain close
+          // (or bypassed the executor entirely), leaving the base token unsold
+          // — so still attempt the auto-swap. swapBaseToSolWithRetry is
+          // balance-gated: if the tokens were already swapped it's a no-op.
+          log("executor", `Already-closed position ${args.position_address?.slice(0, 8)} — skipping notifyClose, checking for unsold base token`);
+          if (!args.skip_swap && result.base_mint) {
+            const { swapped, result: swapResult } = await swapBaseToSolWithRetry(result.base_mint, "after already-closed close");
+            if (swapped) {
+              result.auto_swapped = true;
+              result.auto_swap_note = `Leftover base token auto-swapped back to SOL (${result.base_mint.slice(0, 8)} → SOL). Do NOT call swap_token again.`;
+              if (swapResult?.amount_out) result.sol_received = swapResult.amount_out;
+            }
+          }
         } else {
           log("executor", `close_position succeeded for ${args.position_address?.slice(0, 8)} — base_mint=${result.base_mint?.slice(0, 12) || "MISSING"} skip_swap=${!!args.skip_swap}`);
           notifyClose({

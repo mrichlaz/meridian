@@ -112,6 +112,11 @@ export function mlStatus(config) {
     }
     if (Number.isFinite(model.cvEdge)) {
       lines.push(`Walk-forward edge vs base rate: ${model.cvEdge >= 0 ? "+" : ""}${model.cvEdge}pp`);
+      if (model.cvEdge <= 0) {
+        lines.push(`λ stays at 0.1 until walk-forward edge is positive — the model hasn't beaten the base rate out-of-sample yet.`);
+      }
+    } else {
+      lines.push(`No walk-forward validation recorded — λ is pinned at 0.1 until a full retrain runs (automatic every 5 closes, or run /ml-train). λ only ramps on positive out-of-sample edge.`);
     }
   }
 

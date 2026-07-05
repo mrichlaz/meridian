@@ -163,7 +163,7 @@ function isThinkingModeToolChoiceError(error) {
  * @returns {string} - The agent's final text response
  */
 export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHistory = [], agentType = "GENERAL", model = null, maxOutputTokens = null, options = {}) {
-  const { interactive = false, onToolStart = null, onToolFinish = null } = options;
+  const { interactive = false, onToolStart = null, onToolFinish = null, candidatesPreloaded = false, candidateCount = null } = options;
   // Build dynamic system prompt with current portfolio state
   const [portfolio, positions] = await Promise.all([getWalletBalances(), getMyPositions()]);
   const stateSummary = getStateSummary();
@@ -218,8 +218,11 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
     "get_crypto_bot_tokens",
     "get_active_bin",
   ]);
-  let screenerTopCandidatesLoaded = false;
-  let screenerCandidateCount = null;
+  // Screening cycles pre-load the candidate set into the goal text, so a
+  // no-tool "NO DEPLOY" final answer is legitimate — without this flag the
+  // no-tool guard rejects it twice and the cycle fails with a retry message.
+  let screenerTopCandidatesLoaded = agentType === "SCREENER" && candidatesPreloaded;
+  let screenerCandidateCount = screenerTopCandidatesLoaded ? candidateCount : null;
   const screenerDistinctResearchCalls = new Set();
   const mustUseRealTool = shouldRequireRealToolUse(goal, agentType, interactive);
   let sawToolCall = false;
