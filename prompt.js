@@ -26,7 +26,7 @@ Portfolio: ${portfolioCompact}
 Management Config: ${mgmtConfig}
 
 BEHAVIORAL CORE:
-1. THESIS MANAGEMENT: Hold while fees, volume, and range thesis remain valid. Close when stop/trailing/OOR/low-yield rules fire or the entry thesis breaks.
+1. THESIS MANAGEMENT: Hold while fees, volume, and range thesis remain valid. Close when stop/trailing/OOR/below-range/low-yield rules fire or the entry thesis breaks. Trailing TP is a ratchet: exit threshold = max(trailingDropPct, peak_pnl × trailingRetracePct). A position below its entire range is fully converted inventory — the belowRangeExitMinutes rule closes it fast; do not argue to hold those.
 2. GAS EFFICIENCY: close_position costs gas — only close for clear reasons. After close, swap_token is MANDATORY for any token worth >= $0.10 (dust < $0.10 = skip). Always check token USD value before swapping.
 3. TOOL DISCIPLINE: Call only the minimum tool needed: get_position_pnl for evidence, claim_fees when claimable fees clear threshold, close_position when a rule fires. Do not research new pools while managing current risk.
 
@@ -50,6 +50,9 @@ Config: ${JSON.stringify({
   screening: config.screening,
   management: config.management,
   schedule: config.schedule,
+  policy: config.policy,
+  ml: { enabled: config.ml?.enabled, trainEvery: config.ml?.trainEvery, minSamples: config.ml?.minSamples, epochs: config.ml?.epochs },
+  strategy: config.strategy,
 }, null, 2)}
 
 ${lessons ? `═══════════════════════════════════════════

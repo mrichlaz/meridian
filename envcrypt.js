@@ -10,11 +10,21 @@ function isEncryptedMarker(line) {
 }
 
 function parseEncryptedKeys(filePath) {
-  if (!fs.existsSync(filePath)) return new Set();
+  // Never let an unreadable .env (permissions, sandbox, partial write) crash
+  // the process at module load — fall back to "no encrypted keys" and let
+  // the missing env vars surface as their own, clearer errors downstream.
+  let raw;
+  try {
+    if (!fs.existsSync(filePath)) return new Set();
+    raw = fs.readFileSync(filePath, "utf8");
+  } catch (e) {
+    console.error(`[envcrypt] Cannot read ${filePath}: ${e.message} — continuing without encrypted-key decryption`);
+    return new Set();
+  }
 
   const encrypted = new Set();
   let encryptedNext = false;
-  for (const line of fs.readFileSync(filePath, "utf8").split(/\r?\n/)) {
+  for (const line of raw.split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed) {
       encryptedNext = false;
@@ -32,10 +42,14 @@ function parseEncryptedKeys(filePath) {
 }
 
 function getEnvcryptKey(keyPath = DEFAULT_KEY_PATH) {
+  let fileKey = "";
+  try {
+    if (fs.existsSync(keyPath)) fileKey = fs.readFileSync(keyPath, "utf8").trim();
+  } catch { /* unreadable key file — treated as absent */ }
   const key =
     process.env.ENVRYPT_KEY ||
     process.env.ENVCRYPT_KEY ||
-    (fs.existsSync(keyPath) ? fs.readFileSync(keyPath, "utf8").trim() : "");
+    fileKey;
 
   if (!key) return null;
   if (key.length < 8) {

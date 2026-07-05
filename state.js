@@ -297,10 +297,25 @@ export function resolvePendingPeak(position_address, currentPnlPct, toleranceRat
   return { confirmed: false, rejected: true, pendingPeak };
 }
 
+/**
+ * Effective trailing-drop threshold for a given peak.
+ * Ratchet: max(base trailingDropPct, peak × trailingRetracePct) — small winners
+ * lock tight, big winners get proportional room.
+ * Accepts either a management-config object or a plain number (legacy callers).
+ */
+export function getEffectiveTrailingDropPct(peakPnlPct, dropConfig) {
+  if (typeof dropConfig === "number") return dropConfig;
+  const base = Number(dropConfig?.trailingDropPct ?? 0);
+  const retrace = Number(dropConfig?.trailingRetracePct ?? 0);
+  if (!Number.isFinite(peakPnlPct) || retrace <= 0) return base;
+  return Math.max(base, peakPnlPct * retrace);
+}
+
 export function queueTrailingDropConfirmation(position_address, peakPnlPct, currentPnlPct, trailingDropPct) {
   if (peakPnlPct == null || currentPnlPct == null || trailingDropPct == null) return false;
+  const dropThreshold = getEffectiveTrailingDropPct(peakPnlPct, trailingDropPct);
   const dropFromPeak = peakPnlPct - currentPnlPct;
-  if (dropFromPeak < trailingDropPct) return false;
+  if (dropFromPeak < dropThreshold) return false;
 
   const state = load();
   const pos = state.positions[position_address];
@@ -338,11 +353,12 @@ export function resolvePendingTrailingDrop(position_address, currentPnlPct, trai
   pos.pending_trailing_drop_pct = null;
   pos.pending_trailing_started_at = null;
 
+  const dropThreshold = getEffectiveTrailingDropPct(pendingPeak, trailingDropPct);
   const stillNearCrash = currentPnlPct != null && currentPnlPct <= pendingCurrent + tolerancePct;
-  const stillDroppedEnough = currentPnlPct != null && (pendingPeak - currentPnlPct) >= trailingDropPct;
+  const stillDroppedEnough = currentPnlPct != null && (pendingPeak - currentPnlPct) >= dropThreshold;
 
   if (stillNearCrash && stillDroppedEnough) {
-    const reason = `Trailing TP: peak ${pendingPeak.toFixed(2)}% → current ${currentPnlPct.toFixed(2)}% (dropped ${(pendingPeak - currentPnlPct).toFixed(2)}% >= ${trailingDropPct}%)`;
+    const reason = `Trailing TP: peak ${pendingPeak.toFixed(2)}% → current ${currentPnlPct.toFixed(2)}% (dropped ${(pendingPeak - currentPnlPct).toFixed(2)}% >= ${dropThreshold.toFixed(2)}%)`;
     pos.confirmed_trailing_exit_reason = reason;
     pos.confirmed_trailing_exit_until = new Date(Date.now() + 30_000).toISOString();
     save(state);
@@ -462,10 +478,11 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   // ── Trailing TP ────────────────────────────────────────────────
   if (!pnl_pct_suspicious && pos.trailing_active) {
     const dropFromPeak = pos.peak_pnl_pct - currentPnlPct;
-    if (dropFromPeak >= mgmtConfig.trailingDropPct) {
+    const effectiveDropPct = getEffectiveTrailingDropPct(pos.peak_pnl_pct, mgmtConfig);
+    if (dropFromPeak >= effectiveDropPct) {
       return {
         action: "TRAILING_TP",
-        reason: `Trailing TP: peak ${pos.peak_pnl_pct.toFixed(2)}% → current ${currentPnlPct.toFixed(2)}% (dropped ${dropFromPeak.toFixed(2)}% >= ${mgmtConfig.trailingDropPct}%)`,
+        reason: `Trailing TP: peak ${pos.peak_pnl_pct.toFixed(2)}% → current ${currentPnlPct.toFixed(2)}% (dropped ${dropFromPeak.toFixed(2)}% >= ${effectiveDropPct.toFixed(2)}%)`,
         needs_confirmation: true,
         peak_pnl_pct: pos.peak_pnl_pct,
         current_pnl_pct: currentPnlPct,

@@ -77,24 +77,41 @@ export function mlStatus(config) {
   lines.push(`Blend λ: ${lambda} (${Math.round(lambda * 100)}% ML / ${Math.round((1 - lambda) * 100)}% heuristic)`);
 
   if (model && data.length > 0) {
-    const buckets = {
-      strong: { label: "0.70-1.00", n: 0, wins: 0, pnl: 0 },
-      mid: { label: "0.40-0.70", n: 0, wins: 0, pnl: 0 },
-      weak: { label: "0.00-0.40", n: 0, wins: 0, pnl: 0 },
-    };
-    for (const sample of data) {
-      const score = model.score(sample.features);
-      const bucket = score >= 0.7 ? buckets.strong : score >= 0.4 ? buckets.mid : buckets.weak;
-      bucket.n++;
-      bucket.wins += sample.label ? 1 : 0;
-      bucket.pnl += Number(sample.pnl_pct || 0);
-    }
+    // Quintile lift table: sort by model score, split into 5 equal groups.
+    // What matters is whether higher-scored quintiles have higher win rate /
+    // PnL (monotone lift), NOT the absolute score level — a well-calibrated
+    // model on a 59%-win book will keep most scores near 0.59, so fixed
+    // 0.4/0.7 buckets stay empty forever and tell you nothing.
+    const scored = data
+      .map((sample) => ({
+        score: model.score(sample.features),
+        win: sample.label ? 1 : 0,
+        pnl: Number(sample.pnl_pct || 0),
+      }))
+      .sort((a, b) => a.score - b.score);
     lines.push("");
-    lines.push("── ML Predictiveness ──");
-    for (const b of [buckets.strong, buckets.mid, buckets.weak]) {
-      const wr = b.n ? Math.round((b.wins / b.n) * 100) : 0;
-      const avg = b.n ? b.pnl / b.n : 0;
-      lines.push(`Score ${b.label}: ${b.n} trades, win ${wr}%, avg PnL ${avg.toFixed(2)}%`);
+    lines.push("── ML Predictiveness (score quintiles, low → high) ──");
+    const q = 5;
+    const size = Math.floor(scored.length / q) || 1;
+    let bottomWr = null;
+    let topWr = null;
+    for (let i = 0; i < q; i++) {
+      const slice = scored.slice(i * size, i === q - 1 ? scored.length : (i + 1) * size);
+      if (!slice.length) continue;
+      const wr = Math.round((slice.reduce((s, r) => s + r.win, 0) / slice.length) * 100);
+      const avg = slice.reduce((s, r) => s + r.pnl, 0) / slice.length;
+      const lo = slice[0].score.toFixed(3);
+      const hi = slice[slice.length - 1].score.toFixed(3);
+      if (i === 0) bottomWr = wr;
+      if (i === q - 1) topWr = wr;
+      lines.push(`Q${i + 1} [${lo}-${hi}]: ${slice.length} trades, win ${wr}%, avg PnL ${avg.toFixed(2)}%`);
+    }
+    if (bottomWr != null && topWr != null) {
+      const lift = topWr - bottomWr;
+      lines.push(`Lift (Q5 − Q1 win rate): ${lift >= 0 ? "+" : ""}${lift}pp ${lift >= 10 ? "— model separates ✅" : lift > 0 ? "— weak separation" : "— NO separation ❌"}`);
+    }
+    if (Number.isFinite(model.cvEdge)) {
+      lines.push(`Walk-forward edge vs base rate: ${model.cvEdge >= 0 ? "+" : ""}${model.cvEdge}pp`);
     }
   }
 

@@ -523,6 +523,8 @@ const toolMap = {
       trailingTakeProfit: ["management", "trailingTakeProfit"],
       trailingTriggerPct: ["management", "trailingTriggerPct"],
       trailingDropPct: ["management", "trailingDropPct"],
+      trailingRetracePct: ["management", "trailingRetracePct"],
+      belowRangeExitMinutes: ["management", "belowRangeExitMinutes"],
       pnlSanityMaxDiffPct: ["management", "pnlSanityMaxDiffPct"],
       solMode: ["management", "solMode"],
       evolveEnabled: ["management", "evolveEnabled"],
@@ -888,6 +890,13 @@ export async function executeTool(name, args) {
             pnlUsd: result.pnl_usd ?? 0,
             pnlPct: result.pnl_pct ?? 0,
             reason: result.reason || args.reason,
+            feesUsd: result.fees_earned_usd ?? null,
+            minutesHeld: result.minutes_held ?? null,
+            minutesOOR: result.minutes_out_of_range ?? null,
+            peakPnlPct: result.peak_pnl_pct ?? null,
+            amountSol: result.amount_sol ?? null,
+            initialUsd: result.initial_value_usd ?? null,
+            finalUsd: result.final_value_usd ?? null,
           }).catch((e) => log("executor_warn", `notifyClose failed for ${args.position_address?.slice(0, 8)}: ${e?.message || e}`));
           // Note low-yield closes in pool memory so screener avoids redeploying
           if (args.reason && args.reason.toLowerCase().includes("yield")) {

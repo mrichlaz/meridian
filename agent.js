@@ -92,9 +92,13 @@ import { getDecisionSummary } from "./decision-log.js";
 
 // Supports OpenRouter (default) or any OpenAI-compatible local server (e.g. LM Studio)
 // To use LM Studio: set LLM_BASE_URL=http://localhost:1234/v1 and LLM_API_KEY=lm-studio in .env
+// The SDK constructor throws when apiKey is undefined, which would kill the
+// whole daemon at import time (cron, Telegram, deterministic close rules —
+// none of which need the LLM). Pass a placeholder instead: the first actual
+// LLM call fails with a 401 and a message that names the missing env var.
 const client = new OpenAI({
   baseURL: process.env.LLM_BASE_URL || "https://openrouter.ai/api/v1",
-  apiKey: process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY,
+  apiKey: process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY || "MISSING-set-OPENROUTER_API_KEY-or-LLM_API_KEY",
   timeout: 5 * 60 * 1000,
   // Retry transient connection errors (e.g. "Premature close" from MiniMax via
   // OpenRouter) at the SDK level before the app loop ever sees them. The SDK

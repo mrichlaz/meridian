@@ -51,12 +51,21 @@ export function scoreCandidate(candidate, opts = {}) {
   });
   const features = normalizeVector(raw);
 
-  // Heuristic score (same formula as existing scoreCandidate in screening.js)
+  // Heuristic anchor: prefer the policy-engine score (0-100) when the caller
+  // provides it — that is the score the screening cycle actually ranks and
+  // gates on. The legacy linear formula is only a fallback for callers that
+  // pass a bare candidate (e.g. the /ml CLI).
+  const policyScore = Number(candidate.policy?.score);
   const feeTvl = Number(candidate.fee_active_tvl_ratio || 0);
   const organic = Number(candidate.organic_score || 0);
   const volume = Number(candidate.volume_window || 0);
   const holders = Number(candidate.holders || 0);
-  const heuristicScore = feeTvl * 1000 + organic * 10 + volume / 100 + holders / 100;
+  const heuristicScore = Number.isFinite(policyScore)
+    ? policyScore
+    : feeTvl * 1000 + organic * 10 + volume / 100 + holders / 100;
+  const heuristicNorm = Number.isFinite(policyScore)
+    ? Math.min(1, Math.max(0, policyScore / 100))
+    : normalizeHeuristic(heuristicScore);
 
   // ML score
   let mlScore = 0.5; // neutral default
@@ -74,14 +83,12 @@ export function scoreCandidate(candidate, opts = {}) {
     log("ml_inference", `Scoring failed: ${err.message}`);
   }
 
-  // Emotional modifier from personality + emotions
-  const emo = opts.emotions || getCurrentState();
-  const personality = getActive();
-  const emotionalBoost = computeEmotionalBoost(mlScore, emo, personality);
-
-  // Blended score
+  // Blended score. Deliberately NO emotional modifier here: mood multiplying
+  // a trade score is behavioral-bias injection (boredom lowering the entry bar
+  // is textbook overtrading). Emotion state stays prompt-context flavor only —
+  // see getEmotionalPromptContext().
   const lambda = getBlendLambda();
-  const blendedScore = lambda * mlScore * emotionalBoost + (1 - lambda) * normalizeHeuristic(heuristicScore);
+  const blendedScore = lambda * mlScore + (1 - lambda) * heuristicNorm;
 
   _lastScoringTime = new Date().toISOString();
 
@@ -275,18 +282,19 @@ export function explainScore(candidate, opts = {}) {
 
 /**
  * Get the current blend lambda (weight of ML vs heuristic).
- * Starts low (0.1) and ramps up only when the model shows it can
- * separate winners from losers — measured by score spread across
- * prediction buckets.
+ * Starts low (0.1) and ramps up only with demonstrated OUT-OF-SAMPLE skill:
+ * cvEdge = walk-forward accuracy minus the majority base rate (pp).
+ * The old gate ("predictiveness" = fraction of outputs far from 0.5) measured
+ * confidence, not skill — an overconfident wrong model maxed it out.
  */
 export function getBlendLambda() {
   if (_blendLambda != null) return _blendLambda;
 
   try {
     const model = LogisticRegression.load();
-    if (model && model.totalSamples > 10) {
-      const p = model.predictiveness || 0;
-      _blendLambda = 0.1 + Math.min(0.4, p * 0.5);
+    if (model && model.totalSamples > 10 && Number.isFinite(model.cvEdge) && model.cvEdge > 0) {
+      // +10pp of real edge → lambda 0.5 (cap). No edge → stay at 0.1.
+      _blendLambda = 0.1 + Math.min(0.4, (model.cvEdge / 10) * 0.4);
     }
   } catch {}
 
@@ -323,37 +331,6 @@ function fmt(val) {
 function normalizeHeuristic(score) {
   // Cap at ~18,000 which would be fee_tvl_ratio=20 and organic=100
   return Math.min(1, Math.max(0, score / 15000));
-}
-
-/**
- * Emotional boost: amplifies or dampens the ML score based on
- * current emotional state and personality.
- */
-function computeEmotionalBoost(mlScore, emo, personality) {
-  if (!emo || !personality) return 1.0;
-
-  // Base: personality defines the exploration/exploitation balance
-  const base = 1.0;
-
-  // Risk appetite adjustment
-  // High risk appetite → slightly boost scores (more optimistic)
-  // Low risk appetite → slightly dampen scores (more conservative)
-  const riskAdj = (emo.riskAppetite - 0.5) * 0.2;
-
-  // Confidence adjustment
-  // Higher confidence → less boost needed (model already sharp)
-  const confAdj = (0.5 - emo.confidence) * 0.1;
-
-  // Boredom adjustment
-  // When bored, lower the threshold slightly for borderline candidates
-  // But only if the candidate is at least decent (mlScore > 0.3)
-  let boreAdj = 0;
-  if (mlScore > 0.3 && emo.boredom > 0.5) {
-    boreAdj = (emo.boredom - 0.5) * 0.3;
-  }
-
-  const total = base + (riskAdj + confAdj + boreAdj) * personality.emotionInfluence;
-  return Math.max(0.7, Math.min(1.3, total));
 }
 
 /**

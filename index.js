@@ -143,6 +143,10 @@ const TRAILING_PEAK_CONFIRM_DELAY_MS = 15_000;
 const TRAILING_PEAK_CONFIRM_TOLERANCE = 0.85;
 const TRAILING_DROP_CONFIRM_DELAY_MS = 15_000;
 const TRAILING_DROP_CONFIRM_TOLERANCE_PCT = 1.0;
+// Poll-triggered management cooldown for loss-cutting exits (stop loss /
+// below range). Normal alerts wait a full management interval; emergencies
+// only wait long enough to avoid hammering the RPC during one dump.
+const EMERGENCY_POLL_COOLDOWN_MS = 90_000;
 
 /** Strip <think>...</think> reasoning blocks that some models leak into output */
 function stripThink(text) {
@@ -193,7 +197,7 @@ function scheduleTrailingDropConfirmation(positionAddress) {
       const resolved = resolvePendingTrailingDrop(
         positionAddress,
         position?.pnl_pct ?? null,
-        config.management.trailingDropPct,
+        config.management,
         TRAILING_DROP_CONFIRM_TOLERANCE_PCT,
       );
       if (resolved?.confirmed) {
@@ -294,7 +298,7 @@ export async function runManagementCycle({ silent = false, triggerScreening = tr
       const exit = updatePnlAndCheckExits(p.position, p, config.management);
       if (exit) {
         if (exit.action === "TRAILING_TP" && exit.needs_confirmation && shouldUsePnlRecheck()) {
-          if (queueTrailingDropConfirmation(p.position, exit.peak_pnl_pct, exit.current_pnl_pct, config.management.trailingDropPct)) {
+          if (queueTrailingDropConfirmation(p.position, exit.peak_pnl_pct, exit.current_pnl_pct, config.management)) {
             scheduleTrailingDropConfirmation(p.position);
           }
           continue;
@@ -1274,16 +1278,22 @@ Summarize the current portfolio health, total fees earned, and performance of al
         const exit = updatePnlAndCheckExits(p.position, p, config.management);
         if (exit) {
           if (exit.action === "TRAILING_TP" && exit.needs_confirmation && shouldUsePnlRecheck()) {
-            if (queueTrailingDropConfirmation(p.position, exit.peak_pnl_pct, exit.current_pnl_pct, config.management.trailingDropPct)) {
+            if (queueTrailingDropConfirmation(p.position, exit.peak_pnl_pct, exit.current_pnl_pct, config.management)) {
               scheduleTrailingDropConfirmation(p.position);
             }
             continue;
           }
-          const cooldownMs = config.schedule.managementIntervalMin * 60 * 1000;
+          // Stop-loss breaches bypass the normal management-interval cooldown:
+          // a fast dump can move -10% → -50% inside one 10-minute window, so
+          // capping the left tail is worth an extra management cycle.
+          const isEmergency = exit.action === "STOP_LOSS";
+          const cooldownMs = isEmergency
+            ? EMERGENCY_POLL_COOLDOWN_MS
+            : config.schedule.managementIntervalMin * 60 * 1000;
           const sinceLastTrigger = Date.now() - _pollTriggeredAt;
           if (sinceLastTrigger >= cooldownMs) {
             _pollTriggeredAt = Date.now();
-            log("state", `[PnL poll] Exit alert: ${p.pair} — ${exit.reason} — triggering management`);
+            log("state", `[PnL poll] Exit alert: ${p.pair} — ${exit.reason} — triggering management${isEmergency ? " (emergency)" : ""}`);
             runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Poll-triggered management failed: ${e.message}`));
           } else {
             log("state", `[PnL poll] Exit alert: ${p.pair} — ${exit.reason} — cooldown (${Math.round((cooldownMs - sinceLastTrigger) / 1000)}s left)`);
@@ -1292,11 +1302,16 @@ Summarize the current portfolio health, total fees earned, and performance of al
         }
         const closeRule = getDeterministicCloseRule(p, config.management);
         if (closeRule) {
-          const cooldownMs = config.schedule.managementIntervalMin * 60 * 1000;
+          // Rule 1 (stop loss) and Rule 6 (below range) are loss-cutting rules —
+          // same emergency bypass as STOP_LOSS above.
+          const isEmergency = closeRule.rule === 1 || closeRule.rule === 6;
+          const cooldownMs = isEmergency
+            ? EMERGENCY_POLL_COOLDOWN_MS
+            : config.schedule.managementIntervalMin * 60 * 1000;
           const sinceLastTrigger = Date.now() - _pollTriggeredAt;
           if (sinceLastTrigger >= cooldownMs) {
             _pollTriggeredAt = Date.now();
-            log("state", `[PnL poll] Deterministic close rule: ${p.pair} — Rule ${closeRule.rule}: ${closeRule.reason} — triggering management`);
+            log("state", `[PnL poll] Deterministic close rule: ${p.pair} — Rule ${closeRule.rule}: ${closeRule.reason} — triggering management${isEmergency ? " (emergency)" : ""}`);
             runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Poll-triggered management failed: ${e.message}`));
           } else {
             log("state", `[PnL poll] Deterministic close rule: ${p.pair} — Rule ${closeRule.rule}: ${closeRule.reason} — cooldown (${Math.round((cooldownMs - sinceLastTrigger) / 1000)}s left)`);
@@ -1507,6 +1522,19 @@ export function getDeterministicCloseRule(position, managementConfig) {
       return { action: "CLOSE", rule: "4b", reason: "OOR + declining PnL" };
     }
   }
+  // ── Rule 6 — price fell below the entire range ─────────────────────
+  // A single-sided SOL position below its range is fully converted to the
+  // base token: zero fee income, pure directional bag while the token dumps.
+  // Exit much faster than the generic outOfRangeWaitMinutes (which mainly
+  // exists for the harmless pumped-above case where the position sits in SOL).
+  if (
+    position.active_bin != null &&
+    position.lower_bin != null &&
+    position.active_bin < position.lower_bin &&
+    (position.minutes_out_of_range ?? 0) >= (managementConfig.belowRangeExitMinutes ?? 10)
+  ) {
+    return { action: "CLOSE", rule: 6, reason: "below range — inventory fully converted" };
+  }
   if (
     position.fee_per_tvl_24h != null &&
     position.fee_per_tvl_24h < managementConfig.minFeePerTvl24h &&
@@ -1604,6 +1632,10 @@ function settingValue(key) {
     stopLossPct: config.management.stopLossPct,
     trailingTriggerPct: config.management.trailingTriggerPct,
     trailingDropPct: config.management.trailingDropPct,
+    trailingRetracePct: config.management.trailingRetracePct,
+    belowRangeExitMinutes: config.management.belowRangeExitMinutes,
+    outOfRangeWaitMinutes: config.management.outOfRangeWaitMinutes,
+    minMcap: config.screening.minMcap,
     repeatDeployCooldownEnabled: config.management.repeatDeployCooldownEnabled,
     repeatDeployCooldownTriggerCount: config.management.repeatDeployCooldownTriggerCount,
     repeatDeployCooldownHours: config.management.repeatDeployCooldownHours,
@@ -1659,7 +1691,8 @@ function renderSettingsMenu(page = "main") {
     "",
     `Mode: ${config.management.solMode ? "SOL" : "USD"} | Relay: ${config.api.lpAgentRelayEnabled ? "on" : "off"}`,
     `Strategy: ${config.strategy.strategy} | bins ${config.strategy.minBinsBelow}-${config.strategy.maxBinsBelow} | deploy ${config.management.deployAmountSol} SOL`,
-    `TP/SL: ${config.management.takeProfitPct}% / ${config.management.stopLossPct}% | trailing ${config.management.trailingTakeProfit ? "on" : "off"}`,
+    `TP/SL: ${config.management.takeProfitPct}% / ${config.management.stopLossPct}% | trailing ${config.management.trailingTakeProfit ? `on (trigger ${config.management.trailingTriggerPct}%, drop max(${config.management.trailingDropPct}, peak×${config.management.trailingRetracePct}))` : "off"}`,
+    `Exits: below-range ${config.management.belowRangeExitMinutes}m | OOR ${config.management.outOfRangeWaitMinutes}m | min mcap $${config.screening.minMcap}`,
     `Indicators: ${config.indicators.enabled ? "on" : "off"} | entry ${config.indicators.entryPreset} | ${fmtSettingValue(config.indicators.intervals)}`,
   ].join("\n");
 
@@ -1691,6 +1724,9 @@ function renderSettingsMenu(page = "main") {
       [toggleButton("trailingTakeProfit", "Trailing TP")],
       stepButtons("trailingTriggerPct", "Trail trigger", 0.5, { digits: 1 }),
       stepButtons("trailingDropPct", "Trail drop", 0.5, { digits: 1 }),
+      stepButtons("trailingRetracePct", "Trail retrace", 0.05, { digits: 2 }),
+      stepButtons("belowRangeExitMinutes", "Below-range min", 5, { digits: 0 }),
+      stepButtons("outOfRangeWaitMinutes", "OOR wait min", 5, { digits: 0 }),
       [toggleButton("repeatDeployCooldownEnabled", "Repeat cooldown")],
       stepButtons("repeatDeployCooldownTriggerCount", "Repeat count", 1, { digits: 0 }),
       stepButtons("repeatDeployCooldownHours", "Repeat hrs", 1, { digits: 0 }),
@@ -1701,8 +1737,10 @@ function renderSettingsMenu(page = "main") {
       [toggleButton("useDiscordSignals", "Discord signals"), toggleButton("blockPvpSymbols", "PVP hard block")],
       [
         settingButton(`Strategy: spot`, "cfg:set:strategy:spot"),
+        settingButton(`Strategy: curve`, "cfg:set:strategy:curve"),
         settingButton(`Strategy: bid_ask`, "cfg:set:strategy:bid_ask"),
       ],
+      stepButtons("minMcap", "Min mcap $", 50000, { digits: 0 }),
       stepButtons("minBinsBelow", "Min bins", 1, { digits: 0 }),
       stepButtons("maxBinsBelow", "Max bins", 1, { digits: 0 }),
       stepButtons("defaultBinsBelow", "Default bins", 1, { digits: 0 }),
@@ -1824,6 +1862,10 @@ async function applySettingsMenuCallback(msg) {
     if (["policyNeutralMinScore", "policyRiskOffMinScore", "policyRiskOnMinScore"].includes(key)) value = Math.max(0, Math.min(100, Math.round(value)));
     if (["policyMinFeeVolatilityRatio", "policyMinVolumePersistence", "policyToxicFlowPenalty"].includes(key)) value = Math.max(0, value);
     if (key === "policyShrinkRetryPct") value = Math.max(0.4, Math.min(0.95, value));
+    if (key === "trailingRetracePct") value = Math.max(0, Math.min(0.9, value));
+    if (key === "belowRangeExitMinutes") value = Math.max(1, Math.round(value));
+    if (key === "outOfRangeWaitMinutes") value = Math.max(5, Math.round(value));
+    if (key === "minMcap") value = Math.max(0, Math.round(value));
   } else if (action === "set") {
     value = normalizeMenuValue(key, parts.slice(3).join(":"));
   } else {
@@ -1843,7 +1885,7 @@ async function applySettingsMenuCallback(msg) {
     ? "indicators"
     : key.startsWith("policy") || key === "mlEnabled"
       ? "policy"
-      : ["useDiscordSignals", "blockPvpSymbols", "strategy", "minBinsBelow", "maxBinsBelow", "defaultBinsBelow", "managementIntervalMin", "screeningIntervalMin"].includes(key)
+      : ["useDiscordSignals", "blockPvpSymbols", "strategy", "minMcap", "minBinsBelow", "maxBinsBelow", "defaultBinsBelow", "managementIntervalMin", "screeningIntervalMin"].includes(key)
         ? "screen"
         : "risk";
   await answerCallbackQuery(msg.callbackQueryId, `Updated ${key}`);

@@ -104,7 +104,18 @@ function scoreCandidate(pool) {
   return Math.max(0, baseScore - safetyPenalty);
 }
 
-function hasMinimumConviction(pool) {
+// Second-stage conviction gate — intentionally stricter than the discovery
+// thresholds, but driven by config so tuning minOrganic/minHolders etc.
+// actually moves this gate too (the floors used to be hardcoded and silently
+// overrode user config). Returns null when the pool passes, else the reason.
+function getConvictionRejectReason(pool) {
+  const s = config.screening || {};
+  const minFeeTvl = Math.max(0.03, Number(s.minFeeActiveTvlRatio) || 0);
+  const minOrganic = Math.max(70, Number(s.minOrganic) || 0);
+  const minVolume = Math.max(1000, Number(s.minVolume) || 0);
+  const minHolders = Math.max(700, Number(s.minHolders) || 0);
+  const maxTop10 = Math.min(50, Number(s.maxTop10Pct) || 50);
+
   const feeTvl = Number(pool.fee_active_tvl_ratio || 0);
   const organic = Number(pool.organic_score || 0);
   const volume = Number(pool.volume_window || 0);
@@ -112,13 +123,13 @@ function hasMinimumConviction(pool) {
   const volatility = Number(pool.volatility || 0);
   const smartMoneyBuy = !!pool.smart_money_buy;
   const top10Pct = Number(pool.top10_pct || pool.holder_top10_pct || 0);
-  if (!(feeTvl >= 0.03)) return false;
-  if (!(organic >= 70)) return false;
-  if (!(volume >= 1000)) return false;
-  if (!(holders >= 700)) return false;
-  if (top10Pct && top10Pct > 50) return false;
-  if (Number.isFinite(volatility) && volatility > 8 && !smartMoneyBuy) return false;
-  return true;
+  if (!(feeTvl >= minFeeTvl)) return `fee/active-TVL ${feeTvl} below conviction floor ${minFeeTvl}`;
+  if (!(organic >= minOrganic)) return `organic ${organic} below conviction floor ${minOrganic}`;
+  if (!(volume >= minVolume)) return `volume ${volume} below conviction floor ${minVolume}`;
+  if (!(holders >= minHolders)) return `holders ${holders} below conviction floor ${minHolders}`;
+  if (top10Pct && top10Pct > maxTop10) return `top10 ${top10Pct}% above conviction ceiling ${maxTop10}%`;
+  if (Number.isFinite(volatility) && volatility > 8 && !smartMoneyBuy) return `volatility ${volatility} above 8 without smart-money confirmation`;
+  return null;
 }
 
 function hasVolumePersistence(pool) {
@@ -1072,7 +1083,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
 
     // ── Risk bucket + volume profile labels (1A, 1B) ─────────────────
     // These are ADVISORY labels only — they don't filter anyone out.
-    // The downstream `hasMinimumConviction()` and the score still do all
+    // The downstream `getConvictionRejectReason()` and the score still do all
     // the actual policy work; the labels just make it easier for the
     // LLM to reason about borderline candidates and for the
     // screening-snapshot logs to be self-explanatory.
@@ -1098,8 +1109,9 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   if (eligible.length > 0) {
     const beforeConviction = eligible.length;
     eligible.splice(0, eligible.length, ...eligible.filter((p) => {
-      if (hasMinimumConviction(p)) return true;
-      pushFilteredReason(filteredOut, p, "below conviction floor");
+      const reason = getConvictionRejectReason(p);
+      if (!reason) return true;
+      pushFilteredReason(filteredOut, p, reason);
       return false;
     }));
     if (eligible.length < beforeConviction) {
@@ -1429,7 +1441,7 @@ async function buildBotTrackerCandidates({ existingPools = [], timeframe, limit 
 
 // ─── Risk bucket + volume profile labels (1A, 1B) ───────────────────
 // These are ADVISORY labels only — they do not filter anyone out.
-// The downstream `hasMinimumConviction()` and the score still do all
+// The downstream `getConvictionRejectReason()` and the score still do all
 // the actual policy work; the labels just make it easier for the LLM
 // to reason about borderline candidates and for the
 // screening-snapshot logs to be self-explanatory.

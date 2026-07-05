@@ -590,8 +590,8 @@ export function formatConfigSnapshot(config, options = {}) {
   lines.push(`  • deployAmountSol: ${m.deployAmountSol} • positionSizePct: ${m.positionSizePct}`);
   lines.push(`  • gasReserve: ${m.gasReserve} • minSolToOpen (effective): ${effectiveMinSolToOpen}`);
   lines.push(`  • TP: ${m.takeProfitPct}% • SL: ${m.stopLossPct}%`);
-  if (m.trailingTakeProfit) lines.push(`  • trailing: trigger ${m.trailingTriggerPct}% • drop ${m.trailingDropPct}%`);
-  lines.push(`  • OOR wait: ${m.outOfRangeWaitMinutes}m (${m.outOfRangeBinsToClose} bins)`);
+  if (m.trailingTakeProfit) lines.push(`  • trailing: trigger ${m.trailingTriggerPct}% • drop max(${m.trailingDropPct}%, peak×${m.trailingRetracePct ?? 0})`);
+  lines.push(`  • OOR wait: ${m.outOfRangeWaitMinutes}m (${m.outOfRangeBinsToClose} bins) • below-range exit: ${m.belowRangeExitMinutes ?? "—"}m`);
   lines.push(`  • low yield: fee/TVL 24h ≥ ${m.minFeePerTvl24h}%, age ≥ ${m.minAgeBeforeYieldCheck}m`);
   lines.push(`  • claim threshold: ${formatUsd(m.minClaimAmount, 2)}`);
   if (m.solMode) lines.push(`  • solMode: ON (PnL/values reported in SOL)`);
@@ -680,8 +680,9 @@ export function formatThresholds(config, options = {}) {
   lines.push("");
   lines.push(b("🛡 Risk"));
   lines.push(`${b("TP / SL:")} ${m.takeProfitPct}% / ${m.stopLossPct}%`);
-  if (m.trailingTakeProfit) lines.push(`${b("Trailing TP:")} trigger ${m.trailingTriggerPct}%, drop ${m.trailingDropPct}%`);
+  if (m.trailingTakeProfit) lines.push(`${b("Trailing TP:")} trigger ${m.trailingTriggerPct}%, drop max(${m.trailingDropPct}%, peak×${m.trailingRetracePct ?? 0})`);
   lines.push(`${b("OOR wait:")} ${m.outOfRangeWaitMinutes}m, close when &gt; ${m.outOfRangeBinsToClose} bins above range`);
+  lines.push(`${b("Below range:")} exit after ${m.belowRangeExitMinutes ?? "—"}m (inventory fully converted)`);
   lines.push(`${b("Low yield close:")} fee/TVL 24h &lt; ${m.minFeePerTvl24h}% after ${m.minAgeBeforeYieldCheck}m`);
   lines.push(`${b("Claim threshold:")} ≥ ${formatUsd(m.minClaimAmount, 2)}`);
   return { text: lines.join("\n").slice(0, 3900), buttons: ACTION_BUTTONS.status() };

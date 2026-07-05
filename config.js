@@ -150,7 +150,14 @@ export const config = {
     // Trailing take-profit
     trailingTakeProfit:    u.trailingTakeProfit    ?? true,
     trailingTriggerPct:    u.trailingTriggerPct    ?? 3,    // activate trailing at X% PnL
-    trailingDropPct:       u.trailingDropPct       ?? 1.5,  // close when drops X% from peak
+    trailingDropPct:       u.trailingDropPct       ?? 1.5,  // minimum drop from peak to close
+    // Ratchet: effective drop = max(trailingDropPct, peak_pnl_pct * trailingRetracePct).
+    // Small winners lock tight; big winners get room to keep compounding fees.
+    trailingRetracePct:    u.trailingRetracePct    ?? 0.3,
+    // Price below the entire range = position fully converted to base token with
+    // zero fee income — pure directional bag. Exit much faster than the generic
+    // outOfRangeWaitMinutes (which mainly handles the pumped-above case).
+    belowRangeExitMinutes: u.belowRangeExitMinutes ?? 10,
     pnlSanityMaxDiffPct:   u.pnlSanityMaxDiffPct   ?? 5,    // max allowed diff between reported and derived pnl % before ignoring a tick
     // SOL mode — positions, PnL, and balances reported in SOL instead of USD
     solMode:               u.solMode               ?? false,
@@ -283,7 +290,9 @@ export const config = {
     trainEvery:         u.mlTrainEvery         ?? 5,     // retrain every N closes
     minSamples:         u.mlMinSamples         ?? 10,    // min positions before training
     batchSize:          u.mlBatchSize          ?? 16,
-    epochs:             u.mlEpochs             ?? 5,
+    // 5 epochs with patience 5 never converged on ~1k samples; early
+    // stopping still cuts training short once validation loss flattens.
+    epochs:             u.mlEpochs             ?? 30,
     learningRate:       u.mlLearningRate       ?? 0.001,
     entropyBeta:        u.mlEntropyBeta        ?? 0.02,
     validationSplit:    u.mlValidationSplit    ?? 0.2,
@@ -490,7 +499,10 @@ export const THRESHOLD_SCHEMA = {
   takeProfitPct: {
     section: "management",
     field: "takeProfitPct",
-    min: 1,
+    // Floor 6: with trailing TP on, realized winner PnL is censored by the
+    // trailing exit, so evolution pushing TP toward the observed winner
+    // cluster (~1-2%) is a self-reinforcing collapse, not learning.
+    min: 6,
     max: 100,
     step: 0.2,
     decimals: 1,
@@ -498,8 +510,10 @@ export const THRESHOLD_SCHEMA = {
   stopLossPct: {
     section: "management",
     field: "stopLossPct",
-    min: -95,
-    max: -1,
+    // Sane band for a fee-harvesting LP book: tighter than -5 whipsaws on
+    // normal in-range variance, wider than -20 stops protecting the tail.
+    min: -20,
+    max: -5,
     step: 0.2,
     decimals: 1,
   },

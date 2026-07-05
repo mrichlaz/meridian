@@ -541,14 +541,40 @@ export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, 
   );
 }
 
-export async function notifyClose({ pair, pnlUsd, pnlPct, reason }) {
+export async function notifyClose({
+  pair, pnlUsd, pnlPct, reason,
+  feesUsd = null, minutesHeld = null, minutesOOR = null,
+  peakPnlPct = null, amountSol = null, initialUsd = null, finalUsd = null,
+}) {
   const sign = pnlUsd >= 0 ? "+" : "";
-  const reasonLine = reason ? `\nReason: ${String(reason).replace(/[<>]/g, "")}` : "";
-  await sendHTML(
-    `🔒 <b>Closed</b> ${pair}\n` +
-    `PnL: ${sign}$${(pnlUsd ?? 0).toFixed(2)} (${sign}${(pnlPct ?? 0).toFixed(2)}%)` +
-    reasonLine
-  );
+  const icon = pnlUsd >= 0 ? "🟢" : "🔴";
+  const lines = [
+    `${icon} <b>Closed</b> ${pair}`,
+    `PnL: ${sign}$${(pnlUsd ?? 0).toFixed(2)} (${sign}${(pnlPct ?? 0).toFixed(2)}%)`,
+  ];
+  // PnL decomposition — fees earned vs price/IL — so each close explains itself
+  if (feesUsd != null) {
+    const priceUsd = (pnlUsd ?? 0) - feesUsd;
+    lines.push(`Fees: +$${feesUsd.toFixed(2)} | Price/IL: ${priceUsd >= 0 ? "+" : ""}$${priceUsd.toFixed(2)}`);
+  }
+  if (initialUsd != null || amountSol != null) {
+    const sizeParts = [];
+    if (amountSol != null) sizeParts.push(`${amountSol} SOL`);
+    if (initialUsd != null) sizeParts.push(`$${initialUsd.toFixed(2)} in`);
+    if (finalUsd != null) sizeParts.push(`$${finalUsd.toFixed(2)} out`);
+    lines.push(`Size: ${sizeParts.join(" | ")}`);
+  }
+  if (minutesHeld != null) {
+    const heldStr = minutesHeld >= 60 ? `${Math.floor(minutesHeld / 60)}h ${minutesHeld % 60}m` : `${minutesHeld}m`;
+    const oorStr = minutesOOR != null && minutesOOR > 0 ? ` (OOR ${minutesOOR}m)` : "";
+    lines.push(`Held: ${heldStr}${oorStr}`);
+  }
+  if (peakPnlPct != null && Number.isFinite(peakPnlPct)) {
+    const giveback = peakPnlPct - (pnlPct ?? 0);
+    lines.push(`Peak: ${peakPnlPct >= 0 ? "+" : ""}${peakPnlPct.toFixed(2)}%${giveback > 0.05 ? ` (gave back ${giveback.toFixed(2)}%)` : ""}`);
+  }
+  if (reason) lines.push(`Reason: ${String(reason).replace(/[<>]/g, "")}`);
+  await sendHTML(lines.join("\n"));
 }
 
 export async function notifySwap({ inputSymbol, outputSymbol, amountIn, amountOut, tx }) {

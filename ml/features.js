@@ -344,8 +344,13 @@ export function extractFeatures({
   vec[FEATURE_INDEX.ctx_active_positions] = numeric(context.activePositions, 0);
   vec[FEATURE_INDEX.ctx_max_positions] = numeric(context.maxPositions, 3);
   vec[FEATURE_INDEX.ctx_deploy_amount_sol] = numeric(context.deployAmountSol, 0.5);
-  vec[FEATURE_INDEX.ctx_hour_of_day] = new Date().getUTCHours();
-  vec[FEATURE_INDEX.ctx_day_of_week] = new Date().getUTCDay();
+  // Use the deploy-time clock when reconstructing historical samples —
+  // stamping training-run wall time gave every legacy sample the same
+  // hour/day (pure noise features).
+  const refDate = context.deployedAt ? new Date(context.deployedAt) : new Date();
+  const refValid = !Number.isNaN(refDate.getTime());
+  vec[FEATURE_INDEX.ctx_hour_of_day] = refValid ? refDate.getUTCHours() : 0;
+  vec[FEATURE_INDEX.ctx_day_of_week] = refValid ? refDate.getUTCDay() : 0;
 
   // ─── ENTRY MARKET: pool state at deploy time ──
   vec[FEATURE_INDEX.entry_mcap_usd] = numeric(c.entry_mcap ?? context.entryMcap, 0);
@@ -444,6 +449,7 @@ export function extractFromPerformance(perf) {
     activePositions: 1,
     maxPositions: 3,
     deployAmountSol: perf.amount_sol || 0.5,
+    deployedAt: perf.deployed_at || perf.recorded_at || perf.closed_at || null,
     entryMcap: perf.entry_mcap,
     entryTvl: perf.entry_tvl,
     entryVolume: perf.entry_volume,

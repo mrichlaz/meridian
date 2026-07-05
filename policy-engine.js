@@ -115,9 +115,18 @@ export function rankCandidates(entries = [], { regime = getMarketRegime() } = {}
   if (config.policy?.enabled === false) {
     return entries.map((entry) => ({ ...entry, policy: { score: 100, reasons: [], flow: getFlowQuality(entry.pool, { audit: entry.ti?.audit, smartWallets: entry.sw }), regime: regime.regime, minScore: 0, disabled: true } }));
   }
+  const minFeeVol = n(config.policy?.minFeeVolatilityRatio, 0.01);
   return entries
     .map((entry) => {
       const scored = scoreCandidate(entry.pool, { audit: entry.ti?.audit, smartWallets: entry.sw });
+      // Hard EV gate: fee revenue must compensate volatility (adverse-selection
+      // proxy). A soft score penalty let high-volume-but-toxic pools through —
+      // exactly the trades that produced the left tail. Zero the score so the
+      // standard minScore filter (and its reject reporting) handles it.
+      if (scored.flow && scored.flow.feeVolatilityRatio < minFeeVol) {
+        scored.score = 0;
+        scored.reasons.unshift(`fee/volatility ${scored.flow.feeVolatilityRatio.toFixed(4)} below EV floor ${minFeeVol}`);
+      }
       return { ...entry, policy: { ...scored, regime: regime.regime, minScore: regime.minScore } };
     })
     .filter((entry) => entry.policy.score >= entry.policy.minScore)

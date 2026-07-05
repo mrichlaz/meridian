@@ -396,7 +396,27 @@ Standalone process — `cd discord-listener && npm install && npm start`. Shares
 
 ---
 
+## Newer modules & behaviors (added after the tables above — July 2026)
+
+The module table above predates several additions. Quick map:
+
+| File | Purpose |
+|---|---|
+| `policy-engine.js` | Deterministic screening gate that runs BEFORE the LLM: 0-100 additive score, market regime (RISK_ON/OFF via own recent PnL), circuit breaker (3 losses / low win rate / low balance), size multiplier by score, and a **hard EV gate** — `fee_active_tvl_ratio / volatility < policyMinFeeVolatilityRatio` zeroes the score. |
+| `ml/` | Logistic regression (84 features) blended into policy score at weight λ. Trained on `data/lessons.json` performance records with **expectancy labels** (win = pnl > 1% hurdle, gradients weighted by |pnl|), **walk-forward validation** (chronological folds), and **dataset z-scoring stored in the model file** (without it the fixed min-max bounds crush real variance and every score collapses to the base rate). λ ramps only on positive out-of-sample edge (`cvEdge`). Emotions are prompt flavor only — they must never multiply scores. |
+| `tools/bot-tracker.js` | Background SQLite tracker of known bot wallets; feeds candidate injection. WAL checkpointed every cycle (`wal_checkpoint(TRUNCATE)`); `seen_sigs` table dedups mint-less txs. |
+| `tools/gmgn.js`, `tools/okx.js`, `tools/pnl.js`, `screening-scales.js` | GMGN discovery source (`screeningSource: merge`), OKX risk enrichment, PnL poller RPC, timeframe threshold scaling. |
+
+Exit-rule specifics that differ from the tables above:
+- **Trailing TP is a ratchet**: exit when drop from peak ≥ `max(trailingDropPct, peak_pnl_pct × trailingRetracePct)`. Helper: `getEffectiveTrailingDropPct()` in `state.js` (accepts mgmt-config object or legacy number).
+- **Rule 6** in `getDeterministicCloseRule`: active_bin below the whole range (fully converted inventory) → close after `belowRangeExitMinutes` (default 10), much faster than `outOfRangeWaitMinutes`.
+- **Emergency poll bypass**: STOP_LOSS / Rule 1 / Rule 6 alerts from the PnL poller use a 90s cooldown (`EMERGENCY_POLL_COOLDOWN_MS`) instead of the shared management-interval cooldown.
+- **evolveThresholds guardrails**: TP evolution is skipped while trailing TP is on (winner PnL is censored by the trailing exit — evolving toward it collapses TP to the floor); SL places itself beyond the loss-tail p90, banded [-20, -5] by THRESHOLD_SCHEMA.
+- **Adding a runtime-tunable config key requires FOUR places**: `config.js` (default), executor `CONFIG_MAP`, `tools/definitions.js` update_config VALID KEYS text (or the LLM refuses the key), and optionally the `/settings` menu (`settingValue` + page rows + step clamps in `applySettingsMenuCallback` in `index.js`).
+
 ## Known issues / tech debt (verified by reading the code)
+
+- **CONFIG LIVES IN `data/user-config.json`, NOT the repo root.** `utils/paths.js` resolves `DATA_ROOT` to `<repo>/data` (or `/data` in Docker), and `PATHS.userConfig` points there. The repo-root `user-config.json` is read by NOTHING — edits to it silently do nothing (it carries a `_WARNING` key now). Same for the other state JSONs: the live `lessons.json`, `pool-memory.json`, `state.json`, `decision-log.json` are all under `data/`; the repo-root copies are stale leftovers from before the DATA_ROOT migration.
 
 - **`lessons.js evolveThresholds()`** evolves `minOrganic` and `minFeeActiveTvlRatio` only.
 - **`get_wallet_positions` tool** is in `definitions.js` and wired in `executor.js`, but not in `MANAGER_TOOLS`/`SCREENER_TOOLS`. Only `INTENT_TOOLS.balance` / `INTENT_TOOLS.positions` expose it to GENERAL.

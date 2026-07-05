@@ -68,36 +68,47 @@ async function fetchWithRetry(url, opts, retries = 3) {
 }
 
 // ─── DB init ───
+function openWithSchema() {
+  const db = new Database(DB_PATH);
+  db.pragma("journal_mode = WAL");
+  // wal_autocheckpoint is measured in PAGES (~4KB each). 10000 pages let the
+  // WAL balloon to ~40MB before checkpointing; SQLite's default is 1000.
+  db.pragma("wal_autocheckpoint = 500");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS events (
+      tx_signature TEXT,
+      token_mint   TEXT NOT NULL,
+      timestamp    INTEGER NOT NULL,
+      PRIMARY KEY (tx_signature, token_mint)
+    );
+    CREATE TABLE IF NOT EXISTS tokens (
+      mint              TEXT PRIMARY KEY,
+      symbol            TEXT,
+      name              TEXT,
+      price_usd         REAL,
+      liquidity_usd     REAL,
+      fdv               REAL,
+      volume_h24        REAL,
+      pair_created_at   INTEGER,
+      dex               TEXT,
+      last_seen         INTEGER NOT NULL,
+      occurrence_count  INTEGER DEFAULT 1
+    );
+    CREATE TABLE IF NOT EXISTS seen_sigs (
+      tx_signature TEXT PRIMARY KEY,
+      timestamp    INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS e_tt ON events(token_mint, timestamp);
+    CREATE INDEX IF NOT EXISTS e_ts ON events(timestamp);
+    CREATE INDEX IF NOT EXISTS s_ts ON seen_sigs(timestamp);
+  `);
+  return db;
+}
+
 function initDB() {
-  let db;
   try {
     fs.mkdirSync(DATA_DIR, { recursive: true });
-    db = new Database(DB_PATH);
-    db.pragma("journal_mode = WAL");
-    db.pragma("wal_autocheckpoint = 10000");  // auto-checkpoint more aggressively
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS events (
-        tx_signature TEXT,
-        token_mint   TEXT NOT NULL,
-        timestamp    INTEGER NOT NULL,
-        PRIMARY KEY (tx_signature, token_mint)
-      );
-      CREATE TABLE IF NOT EXISTS tokens (
-        mint              TEXT PRIMARY KEY,
-        symbol            TEXT,
-        name              TEXT,
-        price_usd         REAL,
-        liquidity_usd     REAL,
-        fdv               REAL,
-        volume_h24        REAL,
-        pair_created_at   INTEGER,
-        dex               TEXT,
-        last_seen         INTEGER NOT NULL,
-        occurrence_count  INTEGER DEFAULT 1
-      );
-      CREATE INDEX IF NOT EXISTS e_tt ON events(token_mint, timestamp);
-      CREATE INDEX IF NOT EXISTS e_ts ON events(timestamp);
-    `);
+    return openWithSchema();
   } catch (e) {
     // If DB is corrupted, delete and recreate
     log("bot_tracker", `DB error: ${e.message} — recreating...`);
@@ -106,34 +117,8 @@ function initDB() {
       fs.unlinkSync(DB_PATH + '-wal');
       fs.unlinkSync(DB_PATH + '-shm');
     } catch {}
-    db = new Database(DB_PATH);
-    db.pragma("journal_mode = WAL");
-    db.pragma("wal_autocheckpoint = 10000");
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS events (
-        tx_signature TEXT,
-        token_mint   TEXT NOT NULL,
-        timestamp    INTEGER NOT NULL,
-        PRIMARY KEY (tx_signature, token_mint)
-      );
-      CREATE TABLE IF NOT EXISTS tokens (
-        mint              TEXT PRIMARY KEY,
-        symbol            TEXT,
-        name              TEXT,
-        price_usd         REAL,
-        liquidity_usd     REAL,
-        fdv               REAL,
-        volume_h24        REAL,
-        pair_created_at   INTEGER,
-        dex               TEXT,
-        last_seen         INTEGER NOT NULL,
-        occurrence_count  INTEGER DEFAULT 1
-      );
-      CREATE INDEX IF NOT EXISTS e_tt ON events(token_mint, timestamp);
-      CREATE INDEX IF NOT EXISTS e_ts ON events(timestamp);
-    `);
+    return openWithSchema();
   }
-  return db;
 }
 
 // ─── Helius RPC call ───
@@ -207,7 +192,13 @@ async function fetchDexData(mints) {
           });
         }
         break;
-      } catch {}
+      } catch {
+        // A thrown fetch (timeout, DNS) must consume a retry too — the old
+        // empty catch left `retries` untouched, so persistent timeouts spun
+        // this loop forever and wedged the whole tracker cycle.
+        retries--;
+        if (retries > 0) await new Promise(r => setTimeout(r, 2000));
+      }
     }
     if (i + BATCH_SIZE < mints.length) await new Promise(r => setTimeout(r, 3000));
   }
@@ -216,11 +207,14 @@ async function fetchDexData(mints) {
 
 // ─── Process a single signature ───
 async function processSignature(db, txrl, sig, stats) {
-  const seen = db.prepare("SELECT 1 FROM events WHERE tx_signature=? LIMIT 1").get(sig);
+  const seen = db.prepare("SELECT 1 FROM seen_sigs WHERE tx_signature=? LIMIT 1").get(sig);
   if (seen) return;
   await txrl.wait();
   try {
     const t = await heliusCall("getTransaction", [sig, { maxSupportedTransactionVersion: 0, commitment: "confirmed" }]);
+    // Record the sig even when the tx has no token mints — otherwise every
+    // non-token tx in the wallet's recent list gets re-fetched on every poll.
+    db.prepare("INSERT OR IGNORE INTO seen_sigs VALUES (?,?)").run(sig, Date.now());
     if (!t) return;
     const mints = extractMints(t);
     if (!mints.length) return;
@@ -327,6 +321,9 @@ export function startBotTracker() {
         const cutoff = Date.now() - W;
         db.prepare("DELETE FROM events WHERE timestamp < ?").run(cutoff);
         db.prepare("DELETE FROM tokens WHERE NOT EXISTS (SELECT 1 FROM events WHERE events.token_mint = tokens.mint)").run();
+        db.prepare("DELETE FROM seen_sigs WHERE timestamp < ?").run(cutoff);
+        // Fold the WAL back into the main db so it can't accumulate unbounded
+        try { db.pragma("wal_checkpoint(TRUNCATE)"); } catch {}
 
         if (stats.newEvents > 0) {
           log("bot_tracker", `${stats.newEvents} new events, ${db.prepare("SELECT COUNT(*) as c FROM tokens").get().c} tokens tracked`);

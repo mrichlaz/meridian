@@ -42,13 +42,22 @@ const DEFAULT_CONFIG = {
   epochs: 20,
   learningRate: 0.001,
   l2: 0.001,
-  kFolds: 5,            // Fix #4: k-fold cross-validation
+  kFolds: 5,            // walk-forward folds (chronological, no shuffling)
   saveCheckpoints: true,
+  // Expectancy labeling: a trade only counts as a "win" if it cleared this
+  // PnL hurdle (round-trip cost + minimum risk premium). pnl_pct > 0 alone
+  // rewards scratch wins and teaches the model hit-rate, not expectancy.
+  labelHurdlePct: 1.0,
+  // Sample weight = clamp(|pnl_pct| / weightScalePct, weightFloor, weightCap):
+  // a -30% blowup teaches ~4x more than a +0.3% scratch.
+  weightScalePct: 5,
+  weightFloor: 0.5,
+  weightCap: 4,
 };
 
 // ─── Data loading ───────────────────────────────────────────────
 
-function loadTrainingData() {
+function loadTrainingData(opts = {}) {
   const lessonFiles = [PATHS.lessons, join(PATHS.root, "data", "lessons.json")];
   const perfEntries = [];
   const seen = new Set();
@@ -75,30 +84,60 @@ function loadTrainingData() {
   }
 
   const samples = [];
+  const hurdle = Number(opts.labelHurdlePct ?? DEFAULT_CONFIG.labelHurdlePct);
+  const weightScale = Number(opts.weightScalePct ?? DEFAULT_CONFIG.weightScalePct);
+  const weightFloor = Number(opts.weightFloor ?? DEFAULT_CONFIG.weightFloor);
+  const weightCap = Number(opts.weightCap ?? DEFAULT_CONFIG.weightCap);
   for (const entry of perfEntries) {
     if (typeof entry.pnl_pct !== "number") continue;
     if (!entry.signal_snapshot && typeof entry.fee_tvl_ratio !== "number") continue;
 
     try {
       const features = extractFromPerformance(entry);
-      const label = entry.pnl_pct > 0 ? 1 : 0;
-      samples.push({ features, label, pnl_pct: entry.pnl_pct });
+      // Expectancy label: only above-hurdle trades are positives, and each
+      // sample's gradient is scaled by PnL magnitude so the model optimizes
+      // for expected value rather than raw hit-rate.
+      const label = entry.pnl_pct > hurdle ? 1 : 0;
+      const weight = Math.min(weightCap, Math.max(weightFloor, Math.abs(entry.pnl_pct) / weightScale));
+      const ts = Date.parse(entry.recorded_at || entry.closed_at || entry.deployed_at || 0) || 0;
+      samples.push({ features, label, weight, ts, pnl_pct: entry.pnl_pct });
     } catch {
       // skip malformed
     }
   }
 
+  // Chronological order — required for walk-forward validation.
+  samples.sort((a, b) => a.ts - b.ts);
   return samples;
 }
 
-function shuffledIndices(n) {
-  const arr = new Array(n);
-  for (let i = 0; i < n; i++) arr[i] = i;
-  for (let i = n - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [arr[i], arr[j]] = [arr[j], arr[i]];
+// ─── Standardization stats ──────────────────────────────────────
+
+/**
+ * Per-feature mean/std over a training slice. Applied inside the model
+ * (see model.js setStandardization) so training and inference always see
+ * the same scaling. Constant features get std=1 → standardized to 0.
+ */
+function computeStandardization(featArray) {
+  const dim = featArray[0]?.length || FEATURE_COUNT;
+  const means = new Float64Array(dim);
+  const stds = new Float64Array(dim);
+  const n = featArray.length;
+  for (const f of featArray) {
+    for (let i = 0; i < dim; i++) means[i] += f[i] ?? 0;
   }
-  return arr;
+  for (let i = 0; i < dim; i++) means[i] /= n;
+  for (const f of featArray) {
+    for (let i = 0; i < dim; i++) {
+      const d = (f[i] ?? 0) - means[i];
+      stds[i] += d * d;
+    }
+  }
+  for (let i = 0; i < dim; i++) {
+    stds[i] = Math.sqrt(stds[i] / n);
+    if (stds[i] < 1e-9) stds[i] = 1;
+  }
+  return { means, stds };
 }
 
 // ─── Validation ─────────────────────────────────────────────────
@@ -134,9 +173,12 @@ function computeValidationMetric(model, features, labels) {
 // ─── Main training ──────────────────────────────────────────────
 
 /**
- * Train with k-fold cross-validation.
- * For each fold, trains a fresh model on k-1 folds, evaluates on held-out fold.
- * Returns averaged metrics across all folds.
+ * Train with walk-forward validation (proper for time-ordered trade data).
+ * Samples are chronological; each fold i (i >= 1) is validated by a fresh
+ * model trained only on samples strictly BEFORE that fold. Shuffled k-fold
+ * would leak future market state into the past (lookahead bias).
+ * Returns averaged metrics across folds plus `edge` — accuracy over the
+ * majority-class base rate, which is the number that actually indicates skill.
  */
 export async function trainModel({ config: mlConfig, force = false } = {}) {
   const cfg = { ...DEFAULT_CONFIG, ...mlConfig };
@@ -144,37 +186,39 @@ export async function trainModel({ config: mlConfig, force = false } = {}) {
     return { trained: false, reason: "disabled" };
   }
 
-  const allSamples = loadTrainingData();
+  const allSamples = loadTrainingData(cfg);
   if (allSamples.length < cfg.minSamples) {
     log("ml_trainer", `Insufficient data: ${allSamples.length} samples, need ${cfg.minSamples}`);
     return { trained: false, reason: "insufficient_data", sampleCount: allSamples.length };
   }
 
-  // Determine k (folds): at most kFolds, at least 2, at most sampleCount
+  // Walk-forward folds over chronological samples
   const k = Math.max(2, Math.min(cfg.kFolds, allSamples.length));
-  const indices = shuffledIndices(allSamples.length);
   const foldSize = Math.floor(allSamples.length / k);
 
   const foldMetrics = [];
-  const foldLossHistories = [];
+  let valTotal = 0;
+  let valCorrect = 0;
+  let valPositives = 0;
 
-  for (let fold = 0; fold < k; fold++) {
-    // Split into train/val for this fold
+  for (let fold = 1; fold < k; fold++) {
     const valStart = fold * foldSize;
     const valEnd = fold === k - 1 ? allSamples.length : valStart + foldSize;
-    const valFoldIdx = indices.slice(valStart, valEnd);
-    const trainFoldIdx = [
-      ...indices.slice(0, valStart),
-      ...indices.slice(valEnd),
-    ];
+    const trainSlice = allSamples.slice(0, valStart);
+    const valSlice = allSamples.slice(valStart, valEnd);
+    if (trainSlice.length < 3 || valSlice.length === 0) continue;
 
-    const trainFeatures = trainFoldIdx.map((i) => allSamples[i].features);
-    const trainLabels = new Float64Array(trainFoldIdx.map((i) => allSamples[i].label));
-    const valFeatures = valFoldIdx.map((i) => allSamples[i].features);
-    const valLabels = new Float64Array(valFoldIdx.map((i) => allSamples[i].label));
+    const trainFeatures = trainSlice.map((s) => s.features);
+    const trainLabels = new Float64Array(trainSlice.map((s) => s.label));
+    const trainWeights = new Float64Array(trainSlice.map((s) => s.weight ?? 1));
+    const valFeatures = valSlice.map((s) => s.features);
+    const valLabels = new Float64Array(valSlice.map((s) => s.label));
 
-    // Fresh model per fold
+    // Fresh model per fold, trained only on the past. Standardization stats
+    // also come only from the training slice — no peeking at the val fold.
     const model = new LogisticRegression(FEATURE_COUNT);
+    const foldStats = computeStandardization(trainFeatures);
+    model.setStandardization(foldStats.means, foldStats.stds);
     const report = model.fit(trainFeatures, trainLabels, {
       lr: cfg.learningRate,
       l2: cfg.l2,
@@ -182,29 +226,42 @@ export async function trainModel({ config: mlConfig, force = false } = {}) {
       batchSize: cfg.batchSize,
       validationSplit: 0, // we evaluate manually
       patience: 5,
+      sampleWeights: trainWeights,
     });
 
     const metric = computeValidationMetric(model, valFeatures, valLabels);
     foldMetrics.push(metric);
-    if (report.lossHistory?.length) foldLossHistories.push(report.lossHistory);
+    valTotal += valLabels.length;
+    valCorrect += Math.round((metric.accuracy / 100) * valLabels.length);
+    valPositives += Array.from(valLabels).filter((l) => l >= 0.5).length;
 
-    log("ml_trainer", `Fold ${fold + 1}/${k}: acc=${metric.accuracy}% f1=${metric.f1} (train: ${report.finalAccuracy?.toFixed(1) || "N/A"}%)`);
+    log("ml_trainer", `Walk-forward fold ${fold}/${k - 1}: train n=${trainSlice.length} → val n=${valSlice.length} acc=${metric.accuracy}% f1=${metric.f1} (train: ${report.finalAccuracy?.toFixed(1) || "N/A"}%)`);
   }
 
-  // Average metrics across folds
+  // Average metrics across folds + skill edge over the majority base rate.
+  // accuracy == base rate means the model learned nothing (predicting the
+  // majority class scores the same) — only `edge` > 0 indicates real signal.
+  const posRate = valTotal > 0 ? valPositives / valTotal : 0.5;
+  const baseRate = Math.max(posRate, 1 - posRate) * 100;
+  const wfAccuracy = valTotal > 0 ? (valCorrect / valTotal) * 100 : 0;
   const avgMetric = {
     accuracy: avg(foldMetrics, "accuracy"),
     precision: avg(foldMetrics, "precision"),
     recall: avg(foldMetrics, "recall"),
     f1: avg(foldMetrics, "f1"),
     directionAccuracy: avg(foldMetrics, "directionAccuracy"),
-    foldCount: k,
+    foldCount: foldMetrics.length,
+    baseRate: Math.round(baseRate * 100) / 100,
+    edge: Math.round((wfAccuracy - baseRate) * 100) / 100,
   };
 
   // Train final model on all data
   const allFeatures = allSamples.map((s) => s.features);
   const allLabels = new Float64Array(allSamples.map((s) => s.label));
+  const allWeights = new Float64Array(allSamples.map((s) => s.weight ?? 1));
   const finalModel = new LogisticRegression(FEATURE_COUNT);
+  const finalStats = computeStandardization(allFeatures);
+  finalModel.setStandardization(finalStats.means, finalStats.stds);
   const finalReport = finalModel.fit(allFeatures, allLabels, {
     lr: cfg.learningRate,
     l2: cfg.l2,
@@ -212,12 +269,16 @@ export async function trainModel({ config: mlConfig, force = false } = {}) {
     batchSize: cfg.batchSize,
     validationSplit: 0,
     patience: 5,
+    sampleWeights: allWeights,
   });
+
+  // Persist the out-of-sample edge — this is what gates the blend lambda.
+  finalModel.cvEdge = avgMetric.edge;
 
   // Save final model
   finalModel.save();
 
-  log("ml_trainer", `CV: ${k}-fold avg acc=${avgMetric.accuracy}% f1=${avgMetric.f1}. Final trained on all ${allSamples.length} samples.`);
+  log("ml_trainer", `Walk-forward: avg acc=${avgMetric.accuracy}% (base rate ${avgMetric.baseRate}%, edge ${avgMetric.edge}pp) f1=${avgMetric.f1}. Final trained on all ${allSamples.length} samples.`);
 
   if (cfg.saveCheckpoints) {
     saveCheckpoint(finalModel, {
@@ -249,8 +310,15 @@ export async function onlineUpdate(perf) {
     const model = LogisticRegression.load();
     if (!model) return { updated: false, reason: "no_model" };
 
-    const label = (perf.pnl_pct || 0) > 0 ? 1 : 0;
-    model.trainBatch([features], new Float64Array([label]), 0.005, 0.0001);
+    // Same expectancy labeling/weighting as batch training, so online steps
+    // don't pull the model back toward hit-rate optimization.
+    const pnl = perf.pnl_pct || 0;
+    const label = pnl > DEFAULT_CONFIG.labelHurdlePct ? 1 : 0;
+    const weight = Math.min(
+      DEFAULT_CONFIG.weightCap,
+      Math.max(DEFAULT_CONFIG.weightFloor, Math.abs(pnl) / DEFAULT_CONFIG.weightScalePct),
+    );
+    model.trainBatch([features], new Float64Array([label]), 0.005, 0.0001, 1.0, new Float64Array([weight]));
     model.save();
 
     return { updated: true, generation: model.generation };
@@ -268,10 +336,12 @@ export function computeBlendLambda(valMetric, config = {}) {
 
   if (!valMetric) return lambda;
 
-  const acc = valMetric.accuracy || 50;
-  if (acc > 55) {
+  // Gate on out-of-sample EDGE over the majority base rate, not raw accuracy —
+  // with imbalanced labels, "accuracy > 55%" is often just the base rate.
+  const edge = valMetric.edge ?? ((valMetric.accuracy || 50) - (valMetric.baseRate ?? 50));
+  if (edge > 3) {
     lambda = Math.min(0.7, lambda + 0.05);
-  } else if (acc < 45) {
+  } else if (edge < 0) {
     lambda = Math.max(0.1, lambda - 0.05);
   }
 

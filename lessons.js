@@ -680,8 +680,13 @@ export function evolveThresholds(perfData, config) {
   // If losers exit with shallower losses, raise the stop loss (give more
   // room) so the position doesn't get stopped out prematurely.
   {
+    // TP evolution only makes sense when trailing TP is OFF. With trailing on,
+    // winners exit at the trailing threshold, so "winners cluster near +1-2%"
+    // is an artifact of the exit rule (censored data), not market information.
+    // Evolving TP toward that cluster is a self-reinforcing collapse:
+    // lower TP → smaller winners → evolve lowers TP again, down to the floor.
     const tpSpec = getThresholdSpec("takeProfitPct");
-    if (tpSpec) {
+    if (tpSpec && config.management?.trailingTakeProfit !== true) {
       const tpValues = meaningfulWinners
         .map((p) => Number(p.pnl_pct))
         .filter(isFiniteNum)
@@ -690,7 +695,7 @@ export function evolveThresholds(perfData, config) {
       if (current != null && tpValues.length >= 3) {
         const tpP25 = quantile(tpValues, 0.25);
         if (tpP25 != null && tpP25 < Number(current) * 0.6) {
-          const target = Math.max(tpP25 * 0.9, 1.5);
+          const target = Math.max(tpP25 * 0.9, tpSpec.min);
           const proposed = clamp(nudge(Number(current), target, tpSpec.step), tpSpec.min, tpSpec.max);
           const rounded = Number(proposed.toFixed(tpSpec.decimals));
           if (rounded < Number(current)) {
@@ -700,6 +705,11 @@ export function evolveThresholds(perfData, config) {
         }
       }
     }
+    // SL evolution: place the disaster stop just beyond the realized loss
+    // tail (p90 of losses), inside the schema's sane band. The old rule read
+    // shallow typical losses (p75 ≈ -0.3%) as license to move the stop toward
+    // zero — that whipsaws every normal in-range wiggle. Typical losses say
+    // nothing about where crash protection belongs; the tail does.
     const slSpec = getThresholdSpec("stopLossPct");
     if (slSpec) {
       const slValues = perfData
@@ -707,15 +717,18 @@ export function evolveThresholds(perfData, config) {
         .filter(isFiniteNum)
         .filter((v) => v < 0);
       const current = config[slSpec.section][slSpec.field];
-      if (current != null && slValues.length >= 3) {
-        const slP75 = quantile(slValues, 0.75); // closer-to-zero loser cluster, but robust
-        if (slP75 != null && slP75 > Number(current) + 5) {
-          const target = slP75 * 0.9;
+      // Require real losses before adjusting — a book of scratch losses
+      // carries no information about tail placement.
+      const meaningfulLosses = slValues.filter((v) => v <= -3);
+      if (current != null && slValues.length >= 5 && meaningfulLosses.length >= 3) {
+        const lossP90 = quantile(slValues, 0.1); // 90th percentile of loss depth (most negative decile boundary)
+        if (lossP90 != null) {
+          const target = lossP90 * 1.2; // stop sits 20% beyond the realized tail
           const proposed = clamp(nudge(Number(current), target, slSpec.step), slSpec.min, slSpec.max);
           const rounded = Number(proposed.toFixed(slSpec.decimals));
-          if (rounded > Number(current)) {
+          if (Math.abs(rounded - Number(current)) >= 0.5) {
             changes.stopLossPct = rounded;
-            rationale.stopLossPct = `Loser PnL 75th percentile was ${slP75.toFixed(1)}% — widened SL from ${current}% → ${rounded}%`;
+            rationale.stopLossPct = `Loss-tail p90 was ${lossP90.toFixed(1)}% — moved SL from ${current}% → ${rounded}% (band ${slSpec.min}..${slSpec.max})`;
           }
         }
       }

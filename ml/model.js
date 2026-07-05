@@ -90,6 +90,12 @@ class LogisticRegression {
     this.totalSamples = 0;
     this.trainingLoss = [];
     this.predictiveness = 0;
+    // Out-of-sample skill: walk-forward accuracy minus majority base rate
+    // (percentage points). Gates the ML blend lambda; null = never validated.
+    this.cvEdge = null;
+    // Dataset standardization stats (see setStandardization)
+    this.featureMeans = null;
+    this.featureStds = null;
     // Xavier initialization: small random weights centered on zero
     // avoids all-zero symmetry that Adam + L2 can't escape
     for (let i = 0; i < inputDim; i++) {
@@ -97,14 +103,41 @@ class LogisticRegression {
     }
   }
 
+  // ─── Standardization ──────────────────────────────────────
+  // The pipeline's min-max normalization uses fixed universe-wide bounds
+  // (e.g. mcap [0, 100M]) while real candidates cluster in the bottom few
+  // percent of those ranges. Without re-centering, informative features have
+  // ~zero variance, L2 pins the weights at zero, and the model collapses to
+  // the intercept (every score ≈ base rate). Dataset z-scoring restores unit
+  // variance so the same L2 leaves the weights learnable.
+
+  setStandardization(means, stds) {
+    this.featureMeans = means ? Float64Array.from(means) : null;
+    this.featureStds = stds ? Float64Array.from(stds) : null;
+  }
+
+  _prep(features) {
+    if (!this.featureMeans || !this.featureStds) return features;
+    const out = new Float64Array(this.inputDim);
+    for (let i = 0; i < this.inputDim; i++) {
+      const std = this.featureStds[i] > 1e-9 ? this.featureStds[i] : 1;
+      out[i] = ((features[i] ?? 0) - (this.featureMeans[i] ?? 0)) / std;
+    }
+    return out;
+  }
+
   // ─── Forward pass ─────────────────────────────────────────
 
-  score(features) {
+  _scorePrepped(x) {
     let z = this.bias;
     for (let i = 0; i < this.inputDim; i++) {
-      z += this.weights[i] * features[i];
+      z += this.weights[i] * x[i];
     }
     return sigmoid(z);
+  }
+
+  score(features) {
+    return this._scorePrepped(this._prep(features));
   }
 
   batchScore(featuresArray) {
@@ -129,15 +162,18 @@ class LogisticRegression {
    *        where weight_modifier = posWeight if y=1 else 1.0
    *   ∂L/∂b = (ŷ - y) × weight_modifier
    */
-  computeGradient(features, label, posWeight, l2) {
-    const yHat = this.score(features);
+  computeGradient(features, label, posWeight, l2, sampleWeight = 1.0) {
+    // Gradient must be taken w.r.t. the same (standardized) inputs the
+    // forward pass uses — z = w·x_std, so ∂z/∂w = x_std.
+    const x = this._prep(features);
+    const yHat = this._scorePrepped(x);
     const y = label;
 
-    // Loss = weighted BCE + L2
+    // Loss = weighted BCE + L2 (class weight × per-sample expectancy weight)
     const eps = 1e-10;
-    const bce = y > 0
+    const bce = (y > 0
       ? -posWeight * Math.log(yHat + eps)
-      : -Math.log(1 - yHat + eps);
+      : -Math.log(1 - yHat + eps)) * sampleWeight;
     let l2Penalty = 0;
     for (let i = 0; i < this.inputDim; i++) {
       l2Penalty += this.weights[i] * this.weights[i];
@@ -150,11 +186,11 @@ class LogisticRegression {
 
     // Gradient of BCE term
     const error = yHat - y;
-    const weightMod = y > 0 ? posWeight : 1.0;
+    const weightMod = (y > 0 ? posWeight : 1.0) * sampleWeight;
 
     const dw = new Float64Array(this.inputDim);
     for (let i = 0; i < this.inputDim; i++) {
-      dw[i] = error * weightMod * features[i] + l2 * this.weights[i];
+      dw[i] = error * weightMod * x[i] + l2 * this.weights[i];
     }
     const db = error * weightMod;
 
@@ -166,7 +202,7 @@ class LogisticRegression {
   /**
    * Train one batch with Adam optimizer.
    */
-  trainBatch(features, labels, lr = 0.001, l2 = 0.001, posWeight = 1.0) {
+  trainBatch(features, labels, lr = 0.001, l2 = 0.001, posWeight = 1.0, sampleWeights = null) {
     const n = features.length;
     if (n === 0) return { loss: 0, accuracy: 0 };
 
@@ -183,7 +219,7 @@ class LogisticRegression {
 
     for (let i = 0; i < n; i++) {
       const { loss, correct: c, dw: gradW, db: gradB } =
-        this.computeGradient(features[i], labels[i], posWeight, l2);
+        this.computeGradient(features[i], labels[i], posWeight, l2, sampleWeights?.[i] ?? 1.0);
 
       totalLoss += loss;
       correct += c;
@@ -223,6 +259,7 @@ class LogisticRegression {
       batchSize = 16,
       validationSplit = 0.2,
       patience = 5,
+      sampleWeights = null, // per-sample expectancy weights (Float64Array, aligned with features)
     } = opts;
 
     const n = features.length;
@@ -258,9 +295,12 @@ class LogisticRegression {
         const batchIdx = shuffled.slice(b, Math.min(b + batchSize, shuffled.length));
         const batchFeatures = batchIdx.map((i) => features[i]);
         const batchLabels = new Float64Array(batchIdx.map((i) => labels[i]));
+        const batchWeights = sampleWeights
+          ? new Float64Array(batchIdx.map((i) => sampleWeights[i] ?? 1))
+          : null;
 
         const { loss, accuracy } = this.trainBatch(
-          batchFeatures, batchLabels, lr, l2, posWeight,
+          batchFeatures, batchLabels, lr, l2, posWeight, batchWeights,
         );
         epochLoss += loss;
         epochAcc += accuracy;
@@ -344,6 +384,9 @@ class LogisticRegression {
       generation: this.generation,
       totalSamples: this.totalSamples,
       predictiveness: this.predictiveness,
+      cvEdge: this.cvEdge,
+      featureMeans: this.featureMeans ? Array.from(this.featureMeans) : null,
+      featureStds: this.featureStds ? Array.from(this.featureStds) : null,
       trainingLoss: this.trainingLoss.slice(-20),
     };
     writeFileSync(filepath, JSON.stringify(blob, null, 2));
@@ -363,6 +406,10 @@ class LogisticRegression {
       m.generation = raw.generation || 0;
       m.totalSamples = raw.totalSamples || 0;
       m.predictiveness = raw.predictiveness ?? 0;
+      m.cvEdge = raw.cvEdge ?? null;
+      if (Array.isArray(raw.featureMeans) && Array.isArray(raw.featureStds)) {
+        m.setStandardization(raw.featureMeans, raw.featureStds);
+      }
       m.trainingLoss = raw.trainingLoss || [];
       return m;
     } catch {
