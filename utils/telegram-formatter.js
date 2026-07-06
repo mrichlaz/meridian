@@ -805,6 +805,7 @@ export function formatHelp() {
     "  /lessons — recent saved lessons",
     "  /thresholds — see /thresholds above",
     "  /evolve — run threshold evolution",
+    "  /thresholdevolve — toggle threshold evolution (TVL/MC/%TP/%SL) on/off",
     "  /performance — win rate / avg PnL / total fees",
     "  /screening-stats — screening funnel stats",
     "  /hive — HiveMind sync status",

@@ -163,6 +163,9 @@ export const config = {
     solMode:               u.solMode               ?? false,
     // Auto-threshold evolution (takeProfitPct, stopLossPct, etc. from perf data)
     evolveEnabled:         u.evolveEnabled         ?? true,
+    // Toggle for threshold evolution specifically (TVL/MC/%TP/%SL auto-tuning)
+    // Signal weights (Darwin) and ML training run independently of this toggle.
+    thresholdEvolveEnabled: u.thresholdEvolveEnabled ?? true,
   },
 
   // ─── Strategy Mapping ───────────────────

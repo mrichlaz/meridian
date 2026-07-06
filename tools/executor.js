@@ -537,6 +537,7 @@ const toolMap = {
       pnlSanityMaxDiffPct: ["management", "pnlSanityMaxDiffPct"],
       solMode: ["management", "solMode"],
       evolveEnabled: ["management", "evolveEnabled"],
+      thresholdEvolveEnabled: ["management", "thresholdEvolveEnabled"],
       minSolToOpen: ["management", "minSolToOpen"],
       deployAmountSol: ["management", "deployAmountSol"],
       gasReserve: ["management", "gasReserve"],

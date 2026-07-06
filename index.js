@@ -1986,6 +1986,7 @@ function formatHelpText() {
     "/lessons — list recent saved lessons",
     "/thresholds — screening thresholds + stats",
     "/evolve — trigger threshold evolution",
+    "/thresholdevolve — toggle threshold evolution (TVL/MC/%TP/%SL) on/off",
     "/pause — stop cron cycles",
     "/resume — start cron cycles again",
     "/stop — shut down agent",
@@ -2648,27 +2649,57 @@ async function telegramHandler(msg) {
         await sendMessage(`Need ${needed} more closed position(s) to evolve (have ${perf?.total_positions_closed || 0}).`).catch(() => {});
         return;
       }
+      const thresholdEnabled = config.management.thresholdEvolveEnabled !== false;
       const { PATHS } = await import("./utils/paths.js");
       const lessonsData = JSON.parse((await import("fs")).readFileSync(PATHS.lessons, "utf8"));
-      const result = evolveThresholds(lessonsData.performance, config);
-      if (!result || Object.keys(result.changes).length === 0) {
-        await sendMessage("No threshold changes needed.").catch(() => {});
+
+      const lines = ["<b>Evolution Report</b>"];
+      lines.push(`  Threshold Evolution: <b>${thresholdEnabled ? "ON" : "OFF"}</b>`);
+      lines.push(`  Signal Weights (Darwin): <b>${config.darwin?.enabled ? "ON" : "OFF"}</b>`);
+      lines.push(`  ML Training: <b>${config.ml?.enabled ? "ON" : "OFF"}</b>`);
+
+      if (thresholdEnabled) {
+        const result = evolveThresholds(lessonsData.performance, config);
+        if (!result || Object.keys(result.changes).length === 0) {
+          lines.push("");
+          lines.push("No threshold changes needed.");
+        } else {
+          reloadScreeningThresholds();
+          lines.push("");
+          lines.push("<b>Thresholds Evolved</b>");
+          for (const [k, v] of Object.entries(result.changes)) {
+            lines.push(`  • <code>${k}</code>: ${v}`);
+          }
+          for (const [k, v] of Object.entries(result.rationale || {})) {
+            lines.push(`  <i>${k}: ${v}</i>`);
+          }
+          lines.push("");
+          lines.push("Saved to user-config.json and applied.");
+        }
       } else {
-        reloadScreeningThresholds();
-        const lines = ["<b>Thresholds Evolved</b>"];
-        for (const [k, v] of Object.entries(result.changes)) {
-          lines.push(`  • <code>${k}</code>: ${v}`);
-        }
-        for (const [k, v] of Object.entries(result.rationale || {})) {
-          lines.push(`  <i>${k}: ${v}</i>`);
-        }
         lines.push("");
-        lines.push("Saved to user-config.json and applied to live config.");
-        await sendHTML(lines.join("\n")).catch(() => {});
+        lines.push("Threshold evolution is paused. Use /thresholdevolve to re-enable.");
       }
+
+      await sendHTML(lines.join("\n")).catch(() => {});
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
+    return;
+  }
+
+  if (text === "/thresholdevolve" || text === "/threshold-evolve" || text === "/threshold-evolution") {
+    const current = config.management.thresholdEvolveEnabled !== false;
+    const next = !current;
+    await executeTool("update_config", {
+      changes: { thresholdEvolveEnabled: next },
+      reason: "Telegram slash command /thresholdevolve",
+    });
+    config.management.thresholdEvolveEnabled = next;
+    const status = next
+      ? "<b>ON</b> — threshold evolution (TVL/MC/%TP/%SL) is active"
+      : "<b>OFF</b> — threshold evolution paused, Darwin + ML still running";
+    await sendMessage(`Threshold Evolution: ${status}`).catch(() => {});
     return;
   }
 
@@ -3245,6 +3276,7 @@ Commands:
   /learn <addr>  Study top LPers from a specific pool address
   /thresholds    Show current screening thresholds + performance stats
   /evolve        Manually trigger threshold evolution from performance data
+  /thresholdevolve Toggle threshold evolution (TVL/MC/%TP/%SL) on/off
   /stop          Shut down
 `);
 
@@ -3415,6 +3447,18 @@ Focus on: hold duration, entry/exit timing, what win rates look like, whether sc
         const fs = await import("fs");
         const { PATHS } = await import("./utils/paths.js");
         const lessonsData = JSON.parse(fs.default.readFileSync(PATHS.lessons, "utf8"));
+        const thresholdEnabled = config.management.thresholdEvolveEnabled !== false;
+
+        console.log(`\nEvolution Report:`);
+        console.log(`  Threshold Evolution (TVL/MC/%TP/%SL): ${thresholdEnabled ? "ON" : "OFF"}`);
+        console.log(`  Signal Weights (Darwin): ${config.darwin?.enabled ? "ON" : "OFF"}`);
+        console.log(`  ML Training: ${config.ml?.enabled ? "ON" : "OFF"}`);
+
+        if (!thresholdEnabled) {
+          console.log(`\nThreshold evolution is paused. Use /thresholdevolve to re-enable.\n`);
+          return;
+        }
+
         const result = evolveThresholds(lessonsData.performance, config);
         if (!result || Object.keys(result.changes).length === 0) {
           console.log("\nNo threshold changes needed — current settings already match performance data.\n");
@@ -3427,6 +3471,21 @@ Focus on: hold duration, entry/exit timing, what win rates look like, whether sc
           console.log("\nSaved to user-config.json. Applied immediately.\n");
         }
       });
+      return;
+    }
+
+    if (input === "/thresholdevolve" || input === "/threshold-evolve") {
+      const current = config.management.thresholdEvolveEnabled !== false;
+      const next = !current;
+      await executeTool("update_config", {
+        changes: { thresholdEvolveEnabled: next },
+        reason: "CLI /thresholdevolve",
+      });
+      config.management.thresholdEvolveEnabled = next;
+      const status = next
+        ? "ON — threshold evolution (TVL/MC/%TP/%SL) is active"
+        : "OFF — threshold evolution paused, Darwin + ML still running";
+      console.log(`\nThreshold Evolution: ${status}\n`);
       return;
     }
 

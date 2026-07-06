@@ -483,6 +483,7 @@ const BOT_COMMANDS = [
   { command: "mltrain",    description: "Force an ML training pass" },
   { command: "mlpersonality", description: "Set ML personality preset" },
   { command: "evolve",     description: "Trigger threshold evolution from data" },
+  { command: "thresholdevolve", description: "Toggle threshold evolution (TVL/MC/%TP/%SL)" },
   { command: "pause",      description: "Stop cron cycles" },
   { command: "resume",     description: "Start cron cycles again" },
   { command: "sweep",      description: "Run wallet sweeper once (swap stray base tokens to SOL)" },

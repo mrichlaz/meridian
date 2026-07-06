@@ -166,15 +166,21 @@ export async function recordPerformance(perf) {
     });
   }
 
-  // Evolve thresholds every 5 closed positions
+  // Auto-evolve every 5 closed positions (only runs if evolveEnabled)
   if (data.performance.length % MIN_EVOLVE_POSITIONS === 0 && config.management.evolveEnabled !== false) {
-    const result = evolveThresholds(data.performance, config);
-    if (result?.changes && Object.keys(result.changes).length > 0) {
-      reloadScreeningThresholds();
-      log("evolve", `Auto-evolved thresholds: ${JSON.stringify(result.changes)}`);
+
+    // Threshold evolution — gated by thresholdEvolveEnabled
+    if (config.management.thresholdEvolveEnabled !== false) {
+      const result = evolveThresholds(data.performance, config);
+      if (result?.changes && Object.keys(result.changes).length > 0) {
+        reloadScreeningThresholds();
+        log("evolve", `Auto-evolved thresholds: ${JSON.stringify(result.changes)}`);
+      }
+    } else {
+      log("evolve", "Threshold evolution skipped (thresholdEvolveEnabled=false)");
     }
 
-    // Darwinian signal weight recalculation
+    // Darwinian signal weight recalculation — always runs
     if (config.darwin?.enabled) {
       const { recalculateWeights } = await import("./signal-weights.js");
       const wResult = recalculateWeights(data.performance, config);
@@ -183,7 +189,7 @@ export async function recordPerformance(perf) {
       }
     }
 
-    // ML model training
+    // ML model training — always runs
     if (config.ml?.enabled) {
       try {
         const { onModelTrained } = await import("./ml/emotions.js");
