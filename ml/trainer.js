@@ -43,6 +43,9 @@ const DEFAULT_CONFIG = {
   learningRate: 0.001,
   l2: 0.001,
   kFolds: 5,            // walk-forward folds (chronological, no shuffling)
+  // Train on the most recent N closes only (0 = full history). Old-regime
+  // trades teach a market that no longer exists — mirrors the evolve window.
+  trainWindowRecords: 500,
   saveCheckpoints: true,
   // Expectancy labeling: a trade only counts as a "win" if it cleared this
   // PnL hurdle (round-trip cost + minimum risk premium). pnl_pct > 0 alone
@@ -161,12 +164,27 @@ function computeValidationMetric(model, features, labels) {
   const recall = tp + fn > 0 ? tp / (tp + fn) : 0;
   const f1 = precision + recall > 0 ? 2 * precision * recall / (precision + recall) : 0;
 
+  // Rank lift — the metric that matches how the model is USED. The model is
+  // a ranker blended into the policy score, not a 0.5-threshold classifier:
+  // with a ~20% positive rate the majority base rate makes classification
+  // accuracy structurally unbeatable, while ranking skill (do high scores
+  // win more than low scores?) is exactly what raises deploy quality.
+  // lift = win rate of the top-scored half minus the bottom half, in pp.
+  let lift = null;
+  if (labels.length >= 8) {
+    const order = probs.map((_, i) => i).sort((a, b) => probs[b] - probs[a]);
+    const half = Math.floor(order.length / 2);
+    const winRate = (idxs) => idxs.reduce((s, i) => s + (labels[i] >= 0.5 ? 1 : 0), 0) / idxs.length;
+    lift = (winRate(order.slice(0, half)) - winRate(order.slice(order.length - half))) * 100;
+  }
+
   return {
     accuracy: Math.round(accuracy * 10000) / 100,
     precision: Math.round(precision * 100) / 100,
     recall: Math.round(recall * 100) / 100,
     f1: Math.round(f1 * 100) / 100,
     directionAccuracy: Math.round(accuracy * 10000) / 100,
+    lift: lift != null ? Math.round(lift * 100) / 100 : null,
   };
 }
 
@@ -186,7 +204,13 @@ export async function trainModel({ config: mlConfig, force = false } = {}) {
     return { trained: false, reason: "disabled" };
   }
 
-  const allSamples = loadTrainingData(cfg);
+  let allSamples = loadTrainingData(cfg);
+  const totalLabeled = allSamples.length;
+  const windowRecords = Math.max(0, Number(cfg.trainWindowRecords ?? 0));
+  if (windowRecords > 0 && allSamples.length > windowRecords) {
+    allSamples = allSamples.slice(-windowRecords); // chronological — keep most recent
+    log("ml_trainer", `Recency window: training on last ${allSamples.length} of ${totalLabeled} labeled closes`);
+  }
   if (allSamples.length < cfg.minSamples) {
     log("ml_trainer", `Insufficient data: ${allSamples.length} samples, need ${cfg.minSamples}`);
     return { trained: false, reason: "insufficient_data", sampleCount: allSamples.length };
@@ -253,6 +277,11 @@ export async function trainModel({ config: mlConfig, force = false } = {}) {
     foldCount: foldMetrics.length,
     baseRate: Math.round(baseRate * 100) / 100,
     edge: Math.round((wfAccuracy - baseRate) * 100) / 100,
+    // Out-of-sample rank lift averaged over folds that had one (>= 8 val samples).
+    lift: (() => {
+      const withLift = foldMetrics.filter((m) => m.lift != null);
+      return withLift.length ? avg(withLift, "lift") : null;
+    })(),
   };
 
   // Train final model on all data
@@ -272,13 +301,16 @@ export async function trainModel({ config: mlConfig, force = false } = {}) {
     sampleWeights: allWeights,
   });
 
-  // Persist the out-of-sample edge — this is what gates the blend lambda.
+  // Persist the out-of-sample metrics. cvLift (rank metric) is what gates
+  // the blend lambda — it matches the model's use as a ranker. cvEdge
+  // (classification accuracy vs base rate) is kept as a legacy diagnostic.
   finalModel.cvEdge = avgMetric.edge;
+  finalModel.cvLift = avgMetric.lift;
 
   // Save final model
   finalModel.save();
 
-  log("ml_trainer", `Walk-forward: avg acc=${avgMetric.accuracy}% (base rate ${avgMetric.baseRate}%, edge ${avgMetric.edge}pp) f1=${avgMetric.f1}. Final trained on all ${allSamples.length} samples.`);
+  log("ml_trainer", `Walk-forward: avg acc=${avgMetric.accuracy}% (base rate ${avgMetric.baseRate}%, edge ${avgMetric.edge}pp) rank lift=${avgMetric.lift != null ? `${avgMetric.lift}pp` : "n/a"} f1=${avgMetric.f1}. Final trained on ${allSamples.length} samples.`);
 
   if (cfg.saveCheckpoints) {
     saveCheckpoint(finalModel, {
@@ -294,6 +326,8 @@ export async function trainModel({ config: mlConfig, force = false } = {}) {
     trained: true,
     modelGeneration: finalModel.generation,
     sampleCount: allSamples.length,
+    totalLabeled,
+    trainWindowRecords: windowRecords,
     folds: k,
     cv: avgMetric,
     foldMetrics,

@@ -352,7 +352,7 @@ function normalizeConfigValue(key, value) {
     "gmgnApiKey",
   ]);
   const numberKeys = new Set([
-    "mlTrainEvery", "mlMinSamples", "mlBatchSize", "mlEpochs", "mlLearningRate",
+    "mlTrainEvery", "mlMinSamples", "mlTrainWindow", "mlBatchSize", "mlEpochs", "mlLearningRate",
     "policyMinFeeVolatilityRatio", "policyMinVolumePersistence", "policyToxicFlowPenalty",
     "policyNeutralMinScore", "policyRiskOffMinScore", "policyRiskOnMinScore", "policyShrinkRetryPct",
     "darwinWindowDays", "darwinRecalcEvery", "darwinBoost", "darwinDecay",
@@ -598,6 +598,7 @@ const toolMap = {
       mlEnabled: ["ml", "enabled", ["mlEnabled"]],
       mlTrainEvery: ["ml", "trainEvery", ["mlTrainEvery"]],
       mlMinSamples: ["ml", "minSamples", ["mlMinSamples"]],
+      mlTrainWindow: ["ml", "trainWindowRecords", ["mlTrainWindow"]],
       mlBatchSize: ["ml", "batchSize", ["mlBatchSize"]],
       mlEpochs: ["ml", "epochs", ["mlEpochs"]],
       mlLearningRate: ["ml", "learningRate", ["mlLearningRate"]],

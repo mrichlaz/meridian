@@ -149,6 +149,7 @@ export async function recordPerformance(perf) {
   if (perf.pool) {
     const { recordPoolDeploy } = await import("./pool-memory.js");
     recordPoolDeploy(perf.pool, {
+      position: perf.position,
       pool_name: perf.pool_name,
       base_mint: perf.base_mint,
       deployed_at: perf.deployed_at,

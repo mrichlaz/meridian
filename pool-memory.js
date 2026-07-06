@@ -99,6 +99,30 @@ function setBaseMintCooldown(db, baseMint, hours, reason) {
  * @param {string} deployData.strategy
  * @param {number} deployData.volatility
  */
+/**
+ * Post-deploy markout — the market maker's adverse-selection meter.
+ * Reads the position's own snapshot path and returns its net PnL% at
+ * deploy+15m and deploy+60m (nearest snapshot within tolerance). A pool
+ * whose deploys are consistently deep negative shortly after entry has
+ * informed sellers hitting the ladder — fee income won't cover that flow.
+ */
+function computeDeployMarkouts(entry, positionAddress, deployedAt) {
+  const t0 = Date.parse(deployedAt || "");
+  if (!Number.isFinite(t0) || !positionAddress) return { markout_15m: null, markout_60m: null };
+  const snaps = (entry.snapshots || []).filter((s) => s.position === positionAddress && s.pnl_pct != null);
+  const at = (mins, tolMins) => {
+    const target = t0 + mins * 60_000;
+    let best = null;
+    let bestDiff = tolMins * 60_000;
+    for (const s of snaps) {
+      const diff = Math.abs(Date.parse(s.ts) - target);
+      if (diff <= bestDiff) { best = s; bestDiff = diff; }
+    }
+    return best ? best.pnl_pct : null;
+  };
+  return { markout_15m: at(15, 10), markout_60m: at(60, 20) };
+}
+
 export function recordPoolDeploy(poolAddress, deployData) {
   if (!poolAddress) return;
 
@@ -137,6 +161,10 @@ export function recordPoolDeploy(poolAddress, deployData) {
     volatility_at_deploy: deployData.volatility ?? null,
   };
 
+  const markouts = computeDeployMarkouts(entry, deployData.position, deploy.deployed_at);
+  deploy.markout_15m = markouts.markout_15m;
+  deploy.markout_60m = markouts.markout_60m;
+
   entry.deploys.push(deploy);
   entry.total_deploys = entry.deploys.length;
   entry.last_deployed_at = deploy.closed_at;
@@ -157,6 +185,13 @@ export function recordPoolDeploy(poolAddress, deployData) {
   entry.adjusted_win_rate = adjusted.length > 0
     ? Math.round((adjusted.filter((d) => d.pnl_pct >= 0).length / adjusted.length) * 10000) / 100
     : 0;
+
+  // Aggregate markouts (adverse-selection meter) across deploys that have one
+  for (const [key, aggKey] of [["markout_15m", "avg_markout_15m"], ["markout_60m", "avg_markout_60m"]]) {
+    const vals = entry.deploys.map((d) => d[key]).filter((v) => v != null);
+    entry[aggKey] = vals.length ? Math.round((vals.reduce((s, v) => s + v, 0) / vals.length) * 100) / 100 : null;
+    entry[`${aggKey}_n`] = vals.length;
+  }
 
   if (deployData.base_mint && !entry.base_mint) {
     entry.base_mint = deployData.base_mint;
@@ -338,6 +373,14 @@ export function recallForPool(poolAddress) {
   // Deploy history summary
   if (entry.total_deploys > 0) {
     lines.push(`POOL MEMORY [${entry.name}]: ${entry.total_deploys} past deploy(s), avg PnL ${entry.avg_pnl_pct}%, win rate ${entry.win_rate}%, last outcome: ${entry.last_outcome}`);
+  }
+
+  // Adverse-selection meter: consistently negative post-deploy markout means
+  // informed sellers hit this pool's ladders faster than fees accrue.
+  if (entry.avg_markout_15m != null || entry.avg_markout_60m != null) {
+    const fmt = (v) => (v == null ? "?" : `${v >= 0 ? "+" : ""}${v}%`);
+    const n = Math.max(entry.avg_markout_15m_n || 0, entry.avg_markout_60m_n || 0);
+    lines.push(`MARKOUT (avg net PnL after deploy, ${n} deploy(s)): 15m ${fmt(entry.avg_markout_15m)}, 60m ${fmt(entry.avg_markout_60m)}${(entry.avg_markout_60m ?? 0) < -2 ? " — TOXIC FLOW: entries bleed immediately here" : ""}`);
   }
 
   if (entry.cooldown_until && new Date(entry.cooldown_until) > new Date()) {

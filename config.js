@@ -86,7 +86,12 @@ export const config = {
   // ─── Risk Limits ─────────────────────────
   risk: {
     maxPositions:    u.maxPositions    ?? 3,
-    maxDeployAmount: u.maxDeployAmount ?? 50,
+    // Per-position size cap (SOL). Note from the 30d export: $200-400
+    // deploys averaged +0.46% while >$400 deploys averaged -0.35% — bigger
+    // ladders are a larger share of pool TVL, diluting fee share and adding
+    // exit impact. Tune via /setcfg maxDeployAmount (2.5 ≈ the empirical
+    // sweet spot's upper edge if you want the conservative setting).
+    maxDeployAmount: u.maxDeployAmount ?? 5,
   },
 
   // ─── Pool Screening Thresholds ───────────
@@ -310,6 +315,10 @@ export const config = {
     enabled:            u.mlEnabled            ?? false,
     trainEvery:         u.mlTrainEvery         ?? 5,     // retrain every N closes
     minSamples:         u.mlMinSamples         ?? 10,    // min positions before training
+    // Train on the most recent N closed positions only (0 = full history).
+    // Mirrors EVOLVE_WINDOW_RECORDS in lessons.js: old-regime trades teach
+    // the model a market that no longer exists.
+    trainWindowRecords: u.mlTrainWindow        ?? 500,
     batchSize:          u.mlBatchSize          ?? 16,
     // 5 epochs with patience 5 never converged on ~1k samples; early
     // stopping still cuts training short once validation loss flattens.

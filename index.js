@@ -1,7 +1,9 @@
 import "./envcrypt.js";
 import cron from "node-cron";
 import readline from "readline";
+import fs from "fs";
 import path from "path";
+import { PATHS } from "./utils/paths.js";
 import { fileURLToPath } from "url";
 import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
@@ -134,6 +136,18 @@ let _cronTasks = [];
 let _managementBusy = false; // prevents overlapping management cycles
 let _screeningBusy = false;  // prevents overlapping screening cycles
 let _screeningLastTriggered = 0; // epoch ms — prevents management from spamming screening
+
+// Dead-man heartbeat: written after every management cycle (and at startup)
+// so scripts/watchdog.mjs — run from system cron, OUTSIDE this process — can
+// alert when the daemon dies or hangs while positions are open.
+function writeHeartbeat(source) {
+  try {
+    fs.writeFileSync(
+      path.join(PATHS.data, "heartbeat.json"),
+      JSON.stringify({ at: new Date().toISOString(), source, pid: process.pid })
+    );
+  } catch {}
+}
 let _studyFailStreak = 0;    // consecutive LP-study timeouts across candidates
 let _studySkipUntil = 0;     // epoch ms — circuit breaker: skip LP studies until then
 let _pnlPollCalmSkips = 0;   // ticks to skip while all positions are calm (CPU saver)
@@ -476,6 +490,7 @@ RULES:
     mgmtReport = `Management cycle failed: ${error.message}`;
   } finally {
     _managementBusy = false;
+    writeHeartbeat("management");
     if (!silent && telegramEnabled()) {
       if (mgmtReport) {
         if (liveMessage) {
@@ -1234,6 +1249,7 @@ IMPORTANT:
 
 export function startCronJobs() {
   stopCronJobs(); // stop any running tasks before (re)starting
+  writeHeartbeat("startup"); // fresh boot isn't stale to the watchdog
 
   const mgmtTask = cron.schedule(`*/${Math.max(1, config.schedule.managementIntervalMin)} * * * *`, async () => {
     if (_managementBusy) return;
@@ -2778,17 +2794,28 @@ async function telegramHandler(msg) {
       }
       const finalLossValue = result.finalLoss?.loss ?? result.finalLoss?.total ?? result.finalLoss?.totalLoss ?? result.finalLoss;
       const loss = finalLossValue != null && Number.isFinite(Number(finalLossValue)) ? Number(finalLossValue).toFixed(4) : "N/A";
-      const cvAcc = result.cv?.accuracy != null ? `${result.cv.accuracy}%` : "n/a";
-      const cvF1 = result.cv?.f1 != null ? result.cv.f1 : "n/a";
+      const cv = result.cv || {};
+      const windowNote = result.totalLabeled != null && result.totalLabeled > result.sampleCount
+        ? ` (most recent of ${result.totalLabeled} labeled — mlTrainWindow ${result.trainWindowRecords})`
+        : "";
+      const lift = cv.lift;
+      const lambdaNote = lift == null
+        ? "λ pinned at 0.1 (no rank lift computed — validation folds too small)"
+        : lift > 0
+          ? `λ ramps: ${(0.1 + Math.min(0.4, (lift / 25) * 0.4)).toFixed(2)} on next scoring pass`
+          : "λ stays at 0.1 — high-scored trades did not out-win low-scored ones on unseen data";
       const lines = [
         "<b>🧠 ML Training</b>",
-        `Trained on ${result.sampleCount} samples`,
+        `Trained on ${result.sampleCount} labeled closed positions${windowNote}`,
         `Final loss: ${loss}`,
-        `K-fold: ${result.folds || result.cv?.foldCount || "n/a"}`,
-        `CV accuracy: ${cvAcc}`,
-        `CV F1: ${cvF1}`,
         "",
-        "Model checkpoint saved to <code>data/ml/ml-model.json</code>.",
+        `<b>Walk-forward (${cv.foldCount ?? "?"} chronological folds, out-of-sample):</b>`,
+        `  Rank lift (gates λ): ${lift != null ? `${lift >= 0 ? "+" : ""}${lift}pp` : "n/a"}`,
+        `  Accuracy ${cv.accuracy ?? "n/a"}% vs base rate ${cv.baseRate ?? "n/a"}% (edge ${cv.edge != null ? `${cv.edge >= 0 ? "+" : ""}${cv.edge}pp` : "n/a"} — diagnostic only)`,
+        `  F1: ${cv.f1 ?? "n/a"}`,
+        `  ${lambdaNote}`,
+        "",
+        "Model saved to <code>data/ml/ml-model.json</code>. /ml shows the full status.",
       ];
       await sendHTML(lines.join("\n")).catch(() => {});
     } catch (e) {

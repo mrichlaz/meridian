@@ -93,6 +93,7 @@ class LogisticRegression {
     // Out-of-sample skill: walk-forward accuracy minus majority base rate
     // (percentage points). Gates the ML blend lambda; null = never validated.
     this.cvEdge = null;
+    this.cvLift = null;
     // Dataset standardization stats (see setStandardization)
     this.featureMeans = null;
     this.featureStds = null;
@@ -385,6 +386,7 @@ class LogisticRegression {
       totalSamples: this.totalSamples,
       predictiveness: this.predictiveness,
       cvEdge: this.cvEdge,
+      cvLift: this.cvLift ?? null,
       featureMeans: this.featureMeans ? Array.from(this.featureMeans) : null,
       featureStds: this.featureStds ? Array.from(this.featureStds) : null,
       trainingLoss: this.trainingLoss.slice(-20),
@@ -407,6 +409,7 @@ class LogisticRegression {
       m.totalSamples = raw.totalSamples || 0;
       m.predictiveness = raw.predictiveness ?? 0;
       m.cvEdge = raw.cvEdge ?? null;
+      m.cvLift = raw.cvLift ?? null;
       if (Array.isArray(raw.featureMeans) && Array.isArray(raw.featureStds)) {
         m.setStandardization(raw.featureMeans, raw.featureStds);
       }

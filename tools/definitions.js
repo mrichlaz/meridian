@@ -404,7 +404,7 @@ Models: managementModel, screeningModel, generalModel, temperature, maxTokens, m
 Strategy: strategy, minBinsBelow, maxBinsBelow, defaultBinsBelow, disableAdaptiveOverride, adaptiveMinAgeHours, adaptiveMaxAgeHours, adaptiveMinVolatility, minSafeBinsBelow
 Auto-swap (base→SOL on close/claim): autoSwapAfterClaim, autoSwapRetryAttempts, autoSwapRetryDelayMs, autoSwapMinUsdFloor
 Wallet sweep (periodic scan for stray base tokens): walletSweepIntervalSec
-ML (opt-in scoring + emotion): mlEnabled, mlTrainEvery, mlMinSamples, mlBatchSize, mlEpochs, mlLearningRate, mlPersonality
+ML (opt-in scoring + emotion): mlEnabled, mlTrainEvery, mlMinSamples, mlTrainWindow (train on most recent N closes, 0=all), mlBatchSize, mlEpochs, mlLearningRate, mlPersonality
 Darwin (signal weighting): darwinEnabled, darwinWindowDays, darwinRecalcEvery, darwinBoost, darwinDecay, darwinFloor, darwinCeiling, darwinMinSamples
 HiveMind (cross-agent lessons): hiveMindUrl, hiveMindApiKey, agentId, hiveMindPullMode
 Agent Meridian API: publicApiKey, agentMeridianApiUrl, lpAgentRelayEnabled

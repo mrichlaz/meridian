@@ -282,8 +282,13 @@ export function explainScore(candidate, opts = {}) {
 
 /**
  * Get the current blend lambda (weight of ML vs heuristic).
- * Starts low (0.1) and ramps up only with demonstrated OUT-OF-SAMPLE skill:
- * cvEdge = walk-forward accuracy minus the majority base rate (pp).
+ * Starts low (0.1) and ramps up only with demonstrated OUT-OF-SAMPLE skill.
+ * Primary gate: cvLift — walk-forward RANK lift (top-half vs bottom-half win
+ * rate of model-scored validation trades, in pp). This matches how the model
+ * is used: a ranker blended into the policy score, not a 0.5-threshold
+ * classifier. With a ~20% positive rate the majority base rate makes
+ * classification accuracy (cvEdge) structurally unbeatable, so cvEdge is
+ * only a fallback for models trained before cvLift existed.
  * The old gate ("predictiveness" = fraction of outputs far from 0.5) measured
  * confidence, not skill — an overconfident wrong model maxed it out.
  */
@@ -292,9 +297,16 @@ export function getBlendLambda() {
 
   try {
     const model = LogisticRegression.load();
-    if (model && model.totalSamples > 10 && Number.isFinite(model.cvEdge) && model.cvEdge > 0) {
-      // +10pp of real edge → lambda 0.5 (cap). No edge → stay at 0.1.
-      _blendLambda = 0.1 + Math.min(0.4, (model.cvEdge / 10) * 0.4);
+    if (model && model.totalSamples > 10) {
+      if (Number.isFinite(model.cvLift)) {
+        // +25pp out-of-sample lift → lambda 0.5 (cap). No lift → stay at 0.1.
+        if (model.cvLift > 0) {
+          _blendLambda = 0.1 + Math.min(0.4, (model.cvLift / 25) * 0.4);
+        }
+      } else if (Number.isFinite(model.cvEdge) && model.cvEdge > 0) {
+        // Legacy models without a rank metric: +10pp edge → lambda 0.5 (cap).
+        _blendLambda = 0.1 + Math.min(0.4, (model.cvEdge / 10) * 0.4);
+      }
     }
   } catch {}
 

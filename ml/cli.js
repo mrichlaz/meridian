@@ -59,7 +59,7 @@ export function mlStatus(config) {
 
   // Model
   if (model) {
-    lines.push(`Model: gen ${model.generation}, ${model.totalSamples} samples, dim ${model.inputDim}/${FEATURE_COUNT}`);
+    lines.push(`Model: gen ${model.generation}, ${model.totalSamples} gradient samples (cumulative across retrains — NOT distinct positions), dim ${model.inputDim}/${FEATURE_COUNT}`);
     if (model.inputDim !== FEATURE_COUNT) lines.push(`  Warning: model feature dimension is old; run /ml-train to use new policy/flow features.`);
     const recentLoss = model.trainingLoss?.[model.trainingLoss.length - 1];
     if (recentLoss) {
@@ -90,7 +90,7 @@ export function mlStatus(config) {
       }))
       .sort((a, b) => a.score - b.score);
     lines.push("");
-    lines.push("── ML Predictiveness (score quintiles, low → high) ──");
+    lines.push("── ML Predictiveness (score quintiles, low → high — IN-SAMPLE: final model scoring its own training data; the walk-forward lift below is the honest number) ──");
     const q = 5;
     const size = Math.floor(scored.length / q) || 1;
     let bottomWr = null;
@@ -110,13 +110,21 @@ export function mlStatus(config) {
       const lift = topWr - bottomWr;
       lines.push(`Lift (Q5 − Q1 win rate): ${lift >= 0 ? "+" : ""}${lift}pp ${lift >= 10 ? "— model separates ✅" : lift > 0 ? "— weak separation" : "— NO separation ❌"}`);
     }
-    if (Number.isFinite(model.cvEdge)) {
-      lines.push(`Walk-forward edge vs base rate: ${model.cvEdge >= 0 ? "+" : ""}${model.cvEdge}pp`);
+    if (Number.isFinite(model.cvLift)) {
+      lines.push(`Walk-forward rank lift (out-of-sample, gates λ): ${model.cvLift >= 0 ? "+" : ""}${model.cvLift}pp`);
+      if (Number.isFinite(model.cvEdge)) {
+        lines.push(`Walk-forward classification edge vs base rate (diagnostic only): ${model.cvEdge >= 0 ? "+" : ""}${model.cvEdge}pp`);
+      }
+      if (model.cvLift <= 0) {
+        lines.push(`λ stays at 0.1 until out-of-sample rank lift is positive — high-scored trades must actually win more than low-scored ones on unseen data.`);
+      }
+    } else if (Number.isFinite(model.cvEdge)) {
+      lines.push(`Walk-forward edge vs base rate: ${model.cvEdge >= 0 ? "+" : ""}${model.cvEdge}pp (legacy metric — retrain via /ml-train to compute rank lift, which now gates λ)`);
       if (model.cvEdge <= 0) {
-        lines.push(`λ stays at 0.1 until walk-forward edge is positive — the model hasn't beaten the base rate out-of-sample yet.`);
+        lines.push(`λ stays at 0.1 until out-of-sample skill is positive.`);
       }
     } else {
-      lines.push(`No walk-forward validation recorded — λ is pinned at 0.1 until a full retrain runs (automatic every 5 closes, or run /ml-train). λ only ramps on positive out-of-sample edge.`);
+      lines.push(`No walk-forward validation recorded — λ is pinned at 0.1 until a full retrain runs (automatic every 5 closes, or run /ml-train). λ only ramps on positive out-of-sample rank lift.`);
     }
   }
 
