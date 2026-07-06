@@ -400,7 +400,7 @@ Policy engine (deterministic screening gate): policyEnabled, policyMinFeeVolatil
 PnL poller: pnlSource, pnlRpcUrl, pnlPollIntervalSec, pnlDepositCacheTtlSec
 Risk: maxPositions, maxDeployAmount
 Schedule: managementIntervalMin, screeningIntervalMin, healthCheckIntervalMin
-Models: managementModel, screeningModel, generalModel, temperature, maxTokens, maxSteps
+Models: managementModel, screeningModel, generalModel, temperature, maxTokens, maxSteps, toolChoice
 Strategy: strategy, minBinsBelow, maxBinsBelow, defaultBinsBelow, disableAdaptiveOverride, adaptiveMinAgeHours, adaptiveMaxAgeHours, adaptiveMinVolatility, minSafeBinsBelow
 Auto-swap (base→SOL on close/claim): autoSwapAfterClaim, autoSwapRetryAttempts, autoSwapRetryDelayMs, autoSwapMinUsdFloor
 Wallet sweep (periodic scan for stray base tokens): walletSweepIntervalSec

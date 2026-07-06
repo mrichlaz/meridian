@@ -255,6 +255,12 @@ export const config = {
     temperature: u.temperature ?? 0.373,
     maxTokens:   u.maxTokens   ?? 4096,
     maxSteps:    u.maxSteps    ?? 20,
+    // Default "auto" so the LLM freely chooses tools / final answers. Set to
+    // "required" in user-config.json to opt back into the strict step-0
+    // tool-forcing behavior (forces a tool call on step 0 for action intents).
+    // Claude is always forced to "auto" regardless of this setting because
+    // Anthropic does not accept tool_choice="required".
+    toolChoice:     ["auto", "required"].includes(u.toolChoice) ? u.toolChoice : "auto",
     managementModel: u.managementModel ?? process.env.LLM_MODEL ?? "openrouter/healer-alpha",
     screeningModel:  u.screeningModel  ?? process.env.LLM_MODEL ?? "openrouter/hunter-alpha",
     generalModel:    u.generalModel    ?? process.env.LLM_MODEL ?? "openrouter/healer-alpha",

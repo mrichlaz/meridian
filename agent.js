@@ -155,6 +155,15 @@ function isThinkingModeToolChoiceError(error) {
   return /thinking mode does not support/i.test(message) && /tool_choice/i.test(message);
 }
 
+// Detect Claude models by name. Used to apply Claude-specific request quirks:
+//   - Anthropic deprecated `temperature` on Sonnet 4.5+, so we must omit it
+//   - Anthropic does not accept tool_choice: "required", so we must stay on "auto"
+// Model names that flow through an OpenAI-compat proxy are matched as-is,
+// e.g. "claude-sonnet-4-5", "anthropic/claude-3-5-sonnet", "claude-opus-4".
+function isClaudeModel(model) {
+  return /(^|\/)claude/i.test(String(model || ""));
+}
+
 /**
  * Core ReAct agent loop.
  *
@@ -188,6 +197,28 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
   const ONCE_PER_SESSION = new Set(["deploy_position", "swap_token", "close_position"]);
   // These lock after first attempt regardless of success — retrying them is always wrong
   const NO_RETRY_TOOLS = new Set(["deploy_position"]);
+  // Tools that mutate wallet/state/policy. When `mustUseRealTool` is set, the
+  // model must invoke at least one of these before being allowed to emit a
+  // final answer — even if other (research) tools were called first. This closes
+  // the gap where the model calls only research tools (e.g. get_wallet_balance)
+  // and then returns a textual "decision" without ever invoking the action tool.
+  const ACTION_TOOL_NAMES = new Set([
+    // LP positions
+    "deploy_position", "close_position", "claim_fees", "swap_token",
+    // Wallet & config
+    "update_config", "self_update",
+    // Smart wallets
+    "add_smart_wallet", "remove_smart_wallet",
+    // Lessons
+    "add_lesson", "pin_lesson", "unpin_lesson", "clear_lessons",
+    // Strategy
+    "add_strategy", "remove_strategy", "set_active_strategy",
+    // Notes
+    "set_position_note", "add_pool_note",
+    // Blocklists
+    "add_to_blacklist", "remove_from_blacklist",
+    "block_deployer", "unblock_deployer",
+  ]);
   const firedOnce = new Set();
   // Reversible central guard: block exact duplicate tool calls in the same
   // agent run unless the tool is explicitly allowed to repeat. This does NOT
@@ -226,6 +257,9 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
   const screenerDistinctResearchCalls = new Set();
   const mustUseRealTool = shouldRequireRealToolUse(goal, agentType, interactive);
   let sawToolCall = false;
+  // Tracks whether ANY mutating (action) tool was invoked this cycle. Distinct
+  // from sawToolCall so research-only tool calls don't satisfy an action intent.
+  let sawActionToolCall = false;
   let noToolRetryCount = 0;
   // Stays true for the whole run once a thinking-mode provider rejects tool_choice
   let omitToolChoice = false;
@@ -245,9 +279,23 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
       const EMPTY_RESPONSE_FALLBACK = "nvidia/openai/gpt-oss-120b";
       let response;
       let usedModel = activeModel;
-      // Force a tool call on step 0 for action intents — prevents the model from inventing deploy/close outcomes
+      // ACTION_INTENTS captures the LP-action vocabulary; used to drive the
+      // step-0 "required" tool forcing when config.llm.toolChoice === "required".
       const ACTION_INTENTS = /\b(deploy|open|add liquidity|close|exit|withdraw|claim|swap|block|unblock)\b/i;
-      let toolChoice = (step === 0 && (ACTION_INTENTS.test(goal) || mustUseRealTool)) ? "required" : "auto";
+      // Claude doesn't accept tool_choice="required"; stay on "auto" so we don't
+      // trigger an avoidable 400 from the proxy. Fallback models (stepfun,
+      // nvidia/gpt-oss) are not Claude so this check is safe for them.
+      const claudeMode = isClaudeModel(activeModel);
+      // Default: "auto". The model freely chooses tools vs final answers. The
+      // `sawActionToolCall` guard + reminder ladder below still enforces that
+      // action intents produce a real tool call before a final answer. Set
+      // `toolChoice: "required"` in user-config.json → llm to opt back into the
+      // strict step-0 tool-forcing behavior for non-Claude models.
+      const baseToolChoice = config.llm.toolChoice ?? "auto";
+      const strictStep0 = baseToolChoice === "required"
+        && step === 0
+        && (ACTION_INTENTS.test(goal) || mustUseRealTool);
+      let toolChoice = claudeMode ? "auto" : (strictStep0 ? "required" : "auto");
       // Tracks whether the active provider supports tool_choice: "required".
       // First attempt that hits a "required" rejection flips this false and
       // avoids re-logging the same fallback on every subsequent attempt.
@@ -255,13 +303,20 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
 
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
+          // Recompute per attempt because `usedModel` can flip to FALLBACK_MODEL
+          // after a 502/503/529, and we must keep the request shape consistent
+          // with the model family currently in use.
+          const requestIsClaude = isClaudeModel(usedModel);
           const reqParams = {
             model: usedModel,
             messages,
             tools: disableToolsForRetry ? undefined : getToolsForRole(agentType, goal),
-            temperature: config.llm.temperature,
+            // Anthropic deprecated `temperature` on Sonnet 4.5+. Omit it for
+            // Claude rather than letting the proxy forward a rejected field.
+            ...(requestIsClaude ? {} : { temperature: config.llm.temperature }),
             max_tokens: maxOutputTokens ?? config.llm.maxTokens,
           };
+          if (requestIsClaude && toolChoice === "required") toolChoice = "auto";
           if (disableToolsForRetry) delete reqParams.tools;
           if (!omitToolChoice && !disableToolsForRetry) reqParams.tool_choice = toolChoice;
           // Stream the response so long-running reasoning models (e.g. MiniMax
@@ -432,25 +487,35 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           log("agent", msg.content);
           return { content: msg.content, userMessage: goal };
         }
-        if (mustUseRealTool && !sawToolCall) {
+        if (mustUseRealTool && !sawActionToolCall) {
           noToolRetryCount += 1;
           messages.pop();
-          log("agent", `Rejected no-tool final answer (${noToolRetryCount}/2) for tool-required request`);
-          if (noToolRetryCount >= 2) {
+          // Bumped cap from 2 to 3: weaker models sometimes need an extra
+          // reminder before they convert a textual answer into a real tool call.
+          const NO_TOOL_RETRY_CAP = 3;
+          // Reminder text enumerates the LP/mutating tools so the model can
+          // match the goal to a tool name without guessing. Research-only
+          // tools (get_*, list_*, search_*, *_memory, performance, top_lpers,
+          // study_*) intentionally do NOT appear here — they cannot satisfy an
+          // action intent.
+          const LP_ACTION_TOOLS_HINT = "deploy_position, close_position, claim_fees, swap_token, update_config, self_update, add_smart_wallet, remove_smart_wallet, add_lesson, pin_lesson, unpin_lesson, clear_lessons, add_strategy, remove_strategy, set_active_strategy, set_position_note, add_pool_note, add_to_blacklist, remove_from_blacklist, block_deployer, unblock_deployer";
+          log("agent", `Rejected no-action-tool final answer (${noToolRetryCount}/${NO_TOOL_RETRY_CAP}) for tool-required request`);
+          if (noToolRetryCount >= NO_TOOL_RETRY_CAP) {
             return {
-              content: "I couldn't complete that reliably because no tool call was made. Please retry after checking the logs.",
+              content: `I couldn't complete that reliably because no mutating tool was called after ${NO_TOOL_RETRY_CAP} nudges. Available LP/mutating tools: ${LP_ACTION_TOOLS_HINT}. Try again or use a different model if this repeats.`,
               userMessage: goal,
             };
           }
+          const reminder = providerMode === "system"
+            ? (agentType === "SCREENER" && screenerTopCandidatesLoaded
+                ? `Reminder: you already have the screened candidate set${screenerCandidateCount != null ? ` (${screenerCandidateCount} candidate(s))` : ""}. You must not answer this from memory or inference. Do exactly one of the following NOW: (1) call deploy_position for the best survivor, (2) return a final NO DEPLOY decision with specific evidence from the candidate data, or (3) call one new distinct research tool only if it will directly change DEPLOY vs NO DEPLOY.`
+                : `Reminder: this is an action request that requires real on-chain tool execution or live tool-backed data. You must not answer from memory or inference. Call the matching action tool before producing a final answer. Available LP/mutating tools: ${LP_ACTION_TOOLS_HINT}. Research-only tools (get_*, list_*, search_*) cannot satisfy this request.`)
+            : (agentType === "SCREENER" && screenerTopCandidatesLoaded
+                ? `[SYSTEM REMINDER]\nYou already have the screened candidate set${screenerCandidateCount != null ? ` (${screenerCandidateCount} candidate(s))` : ""}. You must not answer this from memory or inference. Do exactly one of the following NOW: (1) call deploy_position for the best survivor, (2) return a final NO DEPLOY decision with specific evidence from the candidate data, or (3) call one new distinct research tool only if it will directly change DEPLOY vs NO DEPLOY.`
+                : `[SYSTEM REMINDER]\nThis is an action request that requires real on-chain tool execution or live tool-backed data. You must not answer this from memory or inference. Call the matching action tool before producing a final answer. Available LP/mutating tools: ${LP_ACTION_TOOLS_HINT}. Research-only tools (get_*, list_*, search_*) cannot satisfy this request.`);
           messages.push({
             role: providerMode === "system" ? "system" : "user",
-            content: providerMode === "system"
-              ? (agentType === "SCREENER" && screenerTopCandidatesLoaded
-                  ? `You already have the screened candidate set${screenerCandidateCount != null ? ` (${screenerCandidateCount} candidate(s))` : ""}. Do not answer vaguely. Do exactly one of the following now: (1) call deploy_position for the best survivor, (2) return a final NO DEPLOY decision with specific evidence from the candidate data, or (3) call one new distinct research tool only if it will directly change DEPLOY vs NO DEPLOY.`
-                  : "You have not used any tool yet. This request requires real tool execution or live tool-backed data. Do not answer from memory or inference. Call the appropriate tool first, then report only the real result.")
-              : (agentType === "SCREENER" && screenerTopCandidatesLoaded
-                  ? `[SYSTEM REMINDER]\nYou already have the screened candidate set${screenerCandidateCount != null ? ` (${screenerCandidateCount} candidate(s))` : ""}. Do not answer vaguely. Do exactly one of the following now: (1) call deploy_position for the best survivor, (2) return a final NO DEPLOY decision with specific evidence from the candidate data, or (3) call one new distinct research tool only if it will directly change DEPLOY vs NO DEPLOY.`
-                  : "[SYSTEM REMINDER]\nYou have not used any tool yet. This request requires real tool execution or live tool-backed data. Do not answer from memory or inference. Call the appropriate tool first, then report only the real result."),
+            content: reminder,
           });
           continue;
         }
@@ -600,6 +665,13 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
         // For close/swap: only lock on success so genuine failures can be retried
         if (NO_RETRY_TOOLS.has(functionName)) firedOnce.add(functionName);
         else if (ONCE_PER_SESSION.has(functionName) && result.success === true) firedOnce.add(functionName);
+        // Mark any mutating tool call so the action-intent no-tool guard above
+        // can distinguish "researched then answered" from "actually took action".
+        // Set on call (not on success) so a safety-blocked deploy still counts
+        // as an attempt and prevents an indefinite no-tool retry loop.
+        if (ACTION_TOOL_NAMES.has(functionName)) {
+          sawActionToolCall = true;
+        }
 
         return {
           role: "tool",

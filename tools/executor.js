@@ -556,6 +556,7 @@ const toolMap = {
       temperature: ["llm", "temperature"],
       maxTokens: ["llm", "maxTokens"],
       maxSteps: ["llm", "maxSteps"],
+      toolChoice: ["llm", "toolChoice"],
       // strategy
       strategy: ["strategy", "strategy"],
       binsBelow: ["strategy", "maxBinsBelow", ["maxBinsBelow"]],
