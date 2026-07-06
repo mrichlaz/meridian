@@ -165,7 +165,11 @@ export const config = {
     evolveEnabled:         u.evolveEnabled         ?? true,
     // Toggle for threshold evolution specifically (TVL/MC/%TP/%SL auto-tuning)
     // Signal weights (Darwin) and ML training run independently of this toggle.
-    thresholdEvolveEnabled: u.thresholdEvolveEnabled ?? true,
+    // Normalize: older builds persisted this as 0/"false" via number coercion —
+    // treat anything falsy-shaped as false so a stale value can't re-enable evolution.
+    thresholdEvolveEnabled: u.thresholdEvolveEnabled === undefined
+      ? true
+      : !(u.thresholdEvolveEnabled === false || u.thresholdEvolveEnabled === 0 || u.thresholdEvolveEnabled === "false" || u.thresholdEvolveEnabled === "0"),
   },
 
   // ─── Strategy Mapping ───────────────────

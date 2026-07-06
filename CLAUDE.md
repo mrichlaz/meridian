@@ -412,7 +412,7 @@ Exit-rule specifics that differ from the tables above:
 - **Rule 6** in `getDeterministicCloseRule`: active_bin below the whole range (fully converted inventory) → close after `belowRangeExitMinutes` (default 10), much faster than `outOfRangeWaitMinutes`.
 - **Emergency poll bypass**: STOP_LOSS / Rule 1 / Rule 6 alerts from the PnL poller use a 90s cooldown (`EMERGENCY_POLL_COOLDOWN_MS`) instead of the shared management-interval cooldown.
 - **evolveThresholds guardrails**: TP evolution is skipped while trailing TP is on (winner PnL is censored by the trailing exit — evolving toward it collapses TP to the floor); SL places itself beyond the loss-tail p90, banded [-20, -5] by THRESHOLD_SCHEMA.
-- **Adding a runtime-tunable config key requires FOUR places**: `config.js` (default), executor `CONFIG_MAP`, `tools/definitions.js` update_config VALID KEYS text (or the LLM refuses the key), and optionally the `/settings` menu (`settingValue` + page rows + step clamps in `applySettingsMenuCallback` in `index.js`).
+- **Adding a runtime-tunable config key requires FOUR places**: `config.js` (default), executor `CONFIG_MAP`, `tools/definitions.js` update_config VALID KEYS text (or the LLM refuses the key), and optionally the `/settings` menu (`settingValue` + page rows + step clamps in `applySettingsMenuCallback` in `index.js`). **Non-numeric keys have a FIFTH place**: the `booleanKeys`/`stringKeys`/`arrayKeys` sets in `normalizeConfigValue` (executor.js) — the fallback coercion is `coerceFiniteNumber`, so a missed boolean key turns `false` into `0`, which every `!== false` gate treats as enabled (this silently re-enabled threshold evolution after restart).
 
 ## Known issues / tech debt (verified by reading the code)
 

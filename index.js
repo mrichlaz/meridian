@@ -28,7 +28,7 @@ import {
   createLiveMessage,
 } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, effectiveLossPnlPct, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
 import { logScreeningSnapshot, summarizeScreeningSnapshots, readScreeningSnapshots } from "./screening-snapshot.js";
@@ -180,7 +180,7 @@ function schedulePeakConfirmation(positionAddress) {
     try {
       const result = await getMyPositions({ force: false, silent: true }).catch(() => null);
       const position = result?.positions?.find((p) => p.position === positionAddress);
-      resolvePendingPeak(positionAddress, position?.pnl_pct ?? null, TRAILING_PEAK_CONFIRM_TOLERANCE);
+      resolvePendingPeak(positionAddress, position?.pnl_pct_derived ?? position?.pnl_pct ?? null, TRAILING_PEAK_CONFIRM_TOLERANCE);
     } catch (error) {
       log("state_warn", `Peak confirmation failed for ${positionAddress}: ${error.message}`);
     }
@@ -199,7 +199,7 @@ function scheduleTrailingDropConfirmation(positionAddress) {
       const position = result?.positions?.find((p) => p.position === positionAddress);
       const resolved = resolvePendingTrailingDrop(
         positionAddress,
-        position?.pnl_pct ?? null,
+        position?.pnl_pct_derived ?? position?.pnl_pct ?? null,
         config.management,
         TRAILING_DROP_CONFIRM_TOLERANCE_PCT,
       );
@@ -293,7 +293,9 @@ export async function runManagementCycle({ silent = false, triggerScreening = tr
     for (const p of positionData) {
       if (
         !p.pnl_pct_suspicious &&
-        queuePeakConfirmation(p.position, p.pnl_pct, { immediate: !shouldUsePnlRecheck() }) &&
+        // Record peaks from the same fresh mark the trailing-drop check uses
+        // (derived preferred) so peak and current are on one scale.
+        queuePeakConfirmation(p.position, p.pnl_pct_derived ?? p.pnl_pct, { immediate: !shouldUsePnlRecheck() }) &&
         shouldUsePnlRecheck()
       ) {
         schedulePeakConfirmation(p.position);
@@ -1319,16 +1321,21 @@ export function startCronJobs() {
       const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
       if (!result?.positions?.length) return;
       const stopLoss = Number(config.management.stopLossPct ?? -50);
-      const allCalm = result.positions.every((p) =>
-        p.in_range !== false &&
-        !getTrackedPosition(p.position)?.trailing_active &&
-        p.pnl_pct != null && p.pnl_pct > stopLoss + 4
-      );
+      const allCalm = result.positions.every((p) => {
+        // Judge calmness on the more pessimistic of reported/derived so a
+        // lagging reported pct can't slow the poll while the real mark bleeds.
+        const worstPnl = Math.min(p.pnl_pct ?? Infinity, p.pnl_pct_derived ?? Infinity);
+        return (
+          p.in_range !== false &&
+          !getTrackedPosition(p.position)?.trailing_active &&
+          Number.isFinite(worstPnl) && worstPnl > stopLoss + 4
+        );
+      });
       _pnlPollCalmSkips = allCalm ? 2 : 0;
       for (const p of result.positions) {
         if (
           !p.pnl_pct_suspicious &&
-          queuePeakConfirmation(p.position, p.pnl_pct, { immediate: !shouldUsePnlRecheck() }) &&
+          queuePeakConfirmation(p.position, p.pnl_pct_derived ?? p.pnl_pct, { immediate: !shouldUsePnlRecheck() }) &&
           shouldUsePnlRecheck()
         ) {
           schedulePeakConfirmation(p.position);
@@ -1549,7 +1556,10 @@ export function getDeterministicCloseRule(position, managementConfig) {
     return false;
   })();
 
-  if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= managementConfig.stopLossPct) {
+  // Rule 1 acts on the loss-side effective PnL (freshest mark — derived
+  // preferred over the provider's lagging precomputed pct, see state.js).
+  const lossPnlPct = effectiveLossPnlPct(position);
+  if (!pnlSuspect && lossPnlPct != null && lossPnlPct <= managementConfig.stopLossPct) {
     return { action: "CLOSE", rule: 1, reason: "stop loss" };
   }
   // Suspicious-tick override for the stop loss only: a phantom loss shows in

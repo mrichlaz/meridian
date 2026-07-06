@@ -427,16 +427,20 @@ export function getStateSummary() {
  * @param {object} mgmtConfig
  * Returns { action, reason } or null if no exit needed.
  */
-// A "suspicious" tick means reported vs derived PnL disagree by more than
-// pnlSanityMaxDiffPct. A phantom loss (bad API tick) shows up in only one of
-// the two sources; a real crash shows up in both — and crashes are exactly
-// when they diverge most (reported lags the derived mark). So for loss-side
-// exits we act on the MORE OPTIMISTIC of the two: if even that one is past
-// the threshold, the breach is real. Returns null when there is no
-// corroborated value to act on.
+// Loss-side exits (STOP_LOSS / TRAILING_TP) act on the freshest mark:
+// pnl_pct_derived is computed every poll from on-chain balances × live
+// prices, while pnl_pct prefers the provider's precomputed pct (kept so the
+// display matches the DLMM UI) which can lag the real mark by minutes on a
+// fast move — long enough for a bleed to sail straight past the stop.
+// A "suspicious" tick means the derived mark couldn't be trusted (pricing
+// failure, or reported vs derived disagree beyond pnlSanityMaxDiffPct
+// depending on the source path). A phantom loss shows up in only one of the
+// two sources; a real crash shows up in both — so under suspicion we act on
+// the MORE OPTIMISTIC of the two: if even that one is past the threshold,
+// the breach is real. Returns null when there is nothing trustworthy to act on.
 export function effectiveLossPnlPct(positionData) {
   const { pnl_pct, pnl_pct_derived, pnl_pct_suspicious } = positionData;
-  if (!pnl_pct_suspicious) return pnl_pct ?? null;
+  if (!pnl_pct_suspicious) return pnl_pct_derived ?? pnl_pct ?? null;
   if (pnl_pct == null || pnl_pct_derived == null) return null;
   return Math.max(pnl_pct, pnl_pct_derived);
 }
@@ -479,13 +483,28 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     log("state", `Position ${position_address} back in range`);
   }
 
-  if (changed) save(state);
-
-  // ── Stop loss ──────────────────────────────────────────────────
+  // ── Loss-side effective PnL ────────────────────────────────────
   // Loss-side exits use the corroborated PnL: on a suspicious tick this is
   // the more optimistic of reported/derived, so a phantom tick can't fire
   // the stop but a real crash can't hide behind the sanity flag either.
   const lossPnlPct = effectiveLossPnlPct(positionData);
+
+  // A position we cannot mark is a position whose stop loss cannot fire.
+  // Count consecutive unusable ticks and surface it instead of skipping silently.
+  if (lossPnlPct == null) {
+    pos.pnl_null_streak = (pos.pnl_null_streak || 0) + 1;
+    changed = true;
+    if (pos.pnl_null_streak === 3) {
+      log("state_warn", `Position ${position_address} (${pos.pool_name || "?"}) has had no usable PnL for 3 consecutive checks — STOP_LOSS cannot fire; check PnL sources`);
+    }
+  } else if (pos.pnl_null_streak) {
+    pos.pnl_null_streak = 0;
+    changed = true;
+  }
+
+  if (changed) save(state);
+
+  // ── Stop loss ──────────────────────────────────────────────────
   if (lossPnlPct != null && mgmtConfig.stopLossPct != null && lossPnlPct <= mgmtConfig.stopLossPct) {
     return {
       action: "STOP_LOSS",

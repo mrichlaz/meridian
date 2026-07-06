@@ -319,6 +319,7 @@ function normalizeConfigValue(key, value) {
     "darwinEnabled",
     "mlEnabled",
     "evolveEnabled",
+    "thresholdEvolveEnabled",
     "chartIndicatorsEnabled",
     "requireAllIntervals",
     "lpAgentRelayEnabled",
