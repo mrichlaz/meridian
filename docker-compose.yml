@@ -14,6 +14,17 @@ services:
       # unset, so the explicit values here are belt-and-suspenders.
       - DATA_DIR=/app/data
       - LOG_DIR=/app/logs
+    # Dead-man probe: unhealthy when open positions exist but the daemon
+    # heartbeat (data/heartbeat.json, written each management cycle) is
+    # stale — i.e. the process is hung, not crashed (crashes are covered by
+    # restart: unless-stopped). Shows in `docker ps`; pair with an autoheal
+    # container if you want unhealthy → automatic restart.
+    healthcheck:
+      test: ["CMD", "node", "scripts/healthcheck.mjs"]
+      interval: 5m
+      timeout: 20s
+      retries: 2
+      start_period: 10m
     logging:
       driver: "json-file"
       options:
