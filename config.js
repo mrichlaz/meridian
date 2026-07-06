@@ -158,6 +158,14 @@ export const config = {
     // zero fee income — pure directional bag. Exit much faster than the generic
     // outOfRangeWaitMinutes (which mainly handles the pumped-above case).
     belowRangeExitMinutes: u.belowRangeExitMinutes ?? 10,
+    // Rule 7: close positions older than this (minutes) unless trailing TP is
+    // active. 0 disables. 30d export: >240m holds averaged -6.8% vs +2.1% for
+    // the 120-240m bucket — winners exit earlier via trailing TP.
+    maxHoldMinutes:        u.maxHoldMinutes        ?? 300,
+    // Rule 8: close when this % of a single-sided ladder has converted to the
+    // base token AND PnL is negative (< -2%). 0 disables. Catches deep ranges
+    // that stay "in range" through a large bleed so OOR rules never arm.
+    conversionExitPct:     u.conversionExitPct     ?? 65,
     pnlSanityMaxDiffPct:   u.pnlSanityMaxDiffPct   ?? 5,    // max allowed diff between reported and derived pnl % before ignoring a tick
     // SOL mode — positions, PnL, and balances reported in SOL instead of USD
     solMode:               u.solMode               ?? false,

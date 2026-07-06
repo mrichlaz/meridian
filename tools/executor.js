@@ -535,6 +535,8 @@ const toolMap = {
       trailingDropPct: ["management", "trailingDropPct"],
       trailingRetracePct: ["management", "trailingRetracePct"],
       belowRangeExitMinutes: ["management", "belowRangeExitMinutes"],
+      maxHoldMinutes: ["management", "maxHoldMinutes"],
+      conversionExitPct: ["management", "conversionExitPct"],
       pnlSanityMaxDiffPct: ["management", "pnlSanityMaxDiffPct"],
       solMode: ["management", "solMode"],
       evolveEnabled: ["management", "evolveEnabled"],

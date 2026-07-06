@@ -1615,6 +1615,42 @@ export function getDeterministicCloseRule(position, managementConfig) {
   ) {
     return { action: "CLOSE", rule: 6, reason: "below range — inventory fully converted" };
   }
+  // ── Rule 7 — max hold time ──────────────────────────────────────────
+  // Expectancy flips negative on long holds (30d export: 120-240m bucket
+  // averaged +2.1%, >240m averaged -6.8%). Winners exit earlier via trailing
+  // TP, so a position still open past maxHoldMinutes without an active
+  // trailing ratchet is dead capital at best and a slow bleed at worst.
+  const ageMinutes = position.age_minutes
+    ?? (tracked?.deployed_at ? Math.floor((Date.now() - new Date(tracked.deployed_at).getTime()) / 60000) : null);
+  const maxHold = Number(managementConfig.maxHoldMinutes ?? 0);
+  if (maxHold > 0 && ageMinutes != null && ageMinutes >= maxHold && !tracked?.trailing_active) {
+    return { action: "CLOSE", rule: 7, reason: `max hold: ${ageMinutes}m >= ${maxHold}m without trailing TP active` };
+  }
+  // ── Rule 8 — inventory conversion exit ──────────────────────────────
+  // A deep single-sided ladder can stay "in range" through a 30% bleed, so
+  // no OOR rule ever arms. But once most of the SOL has been converted to
+  // the base token and PnL is negative, the position is a directional bag
+  // wearing an LP costume — cut the inventory instead of riding the range.
+  const convExitPct = Number(managementConfig.conversionExitPct ?? 0);
+  if (
+    convExitPct > 0 &&
+    !pnlSuspect &&
+    position.active_bin != null &&
+    position.lower_bin != null &&
+    position.upper_bin != null &&
+    position.upper_bin > position.lower_bin &&
+    position.active_bin >= position.lower_bin &&
+    position.active_bin <= position.upper_bin
+  ) {
+    const convertedPct = ((position.upper_bin - position.active_bin) / (position.upper_bin - position.lower_bin)) * 100;
+    if (convertedPct >= convExitPct && lossPnlPct != null && lossPnlPct <= -2) {
+      return {
+        action: "CLOSE",
+        rule: 8,
+        reason: `inventory ${Math.round(convertedPct)}% converted with PnL ${lossPnlPct.toFixed(1)}%`,
+      };
+    }
+  }
   if (
     position.fee_per_tvl_24h != null &&
     position.fee_per_tvl_24h < managementConfig.minFeePerTvl24h &&
