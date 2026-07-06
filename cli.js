@@ -607,11 +607,23 @@ switch (subcommand) {
     if (fs2.existsSync(lessonsFile)) {
       try { perfData = JSON.parse(fs2.readFileSync(lessonsFile, "utf8")).performance || []; } catch { /* no data */ }
     }
+    // Honor the thresholdEvolveEnabled toggle — the REPL/Telegram paths
+    // and the auto-evolve cycle (lessons.js) all gate on this; cli.js
+    // was the lone exception and silently mutated user-config.json.
+    const thresholdEnabled = config.management?.thresholdEvolveEnabled !== false;
+    if (!thresholdEnabled) {
+      out({
+        evolved: false,
+        thresholdEvolution: "OFF",
+        reason: "thresholdEvolveEnabled is false. Set it to true in user-config.json (management.thresholdEvolveEnabled) or via `update_config` to re-enable.",
+      });
+      break;
+    }
     const result = evolveThresholds(perfData, config);
     if (!result) {
-      out({ evolved: false, reason: `Need at least 5 closed positions (have ${perfData.length})` });
+      out({ evolved: false, thresholdEvolution: "ON", reason: `Need at least 5 closed positions (have ${perfData.length})` });
     } else {
-      out({ evolved: Object.keys(result.changes).length > 0, changes: result.changes, rationale: result.rationale });
+      out({ evolved: Object.keys(result.changes).length > 0, thresholdEvolution: "ON", changes: result.changes, rationale: result.rationale });
     }
     break;
   }
