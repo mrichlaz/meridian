@@ -181,6 +181,17 @@ export async function recordPerformance(perf) {
       log("evolve", "Threshold evolution skipped (thresholdEvolveEnabled=false)");
     }
 
+    // Quiet-hours evolution — re-derive the negative UTC deploy windows
+    // from recent closes (gated by policyQuietHoursAuto, default on)
+    try {
+      const qResult = evolveQuietHours(data.performance, config);
+      if (qResult) {
+        log("evolve", `Quiet hours evolved: "${qResult.from}" → "${qResult.to}" (${qResult.detail})`);
+      }
+    } catch (err) {
+      log("evolve", `Quiet-hours evolution failed (non-fatal): ${err.message}`);
+    }
+
     // Darwinian signal weight recalculation — always runs
     if (config.darwin?.enabled) {
       const { recalculateWeights } = await import("./signal-weights.js");
@@ -811,6 +822,81 @@ export function evolveThresholds(perfData, config) {
   save(data);
 
   return { changes, rationale };
+}
+
+// ── Quiet-hours evolution ─────────────────────────────────────────
+// config.policy.quietHoursUtc was seeded from a fixed analysis (08-12 and
+// 20-24 UTC were the only negative 4h blocks in two independent export
+// windows). Session flow shifts, so re-derive the windows from recent close
+// history instead of trusting the seed forever. A block qualifies as quiet
+// when it is BOTH well-sampled and net negative; at most two blocks are
+// damped so evolution can never strangle most of the trading day. An empty
+// result (no negative well-sampled block) clears the damping — that is the
+// correct learning outcome, not a failure mode.
+const QUIET_HOURS_BLOCK = 4;              // UTC hours per block
+const QUIET_HOURS_MIN_PER_BLOCK = 12;     // min closes before a block can be judged
+const QUIET_HOURS_MAX_BLOCKS = 2;         // never dampen more than 8h/day
+const QUIET_HOURS_MIN_RECORDS = 100;      // ~2-3 days at typical trade rates
+
+export function evolveQuietHours(perfData, config) {
+  if (config.policy?.quietHoursAuto === false) return null;
+  if (!perfData || perfData.length < QUIET_HOURS_MIN_RECORDS) return null;
+  const records = perfData.slice(-EVOLVE_WINDOW_RECORDS);
+
+  const blocks = new Map(); // block start hour -> { n, pnl }
+  for (const p of records) {
+    const pnl = Number(p.pnl_usd);
+    if (!Number.isFinite(pnl)) continue;
+    let deployedMs = Date.parse(p.deployed_at || "");
+    if (!Number.isFinite(deployedMs)) {
+      const closed = Date.parse(p.recorded_at || "");
+      const held = Number(p.minutes_held);
+      if (!Number.isFinite(closed) || !Number.isFinite(held)) continue;
+      deployedMs = closed - held * 60000;
+    }
+    const start = Math.floor(new Date(deployedMs).getUTCHours() / QUIET_HOURS_BLOCK) * QUIET_HOURS_BLOCK;
+    const b = blocks.get(start) || { n: 0, pnl: 0 };
+    b.n++;
+    b.pnl += pnl;
+    blocks.set(start, b);
+  }
+
+  const quiet = [...blocks.entries()]
+    .filter(([, b]) => b.n >= QUIET_HOURS_MIN_PER_BLOCK && b.pnl < 0)
+    .sort((a, b) => a[1].pnl - b[1].pnl)
+    .slice(0, QUIET_HOURS_MAX_BLOCKS)
+    .map(([start]) => start)
+    .sort((a, b) => a - b);
+  const spec = quiet.map((s) => `${s}-${s + QUIET_HOURS_BLOCK}`).join(",");
+  const current = String(config.policy?.quietHoursUtc ?? "");
+  if (spec === current) return null;
+
+  // Persist + apply live — same pattern as evolveThresholds above.
+  let userConfig = {};
+  if (fs.existsSync(USER_CONFIG_PATH)) {
+    try { userConfig = JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8")); } catch { /* ignore */ }
+  }
+  userConfig.policyQuietHoursUtc = spec;
+  fs.writeFileSync(USER_CONFIG_PATH, JSON.stringify(userConfig, null, 2));
+  if (config.policy) config.policy.quietHoursUtc = spec;
+
+  const detail = quiet.length
+    ? quiet.map((s) => {
+        const b = blocks.get(s);
+        return `${s}-${s + QUIET_HOURS_BLOCK} UTC net $${b.pnl.toFixed(0)} over ${b.n} closes`;
+      }).join(", ")
+    : "no UTC block was both well-sampled and net negative — damping cleared";
+  const data = load();
+  data.lessons.push({
+    id: Date.now(),
+    rule: `[AUTO-EVOLVED quiet hours] "${current}" → "${spec}" — ${detail}`,
+    tags: ["evolution", "config_change"],
+    outcome: "manual",
+    created_at: new Date().toISOString(),
+  });
+  save(data);
+
+  return { from: current, to: spec, detail };
 }
 
 // Lazily resolve the threshold schema to avoid a hard import cycle

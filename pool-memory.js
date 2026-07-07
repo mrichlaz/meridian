@@ -270,6 +270,31 @@ export function isBaseMintOnCooldown(baseMint) {
   );
 }
 
+/**
+ * Rolling per-token deploy cap. Deploy #6+ into the same token averaged
+ * -$0.14 across 107 closes (Jul 1-7 export) vs +$1.13..+$3.49 for #1-4;
+ * the repeat-deploy cooldown misses these because a single zero-fee churn
+ * close resets its consecutive-fee-earning streak.
+ * Counts CLOSED deploys (recordPoolDeploy fires on close) across every pool
+ * sharing the base mint, keyed on deployed_at (falls back to closed_at).
+ * config.management.maxDeploysPerToken24h, 0 = disabled.
+ */
+export function getBaseMintDeployCap(baseMint) {
+  const cap = Math.max(0, Math.round(Number(config.management.maxDeploysPerToken24h ?? 0)));
+  if (!baseMint || cap === 0) return { capped: false, count: 0, cap };
+  const db = load();
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  let count = 0;
+  for (const entry of Object.values(db)) {
+    if (entry?.base_mint !== baseMint) continue;
+    for (const d of entry.deploys || []) {
+      const at = Date.parse(d.deployed_at || d.closed_at || "");
+      if (Number.isFinite(at) && at >= cutoff) count++;
+    }
+  }
+  return { capped: count >= cap, count, cap };
+}
+
 // ─── Read ──────────────────────────────────────────────────────
 
 /**

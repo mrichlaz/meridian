@@ -25,7 +25,7 @@ import {
   updatePositionLiveSnapshot,
 } from "../state.js";
 import { recordPerformance } from "../lessons.js";
-import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
+import { getBaseMintDeployCap, isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { normalizeMint } from "./wallet.js";
 import { appendDecision } from "../decision-log.js";
 import { agentMeridianJson, getAgentIdForRequests, getAgentMeridianHeaders } from "./agent-meridian.js";
@@ -586,6 +586,11 @@ export async function deployPosition({
   if (isBaseMintOnCooldown(baseMint)) {
     log("deploy", `Base mint ${baseMint.slice(0, 8)} is on cooldown — skipping deploy for pool ${pool_address.slice(0, 8)}`);
     return { success: false, error: "Token on cooldown — recently closed out-of-range too many times. Try a different token." };
+  }
+  const deployCap = getBaseMintDeployCap(baseMint);
+  if (deployCap.capped) {
+    log("deploy", `Base mint ${baseMint.slice(0, 8)} hit deploy cap (${deployCap.count}/${deployCap.cap} in 24h) — skipping pool ${pool_address.slice(0, 8)}`);
+    return { success: false, error: `Token deploy cap reached — ${deployCap.count} deploys into this token in the last 24h (max ${deployCap.cap}). Try a different token.` };
   }
   const activeBin = await pool.getActiveBin();
   const actualBinStep = pool.lbPair.binStep;

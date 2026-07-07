@@ -138,7 +138,29 @@ export function rankCandidates(entries = [], { regime = getMarketRegime() } = {}
     .sort((a, b) => b.policy.score - a.policy.score);
 }
 
+// Quiet hours: UTC hour blocks where deploys size down. "8-12,20-24" =
+// half-open ranges [8,12) and [20,24); "22-2" wraps midnight. Both the 30d
+// and the Jul 1-7 export windows were net negative only in 08-12 and 20-24
+// UTC, and positive everywhere else — a stable out-of-sample pattern.
+export function getQuietHourAdjustment(date = new Date()) {
+  const spec = String(config.policy?.quietHoursUtc ?? "").trim();
+  // Multiplier clamped to [0.1, 1]: 0 would drop the deploy amount to zero and
+  // fail deployPosition's positive-amount validation instead of skipping.
+  const mult = clamp(n(config.policy?.quietHoursSizeMult, 0.5), 0.1, 1);
+  if (!spec || mult >= 1) return { quiet: false, multiplier: 1 };
+  const hour = date.getUTCHours();
+  for (const part of spec.split(",")) {
+    const m = part.trim().match(/^(\d{1,2})\s*-\s*(\d{1,2})$/);
+    if (!m) continue;
+    const start = Number(m[1]) % 24;
+    const end = Number(m[2]) % 24; // "24" ≡ 0 — half-open, so 20-24 covers 20..23
+    const inRange = start === end ? false : start < end ? hour >= start && hour < end : hour >= start || hour < end;
+    if (inRange) return { quiet: true, multiplier: mult };
+  }
+  return { quiet: false, multiplier: 1 };
+}
+
 export function sizeMultiplierForScore(score, regime = getMarketRegime()) {
   const confidence = score >= 85 ? 1.25 : score >= 72 ? 1 : 0.65;
-  return clamp(confidence * regime.sizeMultiplier, 0.4, 1.25);
+  return clamp(confidence * regime.sizeMultiplier, 0.4, 1.25) * getQuietHourAdjustment().multiplier;
 }

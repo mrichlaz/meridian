@@ -2,7 +2,7 @@ import { config } from "../config.js";
 import { isBlacklisted } from "../token-blacklist.js";
 import { isDevBlocked, getBlockedDevs } from "../dev-blocklist.js";
 import { log } from "../logger.js";
-import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
+import { getBaseMintDeployCap, isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { confirmIndicatorPreset } from "./chart-indicators.js";
 import { getAgentMeridianBase, getAgentMeridianHeaders } from "./agent-meridian.js";
 import { discoverGmgnPools } from "./gmgn.js";
@@ -979,6 +979,12 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       if (isBaseMintOnCooldown(p.base?.mint)) {
         log("screening", `Filtered cooldown token ${p.base?.symbol} (${p.base?.mint?.slice(0, 8)})`);
         pushFilteredReason(filteredOut, p, "token cooldown active");
+        return false;
+      }
+      const deployCap = getBaseMintDeployCap(p.base?.mint);
+      if (deployCap.capped) {
+        log("screening", `Filtered deploy-capped token ${p.base?.symbol} (${deployCap.count}/${deployCap.cap} deploys in 24h)`);
+        pushFilteredReason(filteredOut, p, `token deploy cap: ${deployCap.count}/${deployCap.cap} in 24h`);
         return false;
       }
       return true;

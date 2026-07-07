@@ -324,6 +324,7 @@ function normalizeConfigValue(key, value) {
     "requireAllIntervals",
     "lpAgentRelayEnabled",
     "policyEnabled",
+    "policyQuietHoursAuto",
     "disableAdaptiveOverride",
   ]);
   const arrayKeys = new Set(["allowedLaunchpads", "blockedLaunchpads", "indicatorIntervals"]);
@@ -350,11 +351,13 @@ function normalizeConfigValue(key, value) {
     "pnlRpcUrl",
     "gmgnFeeSource",
     "gmgnApiKey",
+    "policyQuietHoursUtc",
   ]);
   const numberKeys = new Set([
     "mlTrainEvery", "mlMinSamples", "mlTrainWindow", "mlBatchSize", "mlEpochs", "mlLearningRate",
     "policyMinFeeVolatilityRatio", "policyMinVolumePersistence", "policyToxicFlowPenalty",
     "policyNeutralMinScore", "policyRiskOffMinScore", "policyRiskOnMinScore", "policyShrinkRetryPct",
+    "policyQuietHoursSizeMult", "maxDeploysPerToken24h",
     "darwinWindowDays", "darwinRecalcEvery", "darwinBoost", "darwinDecay",
     "darwinFloor", "darwinCeiling", "darwinMinSamples",
     "rsiLength", "indicatorCandles", "rsiOversold", "rsiOverbought",
@@ -526,6 +529,7 @@ const toolMap = {
       repeatDeployCooldownHours: ["management", "repeatDeployCooldownHours"],
       repeatDeployCooldownScope: ["management", "repeatDeployCooldownScope"],
       repeatDeployCooldownMinFeeEarnedPct: ["management", "repeatDeployCooldownMinFeeEarnedPct"],
+      maxDeploysPerToken24h: ["management", "maxDeploysPerToken24h"],
       minVolumeToRebalance: ["management", "minVolumeToRebalance"],
       stopLossPct: ["management", "stopLossPct"],
       takeProfitPct: ["management", "takeProfitPct"],
@@ -594,6 +598,9 @@ const toolMap = {
       policyRiskOffMinScore: ["policy", "riskOffMinScore", ["policyRiskOffMinScore"]],
       policyRiskOnMinScore: ["policy", "riskOnMinScore", ["policyRiskOnMinScore"]],
       policyShrinkRetryPct: ["policy", "shrinkRetryPct", ["policyShrinkRetryPct"]],
+      policyQuietHoursUtc: ["policy", "quietHoursUtc", ["policyQuietHoursUtc"]],
+      policyQuietHoursSizeMult: ["policy", "quietHoursSizeMult", ["policyQuietHoursSizeMult"]],
+      policyQuietHoursAuto: ["policy", "quietHoursAuto", ["policyQuietHoursAuto"]],
       // ml / darwin
       mlEnabled: ["ml", "enabled", ["mlEnabled"]],
       mlTrainEvery: ["ml", "trainEvery", ["mlTrainEvery"]],

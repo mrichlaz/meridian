@@ -143,6 +143,11 @@ export const config = {
     repeatDeployCooldownHours: u.repeatDeployCooldownHours ?? 12,
     repeatDeployCooldownScope: u.repeatDeployCooldownScope ?? "token", // pool | token | both
     repeatDeployCooldownMinFeeEarnedPct: u.repeatDeployCooldownMinFeeEarnedPct ?? u.repeatDeployCooldownMinFeeYieldPct ?? 0,
+    // Hard cap on deploys into the same base token per rolling 24h (0 = off).
+    // Jul 1-7 export: deploy #6+ into a token averaged -$0.14 (n=107) vs
+    // +$1.13..+$3.49 for deploys #1-4. The repeat cooldown above misses this
+    // because one zero-fee churn close resets its consecutive-fee streak.
+    maxDeploysPerToken24h: u.maxDeploysPerToken24h ?? 5,
     minVolumeToRebalance:  u.minVolumeToRebalance  ?? 1000,
     stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? -50,
     takeProfitPct:         u.takeProfitPct         ?? u.takeProfitFeePct ?? 5,
@@ -308,6 +313,16 @@ export const config = {
     riskOffMinScore:         u.policyRiskOffMinScore         ?? 76,
     riskOnMinScore:          u.policyRiskOnMinScore          ?? 60,
     shrinkRetryPct:          u.policyShrinkRetryPct          ?? 0.8,
+    // UTC hours where deploy size is damped. Both the 30d and the Jul 1-7
+    // windows were net negative ONLY in 08-12 and 20-24 UTC (-$42 / -$38
+    // in the 7d window). Half-open ranges "start-end", comma separated;
+    // wrap past midnight allowed ("22-2"). Empty string disables.
+    quietHoursUtc:           u.policyQuietHoursUtc           ?? "8-12,20-24",
+    quietHoursSizeMult:      u.policyQuietHoursSizeMult      ?? 0.5,
+    // Re-derive quietHoursUtc from recent close history every evolve tick
+    // (lessons.js evolveQuietHours). Manual edits to policyQuietHoursUtc get
+    // overwritten while this is on — set false to pin the windows.
+    quietHoursAuto:          u.policyQuietHoursAuto          ?? true,
   },
 
   // ─── Deep Learning / ML ────────────────
