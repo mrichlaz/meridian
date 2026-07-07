@@ -1590,7 +1590,12 @@ export function getDeterministicCloseRule(position, managementConfig) {
   ) {
     return { action: "CLOSE", rule: 1, reason: "stop loss (both PnL sources agree despite suspicious tick)" };
   }
-  if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct >= managementConfig.takeProfitPct) {
+  // Rule 2 defers to the trailing ratchet: once trailing is armed, the ratchet
+  // already locks in peak − max(trailingDropPct, peak × trailingRetracePct),
+  // and a hard cap here would cut exactly the fat right tail that pays for
+  // the book (Jul 1-7: the five ≥5% closes made $223 — more than the whole
+  // 1.5–5% range combined). Fires only when trailing TP is off or not armed.
+  if (!pnlSuspect && !tracked?.trailing_active && position.pnl_pct != null && position.pnl_pct >= managementConfig.takeProfitPct) {
     return { action: "CLOSE", rule: 2, reason: "take profit" };
   }
   if (

@@ -408,6 +408,7 @@ The module table above predates several additions. Quick map:
 | `tools/gmgn.js`, `tools/okx.js`, `tools/pnl.js`, `screening-scales.js` | GMGN discovery source (`screeningSource: merge`), OKX risk enrichment, PnL poller RPC, timeframe threshold scaling. |
 
 Exit-rule specifics that differ from the tables above:
+- **Rule 2 (take profit) defers to the trailing ratchet**: it fires only when `tracked.trailing_active` is false (trailing off, or peak never reached `trailingTriggerPct`). With trailing on, the ratchet is the winner exit and `takeProfitPct` is a backstop — a hard cap was cutting the fat right tail (Jul 1-7: the five ≥5% closes earned more than the whole 1.5-5% range combined).
 - **Trailing TP is a ratchet**: exit when drop from peak ≥ `max(trailingDropPct, peak_pnl_pct × trailingRetracePct)`. Helper: `getEffectiveTrailingDropPct()` in `state.js` (accepts mgmt-config object or legacy number).
 - **Rule 6** in `getDeterministicCloseRule`: active_bin below the whole range (fully converted inventory) → close after `belowRangeExitMinutes` (default 10), much faster than `outOfRangeWaitMinutes`.
 - **Rule 7**: position older than `maxHoldMinutes` (default 300, 0=off) without trailing TP active → close (30d data: >240m holds averaged -6.8% vs +2.1% for 120-240m).
