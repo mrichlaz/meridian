@@ -138,7 +138,7 @@ export function mlStatus(config) {
   lines.push(`Satisfaction:   ${bar(emo.satisfaction)}`);
 
   if (emo.streak.current) {
-    lines.push(`Streak: ${emo.streak.current === "win" ? "🟢" : "🔴"} ${emo.streak[emo.streak.current + "s"]}x ${emo.streak.current}`);
+    lines.push(`Streak: ${emo.streak.current === "win" ? "🟢" : "🔴"} ${emo.streak.current === "win" ? emo.streak.wins : emo.streak.losses}x ${emo.streak.current}`);
   }
 
   // Personality
