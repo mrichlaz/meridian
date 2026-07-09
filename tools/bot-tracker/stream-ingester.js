@@ -58,9 +58,13 @@ const _lastWsOpenAt = {};   // url → ms timestamp, for log throttling
 // operator can see exactly what the WS is emitting. The stand-alone
 // stream-ingester ran fine for the user pre-merge, so we know the protocol
 // works; this log helps confirm the new in-tree build still gets frames
-// (and what shape they're in) when the heartbeat shows 0 arbs.
+// (and what shape they're in) when the heartbeat shows 0 arbs. Bounded —
+// after the discovery window, the log is silent except for a per-minute
+// summary so the operator doesn't drown in 5000 frame lines.
 const _loggedFrames = [];
-const FRAME_LOG_LIMIT = 20;
+const FRAME_LOG_LIMIT = 5;       // first 5 frames in full, then silent
+const _frameCount = { total: 0, atomicArbs: 0, wideSandwiches: 0, other: 0 };
+let _lastSummaryAt = 0;
 
 /**
  * Robust "is the browser still alive" probe. puppeteer-core changed the
@@ -259,6 +263,7 @@ export function startStream() {
         client.on("Network.webSocketFrameReceived", ({ response }) => {
           if (!response?.payloadData) return;
           health.framesTotal++;
+          _frameCount.total++;
           const payload = String(response.payloadData);
 
           // Frame-shape discovery: log the first N frames in full so the
@@ -268,19 +273,36 @@ export function startStream() {
             const head = payload.slice(0, 240).replace(/\n/g, " ");
             log("stream", `frame #${_loggedFrames.length + 1} (${payload.length}b): ${head}${payload.length > 240 ? "…" : ""}`);
             _loggedFrames.push(payload);
+          } else {
+            // After the discovery window: keep tallying by channel, log a
+            // per-minute summary so the operator can see the data is still
+            // flowing without 5000 lines of JSON in the log.
+            const now = Date.now();
+            if (now - _lastSummaryAt > 60_000) {
+              log("stream", `frame summary: total=${_frameCount.total} atomicArbs=${_frameCount.atomicArbs} wideSandwiches=${_frameCount.wideSandwiches} other=${_frameCount.other} (in last minute)`);
+              _lastSummaryAt = now;
+              _frameCount.total = _frameCount.atomicArbs = _frameCount.wideSandwiches = _frameCount.other = 0;
+            }
           }
 
           let msg = null;
-          try { msg = JSON.parse(payload); } catch { /* non-JSON, already logged above */ }
+          try { msg = JSON.parse(payload); } catch { _frameCount.other++; return; }
           if (!msg) return;
 
           if (msg.channel === "AtomicArbs") {
+            _frameCount.atomicArbs++;
             health.lastFrameAt = Date.now();
             recordArbFrame(db, msg);
+          } else if (msg.channel === "WideSandwiches") {
+            _frameCount.wideSandwiches++;
+            // (Wide sandwich frames are a different event type and the
+            // current recordArbFrame() only handles AtomicArbs; gate for now.)
           } else if (msg.type === "AtomicArbs" || msg.kind === "AtomicArbs") {
-            // Some WS implementations nest the channel under type/kind.
+            _frameCount.atomicArbs++;
             health.lastFrameAt = Date.now();
             recordArbFrame(db, msg);
+          } else {
+            _frameCount.other++;
           }
         });
 

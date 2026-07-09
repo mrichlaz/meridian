@@ -674,6 +674,18 @@ const toolMap = {
 
     const STRATEGY_BIN_KEYS = new Set(["binsBelow", "minBinsBelow", "maxBinsBelow", "defaultBinsBelow"]);
 
+    // userConfig is read once and mutated in-place by the persist loop
+    // below. The bot-tracker shortcut needs it BEFORE that loop (we want to
+    // persist the merged section even if the file doesn't exist on disk).
+    let userConfig = {};
+    if (fs.existsSync(USER_CONFIG_PATH)) {
+      try {
+        userConfig = JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8"));
+      } catch (error) {
+        return { success: false, error: `Invalid user-config.json: ${error.message}`, reason };
+      }
+    }
+
     // Nested-object shortcut: { botTracker: { entryMode: "balanced" } } is
     // a valid update — merge the partial into the live botTracker config and
     // persist the whole section. Lets the Telegram /settings menu update
@@ -715,14 +727,10 @@ const toolMap = {
       return { success: false, unknown, reason };
     }
 
-    let userConfig = {};
-    if (fs.existsSync(USER_CONFIG_PATH)) {
-      try {
-        userConfig = JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8"));
-      } catch (error) {
-        return { success: false, error: `Invalid user-config.json: ${error.message}`, reason };
-      }
-    }
+    // (userConfig is declared at the top of this function — used by the
+    // bot-tracker shortcut above, the persist loop below, and the config-map
+    // rewrites that need the file's current state.)
+    void userConfig;
 
     // Auto-scale fee/volume when timeframe changes (unless user set them explicitly in same call).
     if (applied.timeframe != null && applied.minFeeActiveTvlRatio == null && applied.minVolume == null) {
@@ -738,6 +746,7 @@ const toolMap = {
     // Apply to live config immediately after the persisted config is known-good.
     for (const [key, val] of Object.entries(applied)) {
       if (key.startsWith("_")) continue;
+      if (key === "botTracker") continue;  // handled by the nested shortcut above
       const [section, field] = CONFIG_MAP[key];
       // minSafeBinsBelow is a top-level number, not a nested object.
       // Special-case it so we write directly to config.minSafeBinsBelow.
