@@ -97,6 +97,7 @@ export async function notifyOnline() {
 
 /** Periodic health summary. */
 export async function notifyHeartbeat() {
+  if (CONFIG.heartbeatEnabled === false) return false;
   const db = getDB();
   const c = (q) => db.prepare(q).get().c;
   const lastEv = db.prepare("SELECT MAX(last_event) m FROM tokens").get().m;
@@ -258,6 +259,7 @@ export async function notifyTop() {
  */
 export async function notifyFades() {
   if (!CONFIG.fadeAlerts) return { sent: 0 };
+  if (CONFIG.fadesEnabled === false) return { sent: 0, skipped: "fadesDisabled" };
   const db = getDB();
   const now = Date.now();
   const fades = detectFades();
@@ -284,6 +286,7 @@ export async function notifyFades() {
  */
 export async function notifySurges() {
   if (!CONFIG.surgeAlerts) return { sent: 0 };
+  if (CONFIG.surgesEnabled === false) return { sent: 0, skipped: "surgesDisabled" };
   const db = getDB();
   const now = Date.now();
   const surges = detectSurges();

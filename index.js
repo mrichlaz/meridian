@@ -2063,6 +2063,14 @@ function renderSettingsMenu(page = "main") {
         settingButton("$10M", "cfg:set:btCeiling:10000000"),
       ],
       [
+        settingButton(`Top signals: ${bt.topSignalsEnabled === false ? "OFF" : "ON"}`, "cfg:toggle:btTop"),
+        settingButton(`Fades: ${bt.fadesEnabled === false ? "OFF" : "ON"}`, "cfg:toggle:btFades"),
+      ],
+      [
+        settingButton(`Surges: ${bt.surgesEnabled === false ? "OFF" : "ON"}`, "cfg:toggle:btSurges"),
+        settingButton(`Heartbeat: ${bt.heartbeatEnabled === false ? "OFF" : "ON"}`, "cfg:toggle:btHeartbeat"),
+      ],
+      [
         settingButton(`Min liq: $${(bt.minLiquidityUsd || 0).toLocaleString()}`, "cfg:noop"),
         settingButton(`Min vol: $${(bt.minVolume24h || 0).toLocaleString()}`, "cfg:noop"),
       ],
@@ -2128,6 +2136,35 @@ async function applySettingsMenuCallback(msg) {
   if (action === "page") {
     page = parts[2] || "main";
     await answerCallbackQuery(msg.callbackQueryId);
+    await showSettingsMenu({ messageId: msg.messageId, page });
+    return;
+  }
+
+  // Bot-tracker Telegram alert toggles (e.g. cfg:toggle:btTop). Live state
+  // lives in config.botTracker; toggling here flips the boolean and pushes
+  // the whole section through update_config. Backend ingestion keeps
+  // running regardless — only the chat message is muted.
+  const BT_TOGGLE_MAP = {
+    btTop: "topSignalsEnabled",
+    btFades: "fadesEnabled",
+    btSurges: "surgesEnabled",
+    btHeartbeat: "heartbeatEnabled",
+  };
+  if (action === "toggle" && BT_TOGGLE_MAP[key]) {
+    const field = BT_TOGGLE_MAP[key];
+    const before = (config.botTracker || {})[field];
+    const value = !before;
+    const updated = { ...(config.botTracker || {}), [field]: value };
+    const result = await executeTool("update_config", {
+      changes: { botTracker: updated },
+      reason: "Telegram settings — bot-tracker alert toggle",
+    });
+    if (!result?.success) {
+      await answerCallbackQuery(msg.callbackQueryId, "Update failed");
+      return;
+    }
+    await answerCallbackQuery(msg.callbackQueryId, `${key} ${value ? "ON" : "OFF"} (backend keeps running)`);
+    page = "bottracker";
     await showSettingsMenu({ messageId: msg.messageId, page });
     return;
   }

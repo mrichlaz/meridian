@@ -152,6 +152,17 @@ export const CONFIG = {
   inactiveWindowMin: num("INACTIVE_WINDOW_MIN", 240),
   momentumWindowMin: num("MOMENTUM_WINDOW_MIN", 60),
 
+  // ─── Telegram alert toggles (opt-out) ──────────────────────────────
+  // Each is a per-channel on/off. Backend ingestion (stream + RPC → events
+  // → tokens) keeps running regardless; only the chat message is suppressed.
+  // Set BOT_TOP_SIGNALS_ENABLED / BOT_FADES_ENABLED / BOT_SURGES_ENABLED /
+  // BOT_HEARTBEAT_ENABLED to "false" to mute that channel. /settings Bot
+  // tab also exposes these as toggle buttons.
+  topSignalsEnabled:   process.env.BOT_TOP_SIGNALS_ENABLED !== "false",
+  fadesEnabled:        process.env.BOT_FADES_ENABLED        !== "false",
+  surgesEnabled:       process.env.BOT_SURGES_ENABLED       !== "false",
+  heartbeatEnabled:    process.env.BOT_HEARTBEAT_ENABLED    !== "false",
+
   // ─── Entry gate (confirmed / balanced) ───
   entryMode: process.env.ENTRY_MODE || "balanced", // early | balanced | conservative
   minDistinctBots: num("MIN_DISTINCT_BOTS", 2),

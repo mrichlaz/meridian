@@ -626,6 +626,8 @@ export function formatConfigSnapshot(config, options = {}) {
     lines.push(`  • minLiquidityUsd: ${formatUsd(bt.minLiquidityUsd)} • minVolume24h: ${formatUsd(bt.minVolume24h)}`);
     const pump = bt.pumpCeilingUsd;
     lines.push(`  • pumpCeilingUsd: ${pump == null ? "<i>off (fee-collection mode)</i>" : formatUsd(pump)}`);
+    const onOff = (v) => v === false ? "<i>off</i>" : "ON";
+    lines.push(`  • alerts: top=${onOff(bt.topSignalsEnabled)} · fades=${onOff(bt.fadesEnabled)} · surges=${onOff(bt.surgesEnabled)} · heartbeat=${onOff(bt.heartbeatEnabled)}`);
   }
 
   // ─── Auto-swap / Wallet sweep ──────────────────────────────────────
@@ -722,6 +724,13 @@ export function formatBotTrackerConfig(botCfg, options = {}) {
     lines.push(`${b("Pump ceiling:")} ≤ ${formatUsd(pump, 0)}`);
   }
   lines.push(`${b("Stale stream alert:")} ${Math.round((botCfg.streamUnhealthyMs || 0) / 1000)}s · cooldown ${Math.round((botCfg.streamAlertCooldownMs || 0) / 60000)}m`);
+  lines.push("");
+  lines.push(b("Telegram alerts"));
+  const onOff = (v) => v === false ? "<i>off</i>" : "ON";
+  lines.push(`  • Top signals: ${onOff(botCfg.topSignalsEnabled)}`);
+  lines.push(`  • Fades: ${onOff(botCfg.fadesEnabled)}`);
+  lines.push(`  • Surges: ${onOff(botCfg.surgesEnabled)}`);
+  lines.push(`  • Heartbeat: ${onOff(botCfg.heartbeatEnabled)}`);
   return { text: lines.join("\n").slice(0, 3900), buttons: [] };
 }
 

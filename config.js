@@ -156,6 +156,14 @@ export const config = {
     // ── Ingestion mode (mirrors bot-tracker's STREAM_MODE) ───────────
     streamMode:          process.env.BOT_STREAM_MODE || "stream",   // stream | both | poll
     entryMode:           process.env.BOT_ENTRY_MODE  || "balanced",  // early | balanced | conservative
+    // ── Telegram alert toggles (opt-out) ───────────────────────────
+    // Each is per-channel on/off. Backend ingestion keeps running; only
+    // the chat message is suppressed. /settings Bot tab exposes them as
+    // toggle buttons; /setcfg botTracker.topSignalsEnabled=false also works.
+    topSignalsEnabled:   process.env.BOT_TOP_SIGNALS_ENABLED !== "false",
+    fadesEnabled:        process.env.BOT_FADES_ENABLED        !== "false",
+    surgesEnabled:       process.env.BOT_SURGES_ENABLED       !== "false",
+    heartbeatEnabled:    process.env.BOT_HEARTBEAT_ENABLED    !== "false",
   },
 
   // ─── Position Management ────────────────
