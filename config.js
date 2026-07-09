@@ -292,7 +292,12 @@ export const config = {
     minVolume: gmgnValue("minVolume", "gmgnMinVolume", 1000),
     minHolders: gmgnValue("minHolders", "gmgnMinHolders", u.minHolders ?? 500),
     minTokenAgeHours: gmgnValue("minTokenAgeHours", "gmgnMinTokenAgeHours", 2),
-    maxTokenAgeHours: gmgnValue("maxTokenAgeHours", "gmgnMaxTokenAgeHours", 24 * 7),
+    // Cap lifted for the fee-collection strategy: tokens 30+ days old are
+    // usually the most stable to LP (organic volume, established holder
+    // base). Set GMGN_MAX_TOKEN_AGE_HOURS=720 in .env (or
+    // gmgnMaxTokenAgeHours=720 in data/gmgn-config.json) to put a cap back
+    // if you ever want one. Default null = no upper limit.
+    maxTokenAgeHours: gmgnValue("maxTokenAgeHours", "gmgnMaxTokenAgeHours", null),
     minSmartDegenCount: gmgnValue("minSmartDegenCount", "gmgnMinSmartDegenCount", 1),
     requireKol: gmgnValue("requireKol", "gmgnRequireKol", true),
     minKolCount: gmgnValue("minKolCount", "gmgnMinKolCount", 1),
