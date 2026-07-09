@@ -41,6 +41,23 @@ let _stopped = false;
 let _running = false;
 let _browser = null;
 let _ownsBrowser = false;
+const _lastWsOpenAt = {};   // url → ms timestamp, for log throttling
+
+/**
+ * Robust "is the browser still alive" probe. puppeteer-core changed the
+ * Browser API between v23 (had isConnected() method) and v25 (it's a
+ * `connected` boolean property now, or absent entirely on some wrappers).
+ * Try each in order; fall back to "assume alive" so the loop at least
+ * catches real failures via try/catch and reconnect cycles.
+ */
+export function isBrowserConnected(b) {
+  if (!b) return false;
+  if (typeof b.isConnected === "function") {
+    try { return b.isConnected(); } catch { return false; }
+  }
+  if (typeof b.connected === "boolean") return b.connected;
+  return true;
+}
 
 const health = { connected: false, lastFrameAt: 0, framesTotal: 0, arbsTotal: 0, tokensSeen: 0 };
 
@@ -63,7 +80,7 @@ function recordArbFrame(db, msg) {
   const ts = blk.time ? blk.time * 1000 : Date.now();
 
   const insSeen = db.prepare("INSERT OR IGNORE INTO seen_sigs VALUES (?,?)");
-  const insEvent = db.prepare("INSERT OR IGNORE INTO events VALUES (?,?,?,?)");
+  const insEvent = db.prepare("INSERT OR IGNORE INTO events VALUES (?,?,?,?,?)");
   const upToken = db.prepare(`
     INSERT INTO tokens (mint, symbol, name, dex, first_seen, last_seen, last_event, occurrence_count)
     VALUES (?, ?, ?, ?, ?, ?, ?, 1)
@@ -211,7 +228,14 @@ export function startStream() {
         await client.send("Network.enable");
         client.on("Network.webSocketCreated", ({ url }) => {
           health.connected = true;
-          log("stream", `WS open: ${url}`);
+          // Debounce: sandwiched.me's WS flaps (reconnects every few seconds
+          // when Cloudflare rotates), flooding the log. Throttle to one
+          // message per URL per 5 minutes.
+          const now = Date.now();
+          if (!_lastWsOpenAt[url] || now - _lastWsOpenAt[url] > 300_000) {
+            _lastWsOpenAt[url] = now;
+            log("stream", `WS open: ${url}`);
+          }
         });
         client.on("Network.webSocketFrameReceived", ({ response }) => {
           if (!response?.payloadData) return;
@@ -232,7 +256,8 @@ export function startStream() {
 
         // Stay alive until stopped or the browser disconnects.
         let lastHeartbeat = 0;
-        while (!_stopped && _browser.isConnected()) {
+        while (!_stopped) {
+          if (!isBrowserConnected(_browser)) break;
           await new Promise((r) => setTimeout(r, 2000));
           if (Date.now() - lastHeartbeat > 300_000) {
             log("stream", `Heartbeat — ${health.arbsTotal} arbs, ${health.tokensSeen} token events, last frame ${health.lastFrameAt ? Math.round((Date.now() - health.lastFrameAt) / 1000) + "s ago" : "never"}`);

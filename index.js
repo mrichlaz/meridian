@@ -1,4 +1,12 @@
-import "./envcrypt.js";
+import { loadEnv } from "./envcrypt.js";
+
+// Load .env into process.env at startup. envcrypt.js exposes loadEnv()
+// (which calls dotenv + handles encrypted values) but the original index.js
+// imported envcrypt without ever calling it — that left .env vars invisible
+// to any code that read process.env before the bot-tracker's chain kicked in
+// (e.g. the bot-tracker's hasRpc() was returning false even with a valid
+// HELIUS_API_KEYS in .env). Call it now so live runtime sees .env.
+loadEnv({ override: false });
 import cron from "node-cron";
 import readline from "readline";
 import fs from "fs";

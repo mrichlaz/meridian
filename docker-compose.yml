@@ -14,6 +14,11 @@ services:
       # unset, so the explicit values here are belt-and-suspenders.
       - DATA_DIR=/app/data
       - LOG_DIR=/app/logs
+    # Mount the .env from the host so the container sees WALLET_PRIVATE_KEY,
+    # HELIUS_API_KEYS, LLM_*, TELEGRAM_*, etc. Override path with
+    # `env_file: - /some/other/.env` in a deploy-specific override file.
+    env_file:
+      - .env
     # Dead-man probe: unhealthy when open positions exist but the daemon
     # heartbeat (data/heartbeat.json, written each management cycle) is
     # stale — i.e. the process is hung, not crashed (crashes are covered by

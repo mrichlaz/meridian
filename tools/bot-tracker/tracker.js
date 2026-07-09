@@ -176,7 +176,7 @@ async function fetchDexData(mints) {
 // attributes each sig to the wallet whose feed it came from.
 function recordParsed(db, parsed, walletBySig, stats) {
   const insSeen = db.prepare("INSERT OR IGNORE INTO seen_sigs VALUES (?,?)");
-  const insEvent = db.prepare("INSERT OR IGNORE INTO events VALUES (?,?,?,?)");
+  const insEvent = db.prepare("INSERT OR IGNORE INTO events VALUES (?,?,?,?,?)");
   const upToken = db.prepare(`
     INSERT INTO tokens (mint, first_seen, last_seen, last_event, occurrence_count)
     VALUES (?, ?, ?, ?, 1)
