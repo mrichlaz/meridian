@@ -42,10 +42,13 @@ let _running = false;
 let _browser = null;
 let _ownsBrowser = false;
 const _lastWsOpenAt = {};   // url → ms timestamp, for log throttling
-// Channel discovery: log the first N unique channels we see so an operator
-// can tell whether the backend uses 'AtomicArbs' or some other key.
-const _seenChannels = new Set();
-const CHANNEL_DISCOVERY_LIMIT = 5;
+// Frame-shape discovery: log the first N frames in full (truncated) so the
+// operator can see exactly what the WS is emitting. The stand-alone
+// stream-ingester ran fine for the user pre-merge, so we know the protocol
+// works; this log helps confirm the new in-tree build still gets frames
+// (and what shape they're in) when the heartbeat shows 0 arbs.
+const _loggedFrames = [];
+const FRAME_LOG_LIMIT = 20;
 
 /**
  * Robust "is the browser still alive" probe. puppeteer-core changed the
@@ -244,20 +247,26 @@ export function startStream() {
         client.on("Network.webSocketFrameReceived", ({ response }) => {
           if (!response?.payloadData) return;
           health.framesTotal++;
-          let msg = null;
-          try { msg = JSON.parse(response.payloadData); } catch { /* non-JSON */ }
-          if (!msg) return;
+          const payload = String(response.payloadData);
 
-          // Channel discovery: log the first few distinct channels we see
-          // so the operator can confirm the backend's key. Only JSON
-          // objects with a string .channel are candidates.
-          const ch = typeof msg.channel === "string" ? msg.channel : null;
-          if (ch && !_seenChannels.has(ch) && _seenChannels.size < CHANNEL_DISCOVERY_LIMIT) {
-            _seenChannels.add(ch);
-            log("stream", `channel discovered: "${ch}"${ch !== "AtomicArbs" ? " (not AtomicArbs — frames will be ignored)" : ""}`);
+          // Frame-shape discovery: log the first N frames in full so the
+          // operator can confirm the WS is delivering anything at all and
+          // what the payload looks like. Truncated to 240 chars per line.
+          if (_loggedFrames.length < FRAME_LOG_LIMIT) {
+            const head = payload.slice(0, 240).replace(/\n/g, " ");
+            log("stream", `frame #${_loggedFrames.length + 1} (${payload.length}b): ${head}${payload.length > 240 ? "…" : ""}`);
+            _loggedFrames.push(payload);
           }
 
-          if (ch === "AtomicArbs") {
+          let msg = null;
+          try { msg = JSON.parse(payload); } catch { /* non-JSON, already logged above */ }
+          if (!msg) return;
+
+          if (msg.channel === "AtomicArbs") {
+            health.lastFrameAt = Date.now();
+            recordArbFrame(db, msg);
+          } else if (msg.type === "AtomicArbs" || msg.kind === "AtomicArbs") {
+            // Some WS implementations nest the channel under type/kind.
             health.lastFrameAt = Date.now();
             recordArbFrame(db, msg);
           }
