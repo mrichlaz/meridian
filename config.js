@@ -142,6 +142,20 @@ export const config = {
     maxAgeMinutes:       u.botTrackerMaxAgeMinutes ?? 1440,   // 24h
     minLiquidityUsd:     u.botTrackerMinLiquidity  ?? 5_000,  // $5k
     minVolume24h:        u.botTrackerMinVolume24h  ?? 50_000, // $50k
+    // ── Opt-in scoring / parking filter ────────────────────────────
+    // Mirrors the bot-tracker's PUMP_CEILING_USD. null = "feature off" —
+    // the ceiling disappears entirely from rankSignals/detectSurges/detectFades
+    // and the pruner stops parking tokens. Set to null for fee-collection
+    // strategies where the highest-mcap tokens earn the best LP fees.
+    pumpCeilingUsd:      (() => {
+      const v = process.env.BOT_PUMP_CEILING_USD;
+      if (v == null || v === "" || v.toLowerCase() === "null") return null;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : 3_000_000;
+    })(),
+    // ── Ingestion mode (mirrors bot-tracker's STREAM_MODE) ───────────
+    streamMode:          process.env.BOT_STREAM_MODE || "stream",   // stream | both | poll
+    entryMode:           process.env.BOT_ENTRY_MODE  || "balanced",  // early | balanced | conservative
   },
 
   // ─── Position Management ────────────────

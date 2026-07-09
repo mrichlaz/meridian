@@ -17,6 +17,17 @@ function num(key, def) {
   return Number.isFinite(n) ? n : def;
 }
 
+/**
+ * Like num() but returns null when the env var is unset / empty / "null".
+ * Used for opt-in features like PUMP_CEILING_USD where unset = "feature off".
+ */
+function numOrNull(key) {
+  const v = process.env[key];
+  if (v == null || v === "" || v.toLowerCase() === "null") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 function bool(key, def = false) {
   const v = (process.env[key] || "").toLowerCase();
   if (v === "") return def;
@@ -111,8 +122,19 @@ export const CONFIG = {
   // when the bot is extremely active).
   maxSigsPerCycle: num("MAX_SIGS_PER_CYCLE", 200),
 
-  // Qualifying thresholds for a "signal"
-  pumpCeilingUsd: num("PUMP_CEILING_USD", 3_000_000),
+  // ── Opt-in filters ──────────────────────────────────────────────
+  // Each filter is opt-in. Leave the env var unset (or set to "null") to
+  // disable it. The fee-collection strategy wants all of these off — the
+  // highest-mcap tokens usually earn the most LP fees, and meridian has its
+  // own post-merge filter (mcap / liquidity / bin_step) so we don't need
+  // any pre-filtering here.
+  //
+  // pumpCeilingUsd = null  → no "not yet pumped" gate in scoring; the
+  //                          pruner also stops parking tokens (the UPDATE
+  //                          `WHERE market_cap >= null` never matches).
+  //                          detectSurges still fires on sudden buy impulses
+  //                          because that's the one-sided SOL fee signal.
+  pumpCeilingUsd: numOrNull("PUMP_CEILING_USD"),
   // When a token crosses the ceiling it is PARKED (marked pumped, alerts
   // stopped) rather than deleted — market makers often re-pump. If it retraces
   // back below (ceiling × rearmFactor) it is re-armed to signal again.

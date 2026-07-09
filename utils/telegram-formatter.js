@@ -616,6 +616,18 @@ export function formatConfigSnapshot(config, options = {}) {
   lines.push(`  • management: ${esc(config.llm?.managementModel || "—")}`);
   lines.push(`  • general: ${esc(config.llm?.generalModel || "—")}`);
 
+  // ─── Bot-tracker (in-house, sources the screening merge) ─────────────────
+  if (config.botTracker) {
+    const bt = config.botTracker;
+    lines.push("");
+    lines.push(b("Bot-tracker"));
+    lines.push(`  • streamMode: ${bt.streamMode || "—"} • entryMode: ${bt.entryMode || "—"}`);
+    lines.push(`  • limit: ${bt.limit ?? "—"} • maxAgeMinutes: ${bt.maxAgeMinutes ?? "—"}`);
+    lines.push(`  • minLiquidityUsd: ${formatUsd(bt.minLiquidityUsd)} • minVolume24h: ${formatUsd(bt.minVolume24h)}`);
+    const pump = bt.pumpCeilingUsd;
+    lines.push(`  • pumpCeilingUsd: ${pump == null ? "<i>off (fee-collection mode)</i>" : formatUsd(pump)}`);
+  }
+
   // ─── Auto-swap / Wallet sweep ──────────────────────────────────────
   const hasAutoSwap = m.autoSwapAfterClaim != null
     || m.autoSwapRetryAttempts != null
@@ -686,6 +698,31 @@ export function formatThresholds(config, options = {}) {
   lines.push(`${b("Low yield close:")} fee/TVL 24h &lt; ${m.minFeePerTvl24h}% after ${m.minAgeBeforeYieldCheck}m`);
   lines.push(`${b("Claim threshold:")} ≥ ${formatUsd(m.minClaimAmount, 2)}`);
   return { text: lines.join("\n").slice(0, 3900), buttons: ACTION_BUTTONS.status() };
+}
+
+/**
+ * Format the bot-tracker's runtime config. Surfaces PUMP_CEILING_USD as
+ * "off" when the env var is unset, so the operator can see at a glance
+ * whether the pre-merge filter is active.
+ */
+export function formatBotTrackerConfig(botCfg, options = {}) {
+  if (!botCfg) return { text: "Bot-tracker config not loaded.", buttons: [] };
+  const lines = [];
+  lines.push(b("🤖 Bot-tracker (in-house · tools/bot-tracker)"));
+  lines.push("");
+  lines.push(`${b("Stream mode:")} ${esc(botCfg.streamMode || "?")} (${esc(botCfg.entryMode || "?")})`);
+  lines.push(`${b("Wallets:")} ${botCfg.wallets?.length ?? 0} seed + auto-refreshed top arb (${botCfg.arbWalletsAuto ? "on" : "off"})`);
+  lines.push(`${b("Min liquidity:")} ≥ ${formatUsd(botCfg.minLiquidityUsd, 0)}`);
+  lines.push(`${b("Min volume 24h:")} ≥ ${formatUsd(botCfg.minVolume24h, 0)}`);
+  lines.push(`${b("Distinct bots:")} ≥ ${botCfg.minDistinctBots ?? "—"}`);
+  const pump = botCfg.pumpCeilingUsd;
+  if (pump == null) {
+    lines.push(`${b("Pump ceiling:")} <i>off (no cap — for fee-collection strategies)</i>`);
+  } else {
+    lines.push(`${b("Pump ceiling:")} ≤ ${formatUsd(pump, 0)}`);
+  }
+  lines.push(`${b("Stale stream alert:")} ${Math.round((botCfg.streamUnhealthyMs || 0) / 1000)}s · cooldown ${Math.round((botCfg.streamAlertCooldownMs || 0) / 60000)}m`);
+  return { text: lines.join("\n").slice(0, 3900), buttons: [] };
 }
 
 export function formatLessons(lessons, options = {}) {

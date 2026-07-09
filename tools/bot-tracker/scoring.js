@@ -8,7 +8,12 @@
  *
  * ENTRY (confirmed / balanced) — a token qualifies when it is:
  *   - active & fresh     (bot activity in-window, age within bounds)
- *   - not yet pumped     (market cap < PUMP_CEILING_USD)
+ *   - not yet pumped     (market cap < PUMP_CEILING_USD, opt-in: leave
+ *                         PUMP_CEILING_USD unset to disable; for fee-
+ *                         collection strategies, the highest-mcap tokens
+ *                         are usually the most profitable to LP, so the
+ *                         pump-ceiling filter should be off. Meridian has
+ *                         its own post-merge filter downstream.)
  *   - liquid / traded    (>= MIN_LIQUIDITY_USD, >= MIN_VOLUME_24H)
  *   - accelerating       (arb-hit velocity rising AND mcap growth accelerating)
  *   - accumulating       (OBV rising)
@@ -121,21 +126,27 @@ export function rankSignals({ limit = 25 } = {}) {
   const windowStart = now - CONFIG.momentumWindowMin * 60_000;
   const mode = CONFIG.entryMode;
 
-  const candidates = db
-    .prepare(
-      `SELECT mint, symbol, name, dex, price_usd, liquidity_usd, market_cap,
-              fdv, volume_h24, obv, occurrence_count, last_event, last_notified,
-              buys_h1, sells_h1, price_change_h1, pair_created_at, safe,
-              pump_count, peak_mcap
-       FROM tokens
-       WHERE pumped = 0 AND faded = 0
-         AND symbol IS NOT NULL
-         AND last_event >= ?
-         AND (market_cap IS NULL OR market_cap < ?)
-         AND (liquidity_usd IS NULL OR liquidity_usd >= ?)
-         AND (volume_h24 IS NULL OR volume_h24 >= ?)`
-    )
-    .all(activeCutoff, CONFIG.pumpCeilingUsd, CONFIG.minLiquidityUsd, CONFIG.minVolume24h);
+  // The pump-ceiling clause is conditionally rendered; the parameter list
+  // changes when the ceiling is disabled (PUMP_CEILING_USD unset / null).
+  // For a fee-collection strategy, set PUMP_CEILING_USD to null/empty and
+  // the ceiling filter disappears entirely — the pruner also stops parking
+  // tokens (mcap >= null is never true).
+  const candParams = [activeCutoff];
+  if (CONFIG.pumpCeilingUsd != null) candParams.push(CONFIG.pumpCeilingUsd);
+  candParams.push(CONFIG.minLiquidityUsd, CONFIG.minVolume24h);
+  const candidates = db.prepare(
+    `SELECT mint, symbol, name, dex, price_usd, liquidity_usd, market_cap,
+            fdv, volume_h24, obv, occurrence_count, last_event, last_notified,
+            buys_h1, sells_h1, price_change_h1, pair_created_at, safe,
+            pump_count, peak_mcap
+     FROM tokens
+     WHERE pumped = 0 AND faded = 0
+       AND symbol IS NOT NULL
+       AND last_event >= ?
+       ${CONFIG.pumpCeilingUsd != null ? "AND (market_cap IS NULL OR market_cap < ?)" : ""}
+       AND (liquidity_usd IS NULL OR liquidity_usd >= ?)
+       AND (volume_h24 IS NULL OR volume_h24 >= ?)`
+  ).all(...candParams);
 
   const signals = [];
   for (const t of candidates) {
@@ -323,6 +334,8 @@ export function detectSurges() {
   const activeCutoff = now - CONFIG.inactiveWindowMin * 60_000;
   const cooldownMs = CONFIG.surgeCooldownMin * 60_000;
 
+  const surgeParams = [activeCutoff];
+  if (CONFIG.pumpCeilingUsd != null) surgeParams.push(CONFIG.pumpCeilingUsd);
   const rows = db
     .prepare(
       `SELECT mint, symbol, name, dex, price_usd, market_cap, liquidity_usd,
@@ -330,9 +343,9 @@ export function detectSurges() {
        FROM tokens
        WHERE pumped = 0 AND faded = 0 AND symbol IS NOT NULL
          AND last_event >= ?
-         AND (market_cap IS NULL OR market_cap < ?)`
+         ${CONFIG.pumpCeilingUsd != null ? "AND (market_cap IS NULL OR market_cap < ?)" : ""}`
     )
-    .all(activeCutoff, CONFIG.pumpCeilingUsd);
+    .all(...surgeParams);
 
   const snapStmt = db.prepare(
     `SELECT timestamp, price_usd, obv, flow FROM snapshots

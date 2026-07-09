@@ -1912,6 +1912,7 @@ function renderSettingsMenu(page = "main") {
       settingButton("Risk", "cfg:page:risk"),
       settingButton("Screen", "cfg:page:screen"),
       settingButton("Policy", "cfg:page:policy"),
+      settingButton("Bot", "cfg:page:bottracker"),
     ],
   ];
 
@@ -1988,6 +1989,39 @@ function renderSettingsMenu(page = "main") {
         settingButton("Exit: BB+RSI", "cfg:set:indicatorExitPreset:bb_plus_rsi"),
       ],
       stepButtons("rsiLength", "RSI len", 1, { digits: 0 }),
+    ];
+  } else if (page === "bottracker") {
+    // Bot-tracker (in-house tools/bot-tracker/) settings. Surfaces the
+    // opt-in filters + the few knobs the operator reaches for most often
+    // (entry mode, stream mode, ceiling on/off). Each row uses a cfg:*
+    // callback that goes through applySettingsMenuCallback below.
+    const bt = config.botTracker || {};
+    const pumpLabel = bt.pumpCeilingUsd == null
+      ? "Pump ceiling: OFF"
+      : `Pump ceiling: ≤$${Math.round(bt.pumpCeilingUsd / 1000)}K`;
+    rows = [
+      [
+        settingButton(`Mode: ${bt.entryMode || "balanced"}`, "cfg:cycle:btMode"),
+      ],
+      [
+        settingButton(`Stream: ${bt.streamMode || "stream"}`, "cfg:cycle:btStream"),
+      ],
+      [
+        settingButton(pumpLabel, "cfg:cycle:btPump"),
+      ],
+      [
+        settingButton("Disable ceiling (fee-collect)", "cfg:set:btCeiling:null"),
+        settingButton("$1M", "cfg:set:btCeiling:1000000"),
+        settingButton("$3M", "cfg:set:btCeiling:3000000"),
+        settingButton("$10M", "cfg:set:btCeiling:10000000"),
+      ],
+      [
+        settingButton(`Min liq: $${(bt.minLiquidityUsd || 0).toLocaleString()}`, "cfg:noop"),
+        settingButton(`Min vol: $${(bt.minVolume24h || 0).toLocaleString()}`, "cfg:noop"),
+      ],
+      [
+        settingButton(`Min bots: ${bt.minDistinctBots ?? "?"}`, "cfg:noop"),
+      ],
     ];
   } else {
     rows = [
@@ -2079,6 +2113,45 @@ async function applySettingsMenuCallback(msg) {
     if (key === "minMcap") value = Math.max(0, Math.round(value));
   } else if (action === "set") {
     value = normalizeMenuValue(key, parts.slice(3).join(":"));
+  } else if (action === "cycle" || (action === "set" && key === "btCeiling")) {
+    // Bot-tracker settings. The keys are persisted to .env via the
+    // update_config tool with a special bot-tracker section. The runtime
+    // module re-reads on its own loader (see tools/bot-tracker/config.js).
+    let value;
+    let section = "botTracker";
+    if (key === "btMode") {
+      const order = ["early", "balanced", "conservative"];
+      const current = config.botTracker?.entryMode || "balanced";
+      value = order[(order.indexOf(current) + 1) % order.length];
+    } else if (key === "btStream") {
+      const order = ["stream", "both", "poll"];
+      const current = config.botTracker?.streamMode || "stream";
+      value = order[(order.indexOf(current) + 1) % order.length];
+    } else if (key === "btPump") {
+      // Cycle through OFF → $1M → $3M → $10M → OFF
+      const current = config.botTracker?.pumpCeilingUsd;
+      const ladder = [null, 1_000_000, 3_000_000, 10_000_000];
+      const idx = current == null ? 0 : ladder.indexOf(current);
+      value = ladder[((idx < 0 ? 0 : idx) + 1) % ladder.length];
+    } else if (key === "btCeiling") {
+      // Direct set: value is "null" → null, otherwise a number
+      value = parts[3] === "null" ? null : Number(parts[3]);
+    } else {
+      await answerCallbackQuery(msg.callbackQueryId, "Unknown bot-tracker action");
+      return;
+    }
+    const result = await executeTool("update_config", {
+      changes: { [section]: { ...(config.botTracker || {}), [key === "btMode" ? "entryMode" : key === "btStream" ? "streamMode" : key === "btPump" || key === "btCeiling" ? "pumpCeilingUsd" : key]: value } },
+      reason: "Telegram bot-tracker settings",
+    });
+    if (!result?.success) {
+      await answerCallbackQuery(msg.callbackQueryId, "Update failed");
+      return;
+    }
+    await answerCallbackQuery(msg.callbackQueryId, `Bot-tracker ${key} = ${value === null ? "off" : value}`);
+    page = "bottracker";
+    await showSettingsMenu({ messageId: msg.messageId, page });
+    return;
   } else {
     await answerCallbackQuery(msg.callbackQueryId, "Unknown action");
     return;

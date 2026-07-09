@@ -673,7 +673,24 @@ const toolMap = {
     }
 
     const STRATEGY_BIN_KEYS = new Set(["binsBelow", "minBinsBelow", "maxBinsBelow", "defaultBinsBelow"]);
+
+    // Nested-object shortcut: { botTracker: { entryMode: "balanced" } } is
+    // a valid update — merge the partial into the live botTracker config and
+    // persist the whole section. Lets the Telegram /settings menu update
+    // individual bot-tracker knobs without round-tripping the full block.
+    if (changes && typeof changes === "object" && changes.botTracker && typeof changes.botTracker === "object") {
+      const before = config.botTracker || {};
+      const merged = { ...before, ...changes.botTracker };
+      // null is a legal "feature off" value for pumpCeilingUsd; do not strip it.
+      if (merged.pumpCeilingUsd === undefined) merged.pumpCeilingUsd = before.pumpCeilingUsd ?? null;
+      config.botTracker = merged;
+      userConfig.botTracker = merged;
+      log("config", `update_config: config.botTracker ${JSON.stringify(before)} → ${JSON.stringify(merged)} (reason: ${reason})`);
+      applied.botTracker = merged;
+    }
+
     for (const [key, val] of Object.entries(changes)) {
+      if (key === "botTracker") continue;  // handled above
       const match = CONFIG_MAP[key] ? [key, CONFIG_MAP[key]] : CONFIG_MAP_LOWER[key.toLowerCase()];
       if (!match) { unknown.push(key); continue; }
       try {
@@ -753,6 +770,12 @@ const toolMap = {
 
     for (const [key, val] of Object.entries(applied)) {
       if (key.startsWith("_")) continue;
+      if (key === "botTracker") {
+        // Persist the whole section in one go (the in-place update above
+        // already applied to live config; here we just write user-config.json).
+        userConfig.botTracker = val;
+        continue;
+      }
       const persistPath = CONFIG_MAP[key]?.[2];
       if (Array.isArray(persistPath) && persistPath.length > 0) {
         let target = userConfig;
