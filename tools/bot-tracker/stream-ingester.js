@@ -15,6 +15,7 @@
  * the Web APIs (Canvas, etc.) the app needs, so it never opens the WS.
  */
 import puppeteer from "puppeteer-core";
+import fs from "node:fs";
 import { getDB } from "./db.js";
 import { log } from "./logger.js";
 import { CONFIG, WSOL, EXCLUDED_MINTS } from "./config.js";
@@ -100,6 +101,54 @@ function recordArbFrame(db, msg) {
   })();
 }
 
+/**
+ * Find a Chromium-class binary to drive via puppeteer-core.
+ *
+ * puppeteer-core (the package we use) does NOT auto-download Chrome like the
+ * full `puppeteer` package does — it requires either `executablePath` or
+ * `channel` to be passed at launch time. The user can set BROWSER_EXECUTABLE
+ * in .env to override; otherwise we probe the usual install locations for
+ * the platform the process is running on.
+ *
+ * If nothing is found we throw a clear error so the user knows what to
+ * install, instead of the cryptic puppeteer-core message about
+ * `executablePath or channel must be specified`.
+ */
+function findBrowserExecutable() {
+  if (CONFIG.browserExecutable) return CONFIG.browserExecutable;
+
+  const candidates = process.platform === "darwin"
+    ? [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        `${process.env.HOME}/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`,
+      ]
+    : process.platform === "win32"
+    ? [
+        "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+        "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+        `${process.env.LOCALAPPDATA}\\Google\\Chrome\\Application\\chrome.exe`,
+        `${process.env.LOCALAPPDATA}\\Chromium\\Application\\chrome.exe`,
+      ]
+    : [
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/chrome",
+        "/opt/google/chrome/chrome",
+        "/snap/bin/chromium",
+      ];
+  for (const p of candidates) {
+    try {
+      if (fs.existsSync(p)) return p;
+    } catch {}
+  }
+  return null;
+}
+
 async function openBrowser() {
   if (CONFIG.browserWsEndpoint) {
     _ownsBrowser = false;
@@ -110,11 +159,28 @@ async function openBrowser() {
     return puppeteer.connect({ browserURL: CONFIG.browserUrl });
   }
   _ownsBrowser = true;
-  return puppeteer.launch({
-    executablePath: CONFIG.browserExecutable || undefined,
+
+  // Resolve the binary up front so we either have an executablePath or a
+  // channel — never neither (which is what puppeteer-core complains about).
+  const exec = findBrowserExecutable();
+  const launchOpts = {
     headless: "new",
     args: SLIM_ARGS,
-  });
+  };
+  if (exec) {
+    launchOpts.executablePath = exec;
+  } else {
+    // No executable found on disk — tell puppeteer-core to look for a
+    // system-managed Chrome. If nothing is on PATH the launch itself will
+    // fail with a clear error from puppeteer.
+    launchOpts.channel = "chrome";
+  }
+  try {
+    return await puppeteer.launch(launchOpts);
+  } catch (e) {
+    log("stream_error", `puppeteer.launch failed: ${e.message}. Set BROWSER_EXECUTABLE in .env to a Chrome/Chromium binary.`);
+    throw e;
+  }
 }
 
 export function startStream() {
