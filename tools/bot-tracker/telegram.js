@@ -87,7 +87,7 @@ export async function notifyStreamStale({ lastFrameAt, healthy = false, heliusAc
       `threshold ${Math.round(CONFIG.streamUnhealthyMs / 1000)}s · mode=${esc(CONFIG.streamMode)}\n` +
       (fallbackOn
         ? `Helius fallback: <b>active</b> — token events still flowing (DB keeps populating).\n`
-        : `Helius fallback: warming up — first Helius cycle not yet complete.\n`) +
+        : `Helius fallback: not yet active — orchestrator will start Helius on the next 30s tick.\n`) +
       `Mute this alert with <code>BOT_STREAM_ALERTS_ENABLED=false</code>.`
   );
 }

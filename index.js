@@ -2143,10 +2143,13 @@ async function applySettingsMenuCallback(msg) {
     return;
   }
 
+  const key = parts[2];
   // Bot-tracker Telegram alert toggles (e.g. cfg:toggle:btTop). Live state
   // lives in config.botTracker; toggling here flips the boolean and pushes
   // the whole section through update_config. Backend ingestion keeps
-  // running regardless — only the chat message is muted.
+  // running regardless — only the chat message is muted. Affects the
+  // bot-tracker's notifyTop / notifyFades / notifySurges / notifyHeartbeat
+  // / notifyStreamStale — nothing in meridian's main bot runtime.
   const BT_TOGGLE_MAP = {
     btTop: "topSignalsEnabled",
     btFades: "fadesEnabled",
@@ -2173,7 +2176,6 @@ async function applySettingsMenuCallback(msg) {
     return;
   }
 
-  const key = parts[2];
   let value;
   if (action === "toggle") {
     value = !Boolean(settingValue(key));
