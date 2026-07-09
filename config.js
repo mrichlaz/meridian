@@ -126,6 +126,24 @@ export const config = {
     athFilterPct:       u.athFilterPct       ?? null, // e.g. -20 = only deploy if price is >= 20% below ATH
   },
 
+  // ─── Bot-tracker merge funnel ───────────
+  // Bot-tracked tokens (from the embedded tools/bot-tracker/ pipeline, which
+  // talks to sandwiched.me's WS stream + Helius fallback) are merged into the
+  // screening universe so the LLM sees wallets that arb bots are actively
+  // working. These knobs control how many of them reach the merge step.
+  botTracker: {
+    // Top-N by trade_count from the bot-tracker SQL funnel. Bigger = more
+    // candidates but more DLMM-pool lookups per cycle (each token costs 1
+    // HTTP request to dlmm.datapi.meteora.ag). Default 50 covers ~1/4 of
+    // the typical 24h-active pool with comfortable headroom.
+    limit:               u.botTrackerLimit         ?? 50,
+    // How far back to count bot events. The bot-tracker keeps a 4h rolling
+    // window for activity; this lets the merger pull a longer history.
+    maxAgeMinutes:       u.botTrackerMaxAgeMinutes ?? 1440,   // 24h
+    minLiquidityUsd:     u.botTrackerMinLiquidity  ?? 5_000,  // $5k
+    minVolume24h:        u.botTrackerMinVolume24h  ?? 50_000, // $50k
+  },
+
   // ─── Position Management ────────────────
   management: {
     minClaimAmount:        u.minClaimAmount        ?? 5,

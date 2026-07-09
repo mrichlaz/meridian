@@ -169,32 +169,32 @@ function passBasicRankFilter(token) {
   const tokenAgeHours = num(token.creation_timestamp) > 0
     ? (Date.now() / 1000 - num(token.creation_timestamp)) / 3600
     : null;
-  if (num(token.market_cap) < g.minMcap) reasons.push(`mcap ${num(token.market_cap)} < ${g.minMcap}`);
-  if (g.maxMcap != null && num(token.market_cap) > g.maxMcap) reasons.push(`mcap ${num(token.market_cap)} > ${g.maxMcap}`);
-  if (num(token.bundler_rate) > g.maxBundlerRate) reasons.push(`bundler ${(num(token.bundler_rate) * 100).toFixed(1)}% > ${(g.maxBundlerRate * 100).toFixed(1)}%`);
+  if (num(token.market_cap) < g.minMcap) reasons.push(`mcap ${num(token.market_cap)} below minMcap ${g.minMcap}`);
+  if (g.maxMcap != null && num(token.market_cap) > g.maxMcap) reasons.push(`mcap ${num(token.market_cap)} above maxMcap ${g.maxMcap}`);
+  if (num(token.bundler_rate) > g.maxBundlerRate) reasons.push(`bundler ${(num(token.bundler_rate) * 100).toFixed(1)}% above maxBundlerRate ${(g.maxBundlerRate * 100).toFixed(1)}%`);
   if (g.minTokenAgeHours != null && tokenAgeHours != null && tokenAgeHours < g.minTokenAgeHours) {
-    reasons.push(`age ${tokenAgeHours.toFixed(2)}h < ${g.minTokenAgeHours}h`);
+    reasons.push(`token age ${tokenAgeHours.toFixed(2)}h below minTokenAgeHours ${g.minTokenAgeHours}h`);
   }
   if (g.maxTokenAgeHours != null && tokenAgeHours != null && tokenAgeHours > g.maxTokenAgeHours) {
-    reasons.push(`age ${tokenAgeHours.toFixed(2)}h > ${g.maxTokenAgeHours}h`);
+    reasons.push(`token age ${tokenAgeHours.toFixed(2)}h above maxTokenAgeHours ${g.maxTokenAgeHours}h`);
   }
-  if (num(token.volume) < g.minVolume) reasons.push(`volume ${num(token.volume)} < ${g.minVolume}`);
+  if (num(token.volume) < g.minVolume) reasons.push(`volume ${num(token.volume)} below minVolume ${g.minVolume}`);
   return { pass: reasons.length === 0, reasons };
 }
 
 function analyzeSecurity(security = {}) {
   const g = config.gmgn;
   const reasons = [];
-  if (security.renounced_mint != null && !boolish(security.renounced_mint)) reasons.push("mint not renounced");
-  if (security.renounced_freeze_account != null && !boolish(security.renounced_freeze_account)) reasons.push("freeze not renounced");
-  if (String(security.is_honeypot || "").toLowerCase() === "yes") reasons.push("honeypot");
-  if (boolish(security.is_wash_trading)) reasons.push("wash trading");
+  if (security.renounced_mint != null && !boolish(security.renounced_mint)) reasons.push("mint authority not renounced");
+  if (security.renounced_freeze_account != null && !boolish(security.renounced_freeze_account)) reasons.push("freeze authority not renounced");
+  if (String(security.is_honeypot || "").toLowerCase() === "yes") reasons.push("honeypot detected");
+  if (boolish(security.is_wash_trading)) reasons.push("wash trading flagged");
   if (String(security.creator_token_status || "").toLowerCase() === "creator_hold") reasons.push("creator still holding");
-  if (num(security.rug_ratio) > g.maxRugRatio) reasons.push(`rug ratio ${ratioPct(security.rug_ratio)}%`);
-  if (num(security.top_10_holder_rate) > g.maxTop10HolderRate) reasons.push(`top10 ${ratioPct(security.top_10_holder_rate)}%`);
-  if (num(security.bundler_trader_amount_rate) > g.maxBundlerRate) reasons.push(`bundler ${ratioPct(security.bundler_trader_amount_rate)}%`);
-  if (num(security.rat_trader_amount_rate) > g.maxRatTraderRate) reasons.push(`insider ${ratioPct(security.rat_trader_amount_rate)}%`);
-  if (num(security.sniper_count) > g.maxSniperCount) reasons.push(`snipers ${num(security.sniper_count)}`);
+  if (num(security.rug_ratio) > g.maxRugRatio) reasons.push(`rug ratio ${ratioPct(security.rug_ratio)}% above maxRugRatio`);
+  if (num(security.top_10_holder_rate) > g.maxTop10HolderRate) reasons.push(`top10 ${ratioPct(security.top_10_holder_rate)}% above maxTop10HolderRate`);
+  if (num(security.bundler_trader_amount_rate) > g.maxBundlerRate) reasons.push(`bundler ${ratioPct(security.bundler_trader_amount_rate)}% above maxBundlerRate`);
+  if (num(security.rat_trader_amount_rate) > g.maxRatTraderRate) reasons.push(`insider ${ratioPct(security.rat_trader_amount_rate)}% above maxRatTraderRate`);
+  if (num(security.sniper_count) > g.maxSniperCount) reasons.push(`snipers ${num(security.sniper_count)} above maxSniperCount`);
   return { passed: reasons.length === 0, reasons };
 }
 
@@ -212,17 +212,17 @@ function analyzeTokenInfo(info = {}) {
   const athFilter = g.athFilterPct;
   if (athFilter != null && priceVsAthPct != null) {
     const threshold = 100 + Number(athFilter);
-    if (priceVsAthPct > threshold) reasons.push(`price ${priceVsAthPct.toFixed(1)}% of ATH > ${threshold}%`);
+    if (priceVsAthPct > threshold) reasons.push(`price ${priceVsAthPct.toFixed(1)}% of ATH above ATH limit ${threshold}%`);
   }
   const totalFeeSol = num(info.total_fee);
-  if (num(info.holder_count) < g.minHolders) reasons.push(`holders ${num(info.holder_count)} < ${g.minHolders}`);
-  if (totalFeeSol < g.minTotalFeeSol) reasons.push(`total fee ${totalFeeSol} SOL < ${g.minTotalFeeSol} SOL`);
-  if (num(stat.top_10_holder_rate) > g.maxTop10HolderRate) reasons.push(`top10 ${ratioPct(stat.top_10_holder_rate)}%`);
-  if (g.maxDevTeamHoldRate != null && num(stat.dev_team_hold_rate) > g.maxDevTeamHoldRate) reasons.push(`dev team ${ratioPct(stat.dev_team_hold_rate)}%`);
-  if (num(stat.bot_degen_rate) > g.maxBotDegenRate) reasons.push(`bot degen ${ratioPct(stat.bot_degen_rate)}%`);
-  if (g.maxFreshWalletRate != null && num(stat.fresh_wallet_rate) > g.maxFreshWalletRate) reasons.push(`fresh wallets ${ratioPct(stat.fresh_wallet_rate)}%`);
-  if (num(stat.top_bundler_trader_percentage) > g.maxBundlerRate) reasons.push(`bundler ${ratioPct(stat.top_bundler_trader_percentage)}%`);
-  if (num(stat.top_rat_trader_percentage) > g.maxRatTraderRate) reasons.push(`insider ${ratioPct(stat.top_rat_trader_percentage)}%`);
+  if (num(info.holder_count) < g.minHolders) reasons.push(`holders ${num(info.holder_count)} below minHolders ${g.minHolders}`);
+  if (totalFeeSol < g.minTotalFeeSol) reasons.push(`total fee ${totalFeeSol} SOL below minTotalFeeSol ${g.minTotalFeeSol} SOL`);
+  if (num(stat.top_10_holder_rate) > g.maxTop10HolderRate) reasons.push(`top10 ${ratioPct(stat.top_10_holder_rate)}% above maxTop10HolderRate`);
+  if (g.maxDevTeamHoldRate != null && num(stat.dev_team_hold_rate) > g.maxDevTeamHoldRate) reasons.push(`dev team ${ratioPct(stat.dev_team_hold_rate)}% above maxDevTeamHoldRate`);
+  if (num(stat.bot_degen_rate) > g.maxBotDegenRate) reasons.push(`bot degen ${ratioPct(stat.bot_degen_rate)}% above maxBotDegenRate`);
+  if (g.maxFreshWalletRate != null && num(stat.fresh_wallet_rate) > g.maxFreshWalletRate) reasons.push(`fresh wallets ${ratioPct(stat.fresh_wallet_rate)}% above maxFreshWalletRate`);
+  if (num(stat.top_bundler_trader_percentage) > g.maxBundlerRate) reasons.push(`bundler ${ratioPct(stat.top_bundler_trader_percentage)}% above maxBundlerRate`);
+  if (num(stat.top_rat_trader_percentage) > g.maxRatTraderRate) reasons.push(`insider ${ratioPct(stat.top_rat_trader_percentage)}% above maxRatTraderRate`);
   return {
     passed: reasons.length === 0,
     reasons,
@@ -495,10 +495,10 @@ async function checkBounceSetup(mint) {
     reasons.push(`price below supertrend (${stValue})`);
 
   if (rules.minRsi != null && Number.isFinite(rsiValue) && rsiValue < rules.minRsi)
-    reasons.push(`RSI ${rsiValue.toFixed(1)} < min ${rules.minRsi}`);
+    reasons.push(`RSI ${rsiValue.toFixed(1)} below minRsi ${rules.minRsi}`);
 
   if (rules.maxRsi != null && Number.isFinite(rsiValue) && rsiValue > rules.maxRsi)
-    reasons.push(`RSI ${rsiValue.toFixed(1)} > max ${rules.maxRsi}`);
+    reasons.push(`RSI ${rsiValue.toFixed(1)} above maxRsi ${rules.maxRsi}`);
 
   if (rules.requireBbPosition != null && bbPosition !== rules.requireBbPosition)
     reasons.push(`BB position ${bbPosition} ≠ required ${rules.requireBbPosition}`);

@@ -263,6 +263,22 @@ function getRawPoolScreeningRejectReason(pool, s) {
   const launchpad = getPoolLaunchpad(pool);
   const createdAt = numeric(base?.created_at);
 
+  // Per-pool threshold scaling: each pool carries `discovery_timeframe` set
+  // when its row was pulled (5m / 30m / 1h / 2h / 4h / 12h / 24h). The
+  // pre-scaled `s.minFeeActiveTvlRatio` / `s.minVolume` come in at the
+  // batch's dominant timeframe, which can disagree with this pool's
+  // (notably when the sparse-merge step pulls the next-up window and adds
+  // it to the dominant batch). Re-scale against this pool's actual
+  // timeframe so the rejection text matches the threshold we just applied.
+  const poolTf = pool?.discovery_timeframe || s._timeframe || "5m";
+  if (poolTf !== s._timeframe && s._baseMinFeeActiveTvlRatio != null) {
+    const perPool = getEffectiveWindowThresholds({
+      minFeeActiveTvlRatio: s._baseMinFeeActiveTvlRatio,
+      minVolume: s._baseMinVolume,
+    }, poolTf);
+    s = { ...s, ...perPool, _timeframe: poolTf };
+  }
+
   if (s.excludeHighSupplyConcentration && pool?.base_token_has_high_supply_concentration === true) {
     return "base token has high supply concentration";
   }
@@ -585,35 +601,6 @@ export async function discoverPools({
 } = {}) {
   const s = config.screening;
   const tf = s.timeframe || "5m";
-  const requestedWindowThresholds = getEffectiveWindowThresholds({
-    minFeeActiveTvlRatio: numeric(s.minFeeActiveTvlRatio),
-    minVolume: numeric(s.minVolume),
-  }, tf);
-  const effectiveFee = requestedWindowThresholds.minFeeActiveTvlRatio;
-  const effectiveVolume = requestedWindowThresholds.minVolume;
-  const filters = [
-    "base_token_has_critical_warnings=false",
-    "quote_token_has_critical_warnings=false",
-    s.excludeHighSupplyConcentration ? "base_token_has_high_supply_concentration=false" : null,
-    "base_token_has_high_single_ownership=false",
-    "pool_type=dlmm",
-    `base_token_market_cap>=${s.minMcap}`,
-    `base_token_market_cap<=${s.maxMcap}`,
-    `base_token_holders>=${s.minHolders}`,
-    `volume>=${effectiveVolume}`,
-    `tvl>=${s.minTvl}`,
-    s.maxTvl != null ? `tvl<=${s.maxTvl}` : null,
-    `dlmm_bin_step>=${s.minBinStep}`,
-    `dlmm_bin_step<=${s.maxBinStep}`,
-    `fee_active_tvl_ratio>=${effectiveFee}`,
-    `base_token_organic_score>=${s.minOrganic}`,
-    `quote_token_organic_score>=${s.minQuoteOrganic}`,
-    s.minTokenAgeHours != null ? `base_token_created_at<=${Date.now() - s.minTokenAgeHours * 3_600_000}` : null,
-    s.maxTokenAgeHours != null ? `base_token_created_at>=${Date.now() - s.maxTokenAgeHours * 3_600_000}` : null,
-    Array.isArray(s.allowedLaunchpads) && s.allowedLaunchpads.length > 0
-      ? `base_token_launchpad=[${s.allowedLaunchpads.join(",")}]`
-      : null,
-  ].filter(Boolean).join("&&");
 
   // Meteora Pool Discovery does not support 15m. Skip unsupported windows in
   // the escalation ladder instead of failing the whole discovery cycle.
@@ -624,16 +611,52 @@ export async function discoverPools({
   let usedTimeframe = s.timeframe;
 
   // Walk the ladder one step at a time starting at the configured timeframe.
-  // - The initial fetch is also wrapped, so a broken upstream endpoint
+  // - The threshold-sensitive filters (`fee_active_tvl_ratio`, `volume`) are
+  //   REBUILT PER STEP against that step's timeframe so the API filter and
+  //   the post-processing filter always agree. Previously the filters were
+  //   computed once with the user's configured timeframe; when 30m / 1h
+  //   were empty and we escalated to 2h, the API was still asked for the
+  //   30m-equivalent filter while post-processing scaled back to 2h,
+  //   producing rejections like "fee/active-TVL 0.5843 below minFeeActiveTvlRatio 1.4786"
+  //   for pools the API said yes to.
+  // - The initial fetch is wrapped too, so a broken upstream endpoint
   //   (e.g. 15m returning 400) doesn't abort the whole screening cycle.
   // - Empty windows are logged and we step up to the next timeframe.
   for (let i = startFrom; i < ladder.length; i++) {
     const candidate = ladder[i];
+    const stepThresholds = getEffectiveWindowThresholds({
+      minFeeActiveTvlRatio: numeric(s.minFeeActiveTvlRatio),
+      minVolume: numeric(s.minVolume),
+    }, candidate);
+    const stepFilters = [
+      "base_token_has_critical_warnings=false",
+      "quote_token_has_critical_warnings=false",
+      s.excludeHighSupplyConcentration ? "base_token_has_high_supply_concentration=false" : null,
+      "base_token_has_high_single_ownership=false",
+      "pool_type=dlmm",
+      `base_token_market_cap>=${s.minMcap}`,
+      `base_token_market_cap<=${s.maxMcap}`,
+      `base_token_holders>=${s.minHolders}`,
+      `volume>=${stepThresholds.minVolume}`,
+      `tvl>=${s.minTvl}`,
+      s.maxTvl != null ? `tvl<=${s.maxTvl}` : null,
+      `dlmm_bin_step>=${s.minBinStep}`,
+      `dlmm_bin_step<=${s.maxBinStep}`,
+      `fee_active_tvl_ratio>=${stepThresholds.minFeeActiveTvlRatio}`,
+      `base_token_organic_score>=${s.minOrganic}`,
+      `quote_token_organic_score>=${s.minQuoteOrganic}`,
+      s.minTokenAgeHours != null ? `base_token_created_at<=${Date.now() - s.minTokenAgeHours * 3_600_000}` : null,
+      s.maxTokenAgeHours != null ? `base_token_created_at>=${Date.now() - s.maxTokenAgeHours * 3_600_000}` : null,
+      Array.isArray(s.allowedLaunchpads) && s.allowedLaunchpads.length > 0
+        ? `base_token_launchpad=[${s.allowedLaunchpads.join(",")}]`
+        : null,
+    ].filter(Boolean).join("&&");
+
     let data;
     try {
       data = await fetchPoolDiscoveryPage({
         page_size,
-        filters,
+        filters: stepFilters,
         timeframe: candidate,
         category: s.category,
       });
@@ -667,8 +690,38 @@ export async function discoverPools({
     const nextIdx = ladder.indexOf(usedTimeframe) + 1;
     if (nextIdx > 0 && nextIdx < ladder.length) {
       const nextTf = ladder[nextIdx];
+      // Rebuild the filter against the next timeframe too, so the sparse-merge
+      // API request matches the per-pool post-processing threshold for that
+      // window. We lazily compute it here because the ladder already exited.
+      const nextStepThresholds = getEffectiveWindowThresholds({
+        minFeeActiveTvlRatio: numeric(s.minFeeActiveTvlRatio),
+        minVolume: numeric(s.minVolume),
+      }, nextTf);
+      const nextStepFilters = [
+        "base_token_has_critical_warnings=false",
+        "quote_token_has_critical_warnings=false",
+        s.excludeHighSupplyConcentration ? "base_token_has_high_supply_concentration=false" : null,
+        "base_token_has_high_single_ownership=false",
+        "pool_type=dlmm",
+        `base_token_market_cap>=${s.minMcap}`,
+        `base_token_market_cap<=${s.maxMcap}`,
+        `base_token_holders>=${s.minHolders}`,
+        `volume>=${nextStepThresholds.minVolume}`,
+        `tvl>=${s.minTvl}`,
+        s.maxTvl != null ? `tvl<=${s.maxTvl}` : null,
+        `dlmm_bin_step>=${s.minBinStep}`,
+        `dlmm_bin_step<=${s.maxBinStep}`,
+        `fee_active_tvl_ratio>=${nextStepThresholds.minFeeActiveTvlRatio}`,
+        `base_token_organic_score>=${s.minOrganic}`,
+        `quote_token_organic_score>=${s.minQuoteOrganic}`,
+        s.minTokenAgeHours != null ? `base_token_created_at<=${Date.now() - s.minTokenAgeHours * 3_600_000}` : null,
+        s.maxTokenAgeHours != null ? `base_token_created_at>=${Date.now() - s.maxTokenAgeHours * 3_600_000}` : null,
+        Array.isArray(s.allowedLaunchpads) && s.allowedLaunchpads.length > 0
+          ? `base_token_launchpad=[${s.allowedLaunchpads.join(",")}]`
+          : null,
+      ].filter(Boolean).join("&&");
       try {
-        const extra = await fetchPoolDiscoveryPage({ page_size, filters, timeframe: nextTf, category: s.category });
+        const extra = await fetchPoolDiscoveryPage({ page_size, filters: nextStepFilters, timeframe: nextTf, category: s.category });
         const extraPools = Array.isArray(extra?.data) ? extra.data : [];
         const known = new Set(rawPools.map((p) => p.pool_address));
         let added = 0;
@@ -870,7 +923,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       else if (g && b) acc.gmgn_bot += 1;
       return acc;
     }, { all3: 0, meteora_gmgn: 0, meteora_bot: 0, gmgn_bot: 0 });
-    log("screening", `Merge mode: meteora=${(meteoraDiscovery.pools || []).length}, gmgn=${(gmgnDiscovery.pools || []).length}, bot_tracker=${(botTrackerDiscovery.pools || []).length}, merged_unique=${mergedPools.length}, overlaps(all3=${overlapCounts.all3}, meteora+gmgn=${overlapCounts.meteora_gmgn}, meteora+bot=${overlapCounts.meteora_bot}, gmgn+bot=${overlapCounts.gmgn_bot})`);
+    log("screening", `Merge mode: meteora=${(meteoraDiscovery.pools || []).length}, gmgn=${(gmgnDiscovery.pools || []).length}, bot_tracker=${(botTrackerDiscovery.pools || []).length}, bot_tracker_in=${botTrackerDiscovery.filtered_examples?.length || 0} sql-pass, merged_unique=${mergedPools.length}, overlaps(all3=${overlapCounts.all3}, meteora+gmgn=${overlapCounts.meteora_gmgn}, meteora+bot=${overlapCounts.meteora_bot}, gmgn+bot=${overlapCounts.gmgn_bot})`);
     discovery = {
       total: (meteoraDiscovery.total || 0) + (gmgnDiscovery.total || 0) + (botTrackerDiscovery.pools?.length || 0),
       pools: mergedPools,
@@ -919,10 +972,11 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       const botTrackerDiscovery = await buildBotTrackerCandidates({
         existingPools: pools,
         timeframe: discovery.discovery_timeframe || config.screening?.timeframe || "30m",
-        limit: 20,
+        limit: Number(config.botTracker?.limit ?? 50),
       });
       pools.push(...(botTrackerDiscovery.pools || []));
       filteredOut.push(...(botTrackerDiscovery.filtered_examples || []));
+      log("screening", `Bot-tracker merge: ${botTrackerDiscovery.pools?.length || 0} pool(s) injected, ${botTrackerDiscovery.filtered_examples?.length || 0} rejected`);
     } catch {} // tracker DB missing or empty — skip silently
   }
 
@@ -1080,7 +1134,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
         if (p.price_vs_ath_pct == null) return true; // no data → don't filter
         if (p.price_vs_ath_pct > threshold) {
           log("screening", `ATH filter: dropped ${p.name} — ${p.price_vs_ath_pct}% of ATH (limit: ${threshold}%)`);
-          pushFilteredReason(filteredOut, p, `${p.price_vs_ath_pct}% of ATH > ${threshold}% limit`);
+          pushFilteredReason(filteredOut, p, `${p.price_vs_ath_pct}% of ATH above ATH limit ${threshold}%`);
           return false;
         }
         return true;
@@ -1231,15 +1285,13 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   }
 
   // Full reject distribution — the 3-example cap hid which filter was doing
-  // the killing. Group reasons by category (numbers stripped) with counts so
-  // NO DEPLOY cycles are diagnosable from the report alone.
+  // the killing. Group reasons by category with counts so NO DEPLOY cycles
+  // are diagnosable from the report alone. Each reason is mapped to a clean,
+  // threshold-aware label (`mcap below minMcap ($150K)`, not the previous
+  // `mcap < minMcap`), and unknown templates fall back to a truncated title.
   const rejectSummary = {};
   for (const f of filteredOut) {
-    const category = String(f.reason || "unknown")
-      .replace(/\(scaled from base[^)]*\)/g, "")
-      .replace(/\bat \d+[smh]\b/g, "")
-      .replace(/[\d,.$]+%?/g, "")
-      .replace(/\s+/g, " ").trim();
+    const category = categorizeRejectReason(f.reason);
     rejectSummary[category] = (rejectSummary[category] || 0) + 1;
   }
 
@@ -1373,6 +1425,133 @@ function pushFilteredReason(list, pool, reason) {
   });
 }
 
+/**
+ * Categorise a raw reject reason into a short, threshold-aware label suitable
+ * for grouping in the NO DEPLOY report. Raw reasons like
+ *   "mcap 350000 below minMcap 150000"
+ * become
+ *   "mcap below minMcap ($150K)"
+ * — readable at a glance, with the actual configured threshold visible so the
+ * user can tell whether the floor is too strict or the pool is too thin.
+ *
+ * Unknown templates fall back to a truncated title-cased phrase so the bucket
+ * is still informative even when a new pushFilteredReason call site hasn't been
+ * mapped yet.
+ */
+function fmtThresholdUsd(n) {
+  if (n == null || !Number.isFinite(Number(n))) return String(n ?? "n/a");
+  const v = Number(n);
+  if (Math.abs(v) >= 1_000_000) return `$${(v / 1_000_000).toFixed(2).replace(/\.?0+$/, "")}M`;
+  if (Math.abs(v) >= 1_000) return `$${Math.round(v / 1_000)}K`;
+  return `$${v}`;
+}
+
+function categorizeRejectReason(rawReason) {
+  const r = String(rawReason || "").trim();
+  if (!r) return "unknown";
+  const s = config.screening || {};
+  const g = config.gmgn || {};
+
+  // Stable, ordered checks: most-specific templates first so the right bucket
+  // wins. Each branch returns a short label that includes the actual
+  // threshold value pulled from `config`, so the report tells the user not
+  // just what filter fired but what threshold it fired against.
+  const checks = [
+    // ── Screening (Meteora + GMGN) ─────────────────────────────────
+    { re: /^mcap .* below minMcap\b/, label: () => `mcap below minMcap (${fmtThresholdUsd(s.minMcap)})` },
+    { re: /^mcap .* above maxMcap\b/, label: () => `mcap above maxMcap (${fmtThresholdUsd(s.maxMcap)})` },
+    { re: /^holders .* below minHolders\b/, label: () => `holders below minHolders (${s.minHolders ?? "n/a"})` },
+    { re: /^volume .* below minVolume\b/, label: () => `volume below minVolume (${fmtThresholdUsd(s.minVolume)})` },
+    { re: /^TVL .* below minTvl\b/, label: () => `TVL below minTvl (${fmtThresholdUsd(s.minTvl)})` },
+    { re: /^TVL .* above maxTvl\b/, label: () => `TVL above maxTvl (${fmtThresholdUsd(s.maxTvl)})` },
+    { re: /^bin_step .* below minBinStep\b/, label: () => `bin_step below minBinStep (${s.minBinStep ?? "n/a"})` },
+    { re: /^bin_step .* above maxBinStep\b/, label: () => `bin_step above maxBinStep (${s.maxBinStep ?? "n/a"})` },
+    { re: /^fee\/active-TVL .* below persistence floor\b/, label: () => "fee/active-TVL below persistence floor" },
+    { re: /^fee\/active-TVL .* below minFeeActiveTvlRatio\b/, label: () => `fee/active-TVL below minFeeActiveTvlRatio (${s.minFeeActiveTvlRatio ?? "n/a"}%)` },
+    { re: /^volatility .* is unusable\b/, label: () => "volatility unusable" },
+    { re: /^base organic .* below minOrganic\b/, label: () => `base organic below minOrganic (${s.minOrganic ?? "n/a"}%)` },
+    { re: /^quote organic .* below minQuoteOrganic\b/, label: () => `quote organic below minQuoteOrganic (${s.minQuoteOrganic ?? "n/a"}%)` },
+    { re: /^pool_type .* is not dlmm\b/, label: () => "pool_type not dlmm" },
+    { re: /^quote token .* is not SOL\b/, label: () => "quote token not SOL" },
+    { re: /^base token has high supply concentration\b/, label: () => "base token high supply concentration" },
+    { re: /^base token has critical warnings\b/, label: () => "base token critical warnings" },
+    { re: /^quote token has critical warnings\b/, label: () => "quote token critical warnings" },
+    { re: /^base token has high single ownership\b/, label: () => "base token high single ownership" },
+    { re: /^launchpad .* not in allow-list\b/, label: () => "launchpad not in allow-list" },
+    { re: /^blocked launchpad \(([^)]+)\)/, label: (m) => `blocked launchpad (${m[1]})` },
+    { re: /^token age below minTokenAgeHours\b/, label: () => `token age below minTokenAgeHours (${s.minTokenAgeHours != null ? `${s.minTokenAgeHours}h` : "n/a"})` },
+    { re: /^token age above maxTokenAgeHours\b/, label: () => `token age above maxTokenAgeHours (${s.maxTokenAgeHours != null ? `${s.maxTokenAgeHours}h` : "n/a"})` },
+    { re: /^token age .* below 2h auto-deploy floor\b/, label: () => "token age below 2h auto-deploy floor" },
+    // ── Conviction floor (passes ALL basic stages but fails tightened bar) ──
+    { re: /^fee\/active-TVL .* below conviction floor\b/, label: () => "fee/active-TVL below conviction floor" },
+    { re: /^organic .* below conviction floor\b/, label: () => "organic below conviction floor" },
+    { re: /^volume .* below conviction floor\b/, label: () => "volume below conviction floor" },
+    { re: /^holders .* below conviction floor\b/, label: () => "holders below conviction floor" },
+    { re: /^top10 .* above conviction ceiling\b/, label: () => "top10 above conviction ceiling" },
+    { re: /^volatility .* above \d+ without smart-money\b/, label: () => "volatility above 12 without smart-money" },
+    // ── Lifecycle / cooldown / caps ─────────────────────────────────
+    { re: /^already have an open position in this pool\b/, label: () => "already have open position" },
+    { re: /^already holding this base token in another pool\b/, label: () => "already holding base token" },
+    { re: /^pool cooldown active\b/, label: () => "pool cooldown" },
+    { re: /^token cooldown active\b/, label: () => "token cooldown" },
+    { re: /^token deploy cap: .* in 24h\b/, label: () => "token 24h deploy cap" },
+    { re: /^PVP hard filter\b/, label: () => "PVP hard filter" },
+    { re: /^wash trading flagged\b/, label: () => "wash trading flagged" },
+    { re: /^\d+(?:\.\d+)?% of ATH above ATH limit\b/, label: () => `near ATH limit (above threshold ${s.athFilterPct != null ? `+${s.athFilterPct}%` : ""})`.replace(/\s+$/, "") },
+    { re: /^bot holders .* above .*$/, label: () => `bot holders above maxBotHoldersPct (${s.maxBotHoldersPct ?? "n/a"}%)` },
+    { re: /^volume persistence weak\b/, label: () => "volume persistence weak" },
+    { re: /^indicator reject:/, label: () => "indicator rejected" },
+    { re: /^blacklisted token\b/, label: () => "blacklisted token" },
+    { re: /^blocked deployer\b/, label: () => "blocked deployer" },
+    // ── GMGN rank / security / info (now also use below/above words) ──
+    { re: /^mcap .+ below minMcap .+$/, label: () => `mcap below minMcap (gmgn, ${fmtThresholdUsd(g.minMcap)})` },
+    { re: /^mcap .+ above maxMcap .+$/, label: () => `mcap above maxMcap (gmgn, ${fmtThresholdUsd(g.maxMcap)})` },
+    { re: /^bundler .* above maxBundlerRate/, label: () => "bundler ratio above maxBundlerRate" },
+    { re: /^token age .* below minTokenAgeHours\b/, label: () => `token age below minTokenAgeHours (gmgn, ${g.minTokenAgeHours != null ? `${g.minTokenAgeHours}h` : "n/a"})` },
+    { re: /^token age .* above maxTokenAgeHours\b/, label: () => `token age above maxTokenAgeHours (gmgn, ${g.maxTokenAgeHours != null ? `${g.maxTokenAgeHours}h` : "n/a"})` },
+    { re: /^volume .+ below minVolume .+$/, label: () => `volume below minVolume (gmgn, ${fmtThresholdUsd(g.minVolume)})` },
+    { re: /^holders .+ below minHolders .+$/, label: () => `holders below minHolders (gmgn, ${g.minHolders ?? "n/a"})` },
+    { re: /^total fee .* below minTotalFeeSol\b/, label: () => `total fee below minTotalFeeSol (${g.minTotalFeeSol ?? "n/a"} SOL)` },
+    { re: /^top10 .* above maxTop10HolderRate/, label: () => "top10 concentration above maxTop10HolderRate" },
+    { re: /^dev team .* above maxDevTeamHoldRate/, label: () => "dev team holdings above maxDevTeamHoldRate" },
+    { re: /^bot degen .* above maxBotDegenRate/, label: () => "bot degen activity above maxBotDegenRate" },
+    { re: /^fresh wallets .* above maxFreshWalletRate/, label: () => "fresh wallets above maxFreshWalletRate" },
+    { re: /^insider .* above maxRatTraderRate/, label: () => "insider trader rate above maxRatTraderRate" },
+    { re: /^snipers .* above maxSniperCount/, label: () => "sniper count above maxSniperCount" },
+    { re: /^rug ratio .* above maxRugRatio/, label: () => "rug ratio above maxRugRatio" },
+    { re: /^price .+ of ATH above ATH limit\b/, label: () => "price too close to ATH" },
+    { re: /^mint authority not renounced\b/, label: () => "mint authority still enabled" },
+    { re: /^freeze authority not renounced\b/, label: () => "freeze authority still enabled" },
+    { re: /^honeypot detected\b/, label: () => "honeypot detected" },
+    { re: /^creator still holding\b/, label: () => "creator still holding tokens" },
+    { re: /^wash trading flagged\b/, label: () => "wash trading flagged" },
+    { re: /^RSI .* below minRsi\b/, label: () => "RSI below minRsi" },
+    { re: /^RSI .* above maxRsi\b/, label: () => "RSI above maxRsi" },
+    { re: /^already at bottom:.*/, label: () => "already at bottom (RSI / lower BB)" },
+    { re: /^price below supertrend\b/, label: () => "price below supertrend" },
+  ];
+
+  for (const { re, label } of checks) {
+    const m = r.match(re);
+    if (m) {
+      try {
+        const out = label(m);
+        if (out) return out;
+      } catch {
+        // fall through to fallback
+      }
+    }
+  }
+
+  // Fallback: title-case the first 4 words of the raw reason (strip any
+  // scaled-from-base parenthetical) so unknown templates still bucket sensibly.
+  const cleaned = r.replace(/\(scaled from base[^)]*\)/g, "").replace(/\s+/g, " ").trim();
+  const head = cleaned.split(" ").slice(0, 4).join(" ");
+  return head
+    .replace(/\b\w/g, (c) => c.toUpperCase())
+    .slice(0, 60);
+}
+
 function mergePoolCandidate(existing, incoming, sourceName) {
   if (!existing) {
     return {
@@ -1441,18 +1620,19 @@ function mergeCandidatePools({ meteoraPools = [], gmgnPools = [], botTrackerPool
   ));
 }
 
-async function buildBotTrackerCandidates({ existingPools = [], timeframe, limit = 20 } = {}) {
+async function buildBotTrackerCandidates({ existingPools = [], timeframe, limit } = {}) {
   const injectedPools = [];
   const filteredExamples = [];
   try {
     const { getCryptoBotTokens } = await import("./crypto-signals.js");
-    // Use configurable time window so quiet wallets still surface candidates.
-    // Defaults: 24h lookback, $5K liquidity, $50K 24h volume (loose enough
-    // for small-cap meme tokens; tighten via user-config.json if you want
-    // only mature pools).
+    // The funnel is configured under config.botTracker. Each token costs a
+    // dlmm.datapi.meteora.ag round-trip to resolve a candidate pool, so the
+    // limit is the real cost knob; raise it to put more bot tokens into the
+    // merge, lower it if the LLM is overwhelmed.
     const botConfig = config.botTracker || {};
+    const effLimit = limit ?? Number(botConfig.limit ?? 50);
     const botData = getCryptoBotTokens({
-      limit,
+      limit: effLimit,
       maxAgeMinutes: Number(botConfig.maxAgeMinutes ?? 1440),
       minLiquidityUsd: Number(botConfig.minLiquidityUsd ?? 5000),
       minVolume24h: Number(botConfig.minVolume24h ?? 50000),

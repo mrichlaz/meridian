@@ -35,7 +35,7 @@ import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
 import { logScreeningSnapshot, summarizeScreeningSnapshots, readScreeningSnapshots } from "./screening-snapshot.js";
 import { isRangeDriftAccelerating, isRecoveryImproving, isFeeGrowthDecelerating, isFeeGrowthAccelerating, assessTrend } from "./utils/position-trend.js";
-import { startBotTracker } from "./tools/bot-tracker.js";
+import { startBotTracker } from "./tools/bot-tracker/index.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
 import { studyTopLPers } from "./tools/study.js";
@@ -101,6 +101,68 @@ if (isMain) {
 
 // Use a fresh read every time — config evolves during runtime.
 function getDeployAmount() { return config.management.deployAmountSol; }
+
+/**
+ * Apply the user's configured sizing bounds to a candidate deploy amount.
+ * The user's "sizing configuration" is:
+ *   - `management.deployAmountSol`  floor (minimum position size, default 0.5)
+ *   - `risk.maxDeployAmount`        ceiling (maximum position size, default 5)
+ *   - `management.gasReserve`       amount kept aside for transaction fees
+ * The adaptive / scoring multipliers used in the fallback and `/deploy`
+ * paths can drop the candidate below the floor or above the ceiling; this
+ * helper clamps those back into the user's range. Pass `allowBelowFloor:
+ * true` to opt out of the floor (e.g. for an explicit CLI override that
+ * already supplied its own --amount).
+ */
+function applyDeployAmountClamp(amount, { walletSol = null, allowBelowFloor = false } = {}) {
+  const fallback = Number.isFinite(Number(amount)) ? Number(amount) : Number(config.management.deployAmountSol);
+  let final = Number.isFinite(Number(amount)) ? Number(amount) : Number(config.management.deployAmountSol);
+  const floor = Number(config.management.deployAmountSol) || 0;
+  const ceil = Number(config.risk.maxDeployAmount) || Number.MAX_SAFE_INTEGER;
+  const gasReserve = Number(config.management.gasReserve ?? 0.2) || 0;
+
+  if (final < floor && !allowBelowFloor) final = floor;
+  if (final > ceil) final = ceil;
+  if (walletSol != null && Number.isFinite(Number(walletSol))) {
+    const walletReserve = Math.max(0, Number(walletSol) - gasReserve);
+    if (walletReserve > 0 && final > walletReserve) final = walletReserve;
+  }
+  // Dust guard — anything below 0.05 SOL isn't a viable single-sided deploy.
+  if (final < 0.05) final = Math.min(floor, ceil);
+  if (!Number.isFinite(final)) final = floor;
+
+  return { final: Number(final.toFixed(2)), clamped: final !== Number(fallback.toFixed(2)) };
+}
+
+/**
+ * Compute the deploy amount for one of the dedicated deploy paths
+ * (auto-deploy, DATA-INTEGRITY FALLBACK, PROVIDER FALLBACK, or `/deploy`).
+ *
+ * Applies the adaptive-profile size multiplier and the score-based
+ * multiplier, then clamps the result to the user's sizing bounds so a low
+ * confidence score can't push the position below the configured floor.
+ *
+ * Returns the final amount alongside the multiplier trace so the deploy
+ * log/screen report can show what was applied (and whether the clamp fired).
+ */
+function computeFinalDeployAmount({
+  walletSol,
+  baseDeployAmount,
+  profile = {},
+  score = 66,
+  regime = getMarketRegime(),
+  allowBelowFloor = false,
+} = {}) {
+  const base = Number.isFinite(Number(baseDeployAmount))
+    ? Number(baseDeployAmount)
+    : computeDeployAmount(walletSol);
+  const profileMult = Number(profile?.sizeMultiplier) || 1;
+  // sizeMultiplierForScore requires regime; if not supplied use NEUTRAL.
+  const scoreMult = Number(sizeMultiplierForScore(Number(score) || 0, regime)) || 1;
+  const multiplied = base * profileMult * scoreMult;
+  const { final, clamped } = applyDeployAmountClamp(multiplied, { walletSol, allowBelowFloor });
+  return { final, base, multiplied: Number(multiplied.toFixed(2)), profileMult, scoreMult, clamped };
+}
 
 // ═══════════════════════════════════════════
 //  CYCLE TIMERS
@@ -1058,7 +1120,13 @@ IMPORTANT:
               log("screening", `Adaptive override: ${topSurvivor.name} config=${deployProfile.configStrategy} → effective=${deployProfile.strategy} (${deployProfile.overrideReason})`);
             }
             if (deployProfile.deployable) {
-              const deployAmountOverride = Number((deployAmount * (deployProfile.sizeMultiplier || 1) * sizeMultiplierForScore(passing[0]?.policy?.score || 66, regime)).toFixed(2));
+              const { final: deployAmountOverride } = computeFinalDeployAmount({
+                walletSol: currentBalance.sol,
+                baseDeployAmount: deployAmount,
+                profile: deployProfile,
+                score: passing[0]?.policy?.score || 66,
+                regime,
+              });
               const initialValueUsd = currentBalance.sol_price ? deployAmountOverride * currentBalance.sol_price : null;
               const binsBelow = Math.max(config.minSafeBinsBelow, Math.round(computeBinsBelow(topSurvivor.volatility) * (deployProfile.binsMultiplier || 1)));
               const fallbackResult = await executeTool("deploy_position", {
@@ -1139,7 +1207,12 @@ IMPORTANT:
             log("screening", `Adaptive override: ${topSurvivor.name} config=${deployProfile.configStrategy} → effective=${deployProfile.strategy} (${deployProfile.overrideReason})`);
           }
           if (deployProfile.deployable) {
-            const deployAmountOverride = Number((screeningDeployAmount * (deployProfile.sizeMultiplier || 1) * sizeMultiplierForScore(passingForFallback[0]?.policy?.score || 66)).toFixed(2));
+            const { final: deployAmountOverride } = computeFinalDeployAmount({
+              walletSol: screeningBalance?.sol,
+              baseDeployAmount: screeningDeployAmount,
+              profile: deployProfile,
+              score: passingForFallback[0]?.policy?.score || 66,
+            });
             const initialValueUsd = screeningBalance?.sol_price ? deployAmountOverride * screeningBalance.sol_price : null;
             const binsBelow = Math.max(config.minSafeBinsBelow, Math.round(computeBinsBelow(topSurvivor.volatility) * (deployProfile.binsMultiplier || 1)));
             const fallbackResult = await executeTool("deploy_position", {
@@ -2166,7 +2239,14 @@ async function deployLatestCandidate(index) {
   }
   const manualPolicy = scoreCandidate(candidate, { audit: enriched?.ti?.audit, smartWallets: enriched?.sw });
   const baseDeployAmount = computeDeployAmount(wallet.sol);
-  const deployAmount = Number((baseDeployAmount * (deployProfile.sizeMultiplier || 1) * sizeMultiplierForScore(manualPolicy.score)).toFixed(2));
+  // Clamp to the user's configured sizing bounds so a low `/deploy` score
+  // doesn't shrink the position below the user's chosen floor.
+  const { final: deployAmount } = computeFinalDeployAmount({
+    walletSol: wallet.sol,
+    baseDeployAmount,
+    profile: deployProfile,
+    score: manualPolicy.score,
+  });
   const initialValueUsd = wallet.sol_price ? deployAmount * wallet.sol_price : null;
   const binsBelow = Math.max(config.minSafeBinsBelow, Math.round(computeBinsBelow(candidate.volatility) * (deployProfile.binsMultiplier || 1)));
   const result = await executeTool("deploy_position", {
