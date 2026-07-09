@@ -104,9 +104,10 @@ export const CONFIG = {
   streamReconnectMs: num("STREAM_RECONNECT_MS", 5_000),
   // Alert thresholds for the WS-primary mode. Used both to flip Helius on/off
   // (every 30 s) and to decide whether to send a Telegram "stream unhealthy"
-  // warning. Default 5 min — a long enough lull that we can be confident
-  // Cloudflare or Chromium is wedged, not just a quiet block.
-  streamUnhealthyMs: num("STREAM_UNHEALTHY_MS", 300_000),
+  // warning. Default 10 min — Cloudflare's WS re-connects on its own pace
+  // and a 5-min lull might just be a quiet block. 10 min is long enough
+  // to confidently call the WS wedged (not just slow).
+  streamUnhealthyMs: num("STREAM_UNHEALTHY_MS", 600_000),
   // Minimum spacing between successive Telegram stream-warning messages so we
   // don't spam the chat when the outage lasts hours.
   streamAlertCooldownMs: num("STREAM_ALERT_COOLDOWN_MS", 600_000),
@@ -156,12 +157,17 @@ export const CONFIG = {
   // Each is a per-channel on/off. Backend ingestion (stream + RPC → events
   // → tokens) keeps running regardless; only the chat message is suppressed.
   // Set BOT_TOP_SIGNALS_ENABLED / BOT_FADES_ENABLED / BOT_SURGES_ENABLED /
-  // BOT_HEARTBEAT_ENABLED to "false" to mute that channel. /settings Bot
-  // tab also exposes these as toggle buttons.
+  // BOT_HEARTBEAT_ENABLED / BOT_STREAM_ALERTS_ENABLED to "false" to mute that
+  // channel. /settings Bot tab also exposes these as toggle buttons.
   topSignalsEnabled:   process.env.BOT_TOP_SIGNALS_ENABLED !== "false",
   fadesEnabled:        process.env.BOT_FADES_ENABLED        !== "false",
   surgesEnabled:       process.env.BOT_SURGES_ENABLED       !== "false",
   heartbeatEnabled:    process.env.BOT_HEARTBEAT_ENABLED    !== "false",
+  // Separate from heartbeat/top/fades — stream-alerts warn about WS health
+  // specifically. Cloudflare blocks the WS on some networks, in which case
+  // the Helius fallback keeps the data flowing but this alert would keep
+  // firing every 10 min. Set false to mute entirely.
+  streamAlertsEnabled: process.env.BOT_STREAM_ALERTS_ENABLED !== "false",
 
   // ─── Entry gate (confirmed / balanced) ───
   entryMode: process.env.ENTRY_MODE || "balanced", // early | balanced | conservative

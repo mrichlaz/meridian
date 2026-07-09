@@ -48,8 +48,12 @@ function fmtDuration(ms) {
   return `${h}h`;
 }
 
-export async function notifyStreamStale({ lastFrameAt, healthy = false } = {}) {
+export async function notifyStreamStale({ lastFrameAt, healthy = false, heliusActive = false } = {}) {
   if (CONFIG.dryRun || !BASE || !TG.chatId) return false;
+  // Allow the operator to mute the stream-stale alert entirely. The
+  // underlying health probe still runs (so the orchestrator flips Helius
+  // on/off automatically), but the chat stays quiet.
+  if (CONFIG.streamAlertsEnabled === false) return false;
   const now = Date.now();
   const sinceMs = lastFrameAt ? now - lastFrameAt : null;
   const type = healthy ? "healthy" : "stale";
@@ -73,12 +77,18 @@ export async function notifyStreamStale({ lastFrameAt, healthy = false } = {}) {
   _lastStreamAlertType = type;
 
   const fallbackOn = sinceMs != null && sinceMs > CONFIG.streamStaleMs;
+  // When the Helius fallback is already serving data, the WS outage is
+  // informational — token events keep populating the same DB. Make that
+  // explicit so the operator doesn't get paged for a problem the fallback
+  // handles, and offer the env var to mute the alert entirely.
   return sendHTML(
     `⚠️ <b>bot-tracker stream unhealthy</b>\n` +
       `last arb frame ${sinceMs == null ? "never" : fmtDuration(sinceMs)} ago\n` +
-      `threshold ${Math.round(CONFIG.streamUnhealthyMs / 1000)}s · ` +
-      `mode=${esc(CONFIG.streamMode)} · ` +
-      `Helius fallback: ${fallbackOn ? "auto-ON" : "warming up"}`
+      `threshold ${Math.round(CONFIG.streamUnhealthyMs / 1000)}s · mode=${esc(CONFIG.streamMode)}\n` +
+      (fallbackOn
+        ? `Helius fallback: <b>active</b> — token events still flowing (DB keeps populating).\n`
+        : `Helius fallback: warming up — first Helius cycle not yet complete.\n`) +
+      `Mute this alert with <code>BOT_STREAM_ALERTS_ENABLED=false</code>.`
   );
 }
 

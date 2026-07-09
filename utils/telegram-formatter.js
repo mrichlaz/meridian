@@ -627,7 +627,7 @@ export function formatConfigSnapshot(config, options = {}) {
     const pump = bt.pumpCeilingUsd;
     lines.push(`  • pumpCeilingUsd: ${pump == null ? "<i>off (fee-collection mode)</i>" : formatUsd(pump)}`);
     const onOff = (v) => v === false ? "<i>off</i>" : "ON";
-    lines.push(`  • alerts: top=${onOff(bt.topSignalsEnabled)} · fades=${onOff(bt.fadesEnabled)} · surges=${onOff(bt.surgesEnabled)} · heartbeat=${onOff(bt.heartbeatEnabled)}`);
+    lines.push(`  • alerts: top=${onOff(bt.topSignalsEnabled)} · fades=${onOff(bt.fadesEnabled)} · surges=${onOff(bt.surgesEnabled)} · heartbeat=${onOff(bt.heartbeatEnabled)} · stream-alerts=${onOff(bt.streamAlertsEnabled)}`);
   }
 
   // ─── Auto-swap / Wallet sweep ──────────────────────────────────────
@@ -731,6 +731,7 @@ export function formatBotTrackerConfig(botCfg, options = {}) {
   lines.push(`  • Fades: ${onOff(botCfg.fadesEnabled)}`);
   lines.push(`  • Surges: ${onOff(botCfg.surgesEnabled)}`);
   lines.push(`  • Heartbeat: ${onOff(botCfg.heartbeatEnabled)}`);
+  lines.push(`  • Stream alerts: ${onOff(botCfg.streamAlertsEnabled)}`);
   return { text: lines.join("\n").slice(0, 3900), buttons: [] };
 }
 

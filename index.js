@@ -2071,6 +2071,9 @@ function renderSettingsMenu(page = "main") {
         settingButton(`Heartbeat: ${bt.heartbeatEnabled === false ? "OFF" : "ON"}`, "cfg:toggle:btHeartbeat"),
       ],
       [
+        settingButton(`Stream alerts: ${bt.streamAlertsEnabled === false ? "OFF" : "ON"}`, "cfg:toggle:btStreamAlerts"),
+      ],
+      [
         settingButton(`Min liq: $${(bt.minLiquidityUsd || 0).toLocaleString()}`, "cfg:noop"),
         settingButton(`Min vol: $${(bt.minVolume24h || 0).toLocaleString()}`, "cfg:noop"),
       ],
@@ -2149,6 +2152,7 @@ async function applySettingsMenuCallback(msg) {
     btFades: "fadesEnabled",
     btSurges: "surgesEnabled",
     btHeartbeat: "heartbeatEnabled",
+    btStreamAlerts: "streamAlertsEnabled",
   };
   if (action === "toggle" && BT_TOGGLE_MAP[key]) {
     const field = BT_TOGGLE_MAP[key];

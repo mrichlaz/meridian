@@ -21,6 +21,16 @@ import { log } from "./logger.js";
 import { CONFIG, WSOL, EXCLUDED_MINTS } from "./config.js";
 
 // Memory-conscious flags for a low-RAM host.
+// SLIM_ARGS — memory-conscious flags for a low-RAM host. Two flags are
+// specifically for getting past Cloudflare's bot-mitigation on the
+// sandwiched.me WS endpoint:
+//   --disable-blink-features=AutomationControlled
+//       Removes the "Chrome is being controlled by automated test software"
+//       navigator.webdriver=true marker that the default headless Chromium
+//       advertises. CF checks for this and refuses to push data.
+//   --disable-features=IsolateOrigins,site-per-process
+//       Standard headless-only flags Cloudflare profiles for. Removing them
+//       narrows the headless fingerprint.
 const SLIM_ARGS = [
   "--headless=new",
   "--no-sandbox",
@@ -31,6 +41,8 @@ const SLIM_ARGS = [
   "--disable-extensions",
   "--disable-background-networking",
   "--disable-software-rasterizer",
+  "--disable-blink-features=AutomationControlled",
+  "--disable-features=IsolateOrigins,site-per-process",
   "--disable-features=site-per-process,TranslateUI",
   "--mute-audio",
   "--no-first-run",
@@ -271,6 +283,13 @@ export function startStream() {
             recordArbFrame(db, msg);
           }
         });
+
+        // Set a real User-Agent (default headless Chromium advertises a
+        // version that Cloudflare profiles as a bot). Match the latest
+        // stable Chrome on the platform the container is running on.
+        await page.setUserAgent(
+          "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+        );
 
         await page.goto(CONFIG.streamUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
         log("stream", "Page loaded; listening for arb frames...");

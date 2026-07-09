@@ -164,6 +164,11 @@ export const config = {
     fadesEnabled:        process.env.BOT_FADES_ENABLED        !== "false",
     surgesEnabled:       process.env.BOT_SURGES_ENABLED       !== "false",
     heartbeatEnabled:    process.env.BOT_HEARTBEAT_ENABLED    !== "false",
+    // Mutes the 'stream unhealthy' chat alert specifically. The underlying
+    // health probe still runs (Helius fallback toggles on/off regardless),
+    // the bot-tracker's events still populate the DB. Useful on networks
+    // where Cloudflare blocks the WS and the fallback is the primary path.
+    streamAlertsEnabled:  process.env.BOT_STREAM_ALERTS_ENABLED !== "false",
   },
 
   // ─── Position Management ────────────────
