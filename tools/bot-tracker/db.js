@@ -28,6 +28,7 @@ function openWithSchema() {
       tx_signature TEXT,
       token_mint   TEXT NOT NULL,
       wallet       TEXT,
+      source       TEXT,             -- "stream" (sandwiched.me WS) or "rpc" (Helius poller)
       timestamp    INTEGER NOT NULL,
       PRIMARY KEY (tx_signature, token_mint)
     );
@@ -125,6 +126,14 @@ function openWithSchema() {
   const evCols = db.prepare("PRAGMA table_info(events)").all();
   if (!evCols.some((c) => c.name === "wallet")) {
     db.exec("ALTER TABLE events ADD COLUMN wallet TEXT");
+  }
+  if (!evCols.some((c) => c.name === "source")) {
+    db.exec("ALTER TABLE events ADD COLUMN source TEXT");
+    // Backfill historical rows. Every event in the DB before this column
+    // existed came from the sandwiched.me WS path (the only ingestion
+    // source at the time), so tagging them all "stream" is the right
+    // attribution. Future ingestion paths set the column explicitly.
+    db.exec("UPDATE events SET source = 'stream' WHERE source IS NULL");
   }
   const tkCols = db.prepare("PRAGMA table_info(tokens)").all();
   const addTokCol = (name, type) => {
@@ -294,4 +303,72 @@ export function botsFromEvents({
     r.tokens = stmt.all(...args);
   }
   return out;
+}
+
+/**
+ * Tokens ranked by EVENT FREQUENCY (the "merged" view across stream + RPC
+ * ingestion paths). Both sources write to the same `events` table but tag
+ * the row with `source` ("stream" or "rpc") so we can break the count down
+ * here. Sorted by total events DESC, so the busiest token at the top — that's
+ * the one to look at first when arb wallets are running hot.
+ *
+ * @param {object} [opts]
+ * @param {number} [opts.windowMs]   only count events within this many ms
+ *                                   (default 24h); 0 disables the window.
+ * @param {number} [opts.minEvents]  hide tokens with fewer than this many
+ *                                   total events (default 1).
+ * @param {number} [opts.minDistinctBots] hide tokens touched by fewer
+ *                                   distinct wallets (default 0 = no filter).
+ * @param {number} [opts.limit]      cap on row count (default 100).
+ * @returns {Array<{mint, symbol, name, dex, total_events, stream_events,
+ *                  rpc_events, distinct_bots, first_seen, last_seen,
+ *                  price_usd, liquidity_usd, volume_h24, market_cap,
+ *                  fdv, obv}>}
+ */
+export function tokensByFrequency({
+  windowMs = 24 * 60 * 60_000,
+  minEvents = 1,
+  minDistinctBots = 0,
+  limit = 100,
+} = {}) {
+  const db = getDB();
+  const where = ["t.symbol IS NOT NULL"];
+  const params = [];
+  if (windowMs > 0) {
+    where.push("e.timestamp >= ?");
+    params.push(Date.now() - windowMs);
+  }
+
+  const sql = `
+    SELECT
+      e.token_mint                                  AS mint,
+      MAX(t.symbol)                                 AS symbol,
+      MAX(t.name)                                   AS name,
+      MAX(t.dex)                                    AS dex,
+      COUNT(*)                                      AS total_events,
+      SUM(CASE WHEN e.source = 'stream' THEN 1 ELSE 0 END) AS stream_events,
+      SUM(CASE WHEN e.source = 'rpc'    THEN 1 ELSE 0 END) AS rpc_events,
+      COUNT(DISTINCT e.wallet)                      AS distinct_bots,
+      MIN(e.timestamp)                              AS first_seen,
+      MAX(e.timestamp)                              AS last_seen,
+      MAX(t.price_usd)                              AS price_usd,
+      MAX(t.liquidity_usd)                          AS liquidity_usd,
+      MAX(t.volume_h24)                             AS volume_h24,
+      MAX(t.market_cap)                             AS market_cap,
+      MAX(t.fdv)                                    AS fdv,
+      MAX(t.obv)                                    AS obv
+    FROM events e
+    LEFT JOIN tokens t ON t.mint = e.token_mint
+    WHERE ${where.join(" AND ")}
+    GROUP BY e.token_mint
+    HAVING total_events >= ? ${minDistinctBots > 0 ? "AND distinct_bots >= ?" : ""}
+    ORDER BY total_events DESC, last_seen DESC
+    LIMIT ?
+  `;
+  const sqlParams = [...params, minEvents];
+  if (minDistinctBots > 0) sqlParams.push(minDistinctBots);
+  sqlParams.push(limit);
+
+  const rows = db.prepare(sql).all(...sqlParams);
+  return rows;
 }

@@ -86,7 +86,7 @@ function recordArbFrame(db, msg) {
         const sig = swap.sig || arb.swaps?.[0]?.sig;
         if (!sig) continue;
         insSeen.run(sig, now);
-        insEvent.run(sig, picked.mint, bot, ts);
+        insEvent.run(sig, picked.mint, bot, "stream", ts);
         upToken.run(
           picked.mint,
           picked.meta?.symbol || null,

@@ -191,7 +191,7 @@ function recordParsed(db, parsed, walletBySig, stats) {
       insSeen.run(sig, now);
       const wallet = walletBySig.get(sig) || null;
       for (const m of info.mints) {
-        insEvent.run(sig, m, wallet, info.ts);
+        insEvent.run(sig, m, wallet, "rpc", info.ts);
         upToken.run(m, info.ts, info.ts, info.ts);
         stats.newEvents++;
       }
