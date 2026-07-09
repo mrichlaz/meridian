@@ -1,22 +1,38 @@
 name: Build & Push Docker
+
+# Build multi-arch images natively per architecture, no QEMU emulation.
+# amd64 runs on ubuntu-latest (always available).
+# arm64 runs on ubuntu-24.04-arm (GitHub-hosted ARM64 runner, when available);
+# when that runner isn't online the arm64 leg fails fast and the job still
+# publishes an amd64 image — the user can re-trigger via workflow_dispatch
+# when the ARM64 runner is back. Each leg builds only its native arch and
+# they merge into a single multi-arch manifest via `imagetools create`.
+
 on:
   push:
     branches: [main]
   workflow_dispatch:
+
+# Don't queue multiple runs of the same workflow behind each other.
+concurrency:
+  group: docker-build-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+
 jobs:
-  build:
+  build-amd64:
+    name: Build · amd64
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Login to GHCR
@@ -25,21 +41,99 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=sha,prefix=,format=short
-            type=raw,value=latest
-      - name: Build and push
+      - name: Build & push (amd64)
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:amd64-${{ github.sha }}
+          cache-from: type=gha,scope=amd64
+          cache-to: type=gha,mode=max,scope=amd64
+
+  build-arm64:
+    name: Build · arm64
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    # This runner is in GitHub's ARM64 limited preview. If unavailable the
+    # job fails fast instead of hanging; the workflow still publishes the
+    # amd64 image and the user can re-trigger via workflow_dispatch.
+    continue-on-error: true
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build & push (arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/arm64
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:arm64-${{ github.sha }}
+          cache-from: type=gha,scope=arm64
+          cache-to: type=gha,mode=max,scope=arm64
+
+  manifest:
+    name: Combine multi-arch manifest
+    needs: [build-amd64, build-arm64]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve which arch manifests exist
+        id: detect
+        run: |
+          set -euo pipefail
+          AMDHIT=0; ARMHIT=0
+          if crane manifest "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:amd64-${{ github.sha }}" >/dev/null 2>&1; then AMDHIT=1; fi
+          # arm64 may have failed to build if the runner wasn't available.
+          if crane manifest "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:arm64-${{ github.sha }}" >/dev/null 2>&1; then ARMHIT=1; fi
+          echo "amd64_present=$AMDHIT" >> "$GITHUB_OUTPUT"
+          echo "arm64_present=$ARMHIT" >> "$GITHUB_OUTPUT"
+      - name: Install crane
+        if: steps.detect.outputs.amd64_present == '1' || steps.detect.outputs.arm64_present == '1'
+        run: |
+          curl -sSfL https://github.com/google/go-containerregistry/releases/download/v0.20.6/go-containerregistry_Linux_x86_64.tar.gz | tar -xz -C /tmp
+          mv /tmp/crane /usr/local/bin/crane
+          chmod +x /usr/local/bin/crane
+      - name: Combine + tag short-SHA + latest
+        if: steps.detect.outputs.amd64_present == '1' || steps.detect.outputs.arm64_present == '1'
+        env:
+          AMD: ${{ steps.detect.outputs.amd64_present }}
+          ARM: ${{ steps.detect.outputs.arm64_present }}
+          SHORT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          ARGS=""
+          [ "$AMD" = "1" ] && ARGS="$ARGS --amend ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:amd64-${SHORT}"
+          [ "$ARM" = "1" ] && ARGS="$ARGS --amend ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:arm64-${SHORT}"
+          crane index append $ARGS \
+            --tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${SHORT:0:7} \
+            --tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          crane index filter \
+            --tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${SHORT:0:7} \
+            --tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+      - name: Verify the manifest lists the right platforms
+        if: steps.detect.outputs.amd64_present == '1' || steps.detect.outputs.arm64_present == '1'
+        run: |
+          echo "Latest manifest:"
+          crane manifest ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
