@@ -77,27 +77,40 @@ export function startBotTracker() {
     startStream();
     timers.push(
       setInterval(() => {
-        const h = streamHealth();
-        const now = Date.now();
-        const since = h.lastFrameAt ? now - h.lastFrameAt : null;
-        const stale = since == null || since > CONFIG.streamStaleMs;
-        const unhealthy = since == null || since > CONFIG.streamUnhealthyMs;
-        const state = unhealthy ? "unhealthy" : (h.lastFrameAt ? "healthy" : "starting");
+        // Atomic snapshot — capture every value used by the alert text and
+        // the side-effect (Helius start/stop) in one block. Prevents the
+        // 'Helius fallback: warming up' misnomer that happened when the
+        // stream recovered between the streamHealth() read and the alert
+        // call (the text used the latest lastFrameAt but a frozen
+        // heliusActive=false).
+        const snap = (() => {
+          const h = streamHealth();
+          const now = Date.now();
+          const since = h.lastFrameAt ? now - h.lastFrameAt : null;
+          const stale = since == null || since > CONFIG.streamStaleMs;
+          const unhealthy = since == null || since > CONFIG.streamUnhealthyMs;
+          const state = unhealthy ? "unhealthy" : (h.lastFrameAt ? "healthy" : "starting");
+          return { h, now, since, stale, unhealthy, state };
+        })();
 
-        if (stale && !_pollerOn) {
-          log("bot_tracker", `Stream stale (last frame ${since == null ? "never" : Math.round(since / 1000) + "s ago"}) → Helius fallback ON`);
+        if (snap.stale && !_pollerOn) {
+          log("bot_tracker", `Stream stale (last frame ${snap.since == null ? "never" : Math.round(snap.since / 1000) + "s ago"}) → Helius fallback ON`);
           startTracker();
           _pollerOn = true;
-        } else if (!stale && _pollerOn) {
+        } else if (!snap.stale && _pollerOn) {
           log("bot_tracker", "Stream recovered → Helius fallback OFF");
           stopTracker();
           _pollerOn = false;
         }
 
-        if (state !== _streamLastState) {
-          _streamLastState = state;
-          notifyStreamStale({ lastFrameAt: h.lastFrameAt, healthy: state === "healthy" })
-            .catch((e) => log("bot_tracker_warn", `stream alert: ${e.message}`));
+        if (snap.state !== _streamLastState) {
+          _streamLastState = snap.state;
+          notifyStreamStale({
+            lastFrameAt: snap.h.lastFrameAt,
+            healthy: snap.state === "healthy",
+            heliusActive: _pollerOn,
+            sinceMs: snap.since,
+          }).catch((e) => log("bot_tracker_warn", `stream alert: ${e.message}`));
         }
       }, 30_000)
     );

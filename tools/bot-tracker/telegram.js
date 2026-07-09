@@ -48,14 +48,18 @@ function fmtDuration(ms) {
   return `${h}h`;
 }
 
-export async function notifyStreamStale({ lastFrameAt, healthy = false, heliusActive = false } = {}) {
+export async function notifyStreamStale({ lastFrameAt, healthy = false, heliusActive = false, sinceMs: sinceMsArg = null } = {}) {
   if (CONFIG.dryRun || !BASE || !TG.chatId) return false;
   // Allow the operator to mute the stream-stale alert entirely. The
   // underlying health probe still runs (so the orchestrator flips Helius
   // on/off automatically), but the chat stays quiet.
   if (CONFIG.streamAlertsEnabled === false) return false;
+  // Use the caller-supplied sinceMs (atomically snapshotted with the other
+  // values) when available, so the message can't lie when the stream
+  // recovers between the orchestrator's tick and the alert call. Fall back
+  // to recomputing from lastFrameAt if a caller didn't pass it.
   const now = Date.now();
-  const sinceMs = lastFrameAt ? now - lastFrameAt : null;
+  const sinceMs = sinceMsArg != null ? sinceMsArg : (lastFrameAt ? now - lastFrameAt : null);
   const type = healthy ? "healthy" : "stale";
 
   // Recovery is the natural pair to an earlier unhealthy alert — always
