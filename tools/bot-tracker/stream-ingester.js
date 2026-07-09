@@ -42,6 +42,10 @@ let _running = false;
 let _browser = null;
 let _ownsBrowser = false;
 const _lastWsOpenAt = {};   // url → ms timestamp, for log throttling
+// Channel discovery: log the first N unique channels we see so an operator
+// can tell whether the backend uses 'AtomicArbs' or some other key.
+const _seenChannels = new Set();
+const CHANNEL_DISCOVERY_LIMIT = 5;
 
 /**
  * Robust "is the browser still alive" probe. puppeteer-core changed the
@@ -240,14 +244,22 @@ export function startStream() {
         client.on("Network.webSocketFrameReceived", ({ response }) => {
           if (!response?.payloadData) return;
           health.framesTotal++;
-          try {
-            const msg = JSON.parse(response.payloadData);
-            if (msg.channel === "AtomicArbs") {
-              health.lastFrameAt = Date.now();
-              recordArbFrame(db, msg);
-            }
-          } catch {
-            /* non-JSON / partial frame */
+          let msg = null;
+          try { msg = JSON.parse(response.payloadData); } catch { /* non-JSON */ }
+          if (!msg) return;
+
+          // Channel discovery: log the first few distinct channels we see
+          // so the operator can confirm the backend's key. Only JSON
+          // objects with a string .channel are candidates.
+          const ch = typeof msg.channel === "string" ? msg.channel : null;
+          if (ch && !_seenChannels.has(ch) && _seenChannels.size < CHANNEL_DISCOVERY_LIMIT) {
+            _seenChannels.add(ch);
+            log("stream", `channel discovered: "${ch}"${ch !== "AtomicArbs" ? " (not AtomicArbs — frames will be ignored)" : ""}`);
+          }
+
+          if (ch === "AtomicArbs") {
+            health.lastFrameAt = Date.now();
+            recordArbFrame(db, msg);
           }
         });
 

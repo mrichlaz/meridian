@@ -1399,6 +1399,45 @@ export function startCronJobs() {
     await maybeRunMissedBriefing();
   }, { timezone: 'UTC' });
 
+  // Daily clean restart at the configured local time (defaults to 00:00,
+  // i.e. midnight). Why a daily restart at all:
+  //   - clears in-process state (caches, in-memory WS frame counts, etc.)
+  //   - reapplies any persisted config the operator set during the day
+  //     (envcrypt's loadEnv runs only at startup, so a runtime /setcfg
+  //     change that requires a reload is forced here)
+  //   - resets the bot-tracker's daily-wallet recycling cleanly
+  //   - lets the OS / docker compose / pm2 / systemd bring a fresh
+  //     process up so memory leaks (Chromium, long-running sockets)
+  //     don't accumulate
+  // Set CRON_DAILY_RESTART_AT="HH:MM" to override the default of 00:00.
+  const restartAt = (process.env.CRON_DAILY_RESTART_AT || "00:00").trim();
+  const [rHour, rMin] = restartAt.split(":").map((s) => parseInt(s, 10));
+  if (Number.isFinite(rHour) && Number.isFinite(rMin)) {
+    const restartCron = `${rMin} ${rHour} * * *`;
+    cron.schedule(restartCron, async () => {
+      const msg = `🛌 Daily clean restart at ${restartAt} — clearing state, exit and let the supervisor relaunch.`;
+      log("cron", msg);
+      try { await sendMessage(msg); } catch {}
+      // Drain in-flight cycles (up to 30s) so we don't kill a deploy.
+      const drainDeadline = Date.now() + 30_000;
+      while ((_managementBusy || _screeningBusy || _pnlPollBusy) && Date.now() < drainDeadline) {
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      // Stop auxiliary services.
+      try { stopBotTracker?.(); } catch {}
+      // Best-effort DB close — node-cron / setInterval handles are not
+      // unref-able from here, but process.exit() drops them anyway.
+      try { closeDB(); } catch {}
+      // Brief beat for log flush.
+      await new Promise((r) => setTimeout(r, 500));
+      log("cron", "Daily restart: exiting now.");
+      process.exit(0);
+    }, { timezone: process.env.MERIDIAN_TZ || "UTC" });
+    log("cron", `Daily clean restart scheduled at ${restartAt} (${restartCron}) ${process.env.MERIDIAN_TZ || "UTC"}`);
+  } else {
+    log("cron_warn", `Invalid CRON_DAILY_RESTART_AT='${restartAt}', expected HH:MM. Daily restart disabled.`);
+  }
+
   // Lightweight PnL poller — updates trailing TP state between management cycles, no LLM.
   // Runs on public infra (RPC + Jupiter + Meteora deposits) so it can poll aggressively.
   const pnlPollMs = Math.max(1, Number(config.pnl.pollIntervalSec ?? 10)) * 1000;
