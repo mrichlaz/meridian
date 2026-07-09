@@ -60,6 +60,42 @@ export const PATHS = {
   db: path.join(DATA_DIR, "bot-tracker.db"),
 };
 
+// ─── Telegram alert toggle helpers (declared before CONFIG so the
+// toggles below can call them at object-literal evaluation time). ───
+//
+// Each is a per-channel on/off. Backend ingestion (stream + RPC → events
+// → tokens) keeps running regardless; only the chat message is suppressed.
+//
+// Two layers of override (later wins):
+//   1. process.env default — useful for containerised deploys where the
+//      operator sets BOT_TOP_SIGNALS_ENABLED=false in .env once at start.
+//   2. data/user-config.json — what Meridian's /settings toggle writes.
+//      Without this layer, in-process toggles through /settings would be
+//      invisible to the bot-tracker (which reads its own CONFIG from env).
+//      We re-read on every access to pick up mid-flight changes.
+//
+// Set BOT_TOP_SIGNALS_ENABLED / BOT_FADES_ENABLED / BOT_SURGES_ENABLED /
+// BOT_HEARTBEAT_ENABLED / BOT_STREAM_ALERTS_ENABLED to "false" in .env to
+// hard-mute. Or use /settings → Bot tab for runtime toggles.
+function readUserConfigOverrides() {
+  try {
+    // tools/bot-tracker/ → tools/ → <meridian>/ → data/user-config.json
+    const userConfigPath = path.resolve(__dirname, "..", "..", "data", "user-config.json");
+    if (!fs.existsSync(userConfigPath)) return {};
+    const parsed = JSON.parse(fs.readFileSync(userConfigPath, "utf8"));
+    return (parsed && typeof parsed === "object" && parsed.botTracker) || {};
+  } catch {
+    return {};
+  }
+}
+function toggleEnabled(envValue, field) {
+  // Default true. .env "false" disables. user-config.json.botTracker[field]
+  // is the runtime override written by Meridian's update_config.
+  const u = readUserConfigOverrides();
+  if (Object.prototype.hasOwnProperty.call(u, field)) return u[field] !== false;
+  return envValue !== "false";
+}
+
 export const CONFIG = {
   // Wallets to watch (fallback / seed when auto-update is off or fails)
   wallets: list("BOT_WALLETS", [
@@ -154,20 +190,16 @@ export const CONFIG = {
   momentumWindowMin: num("MOMENTUM_WINDOW_MIN", 60),
 
   // ─── Telegram alert toggles (opt-out) ──────────────────────────────
-  // Each is a per-channel on/off. Backend ingestion (stream + RPC → events
-  // → tokens) keeps running regardless; only the chat message is suppressed.
-  // Set BOT_TOP_SIGNALS_ENABLED / BOT_FADES_ENABLED / BOT_SURGES_ENABLED /
-  // BOT_HEARTBEAT_ENABLED / BOT_STREAM_ALERTS_ENABLED to "false" to mute that
-  // channel. /settings Bot tab also exposes these as toggle buttons.
-  topSignalsEnabled:   process.env.BOT_TOP_SIGNALS_ENABLED !== "false",
-  fadesEnabled:        process.env.BOT_FADES_ENABLED        !== "false",
-  surgesEnabled:       process.env.BOT_SURGES_ENABLED       !== "false",
-  heartbeatEnabled:    process.env.BOT_HEARTBEAT_ENABLED    !== "false",
+  // See toggleEnabled() above for the override semantics.
+  topSignalsEnabled:   toggleEnabled(process.env.BOT_TOP_SIGNALS_ENABLED, "topSignalsEnabled"),
+  fadesEnabled:        toggleEnabled(process.env.BOT_FADES_ENABLED,        "fadesEnabled"),
+  surgesEnabled:       toggleEnabled(process.env.BOT_SURGES_ENABLED,       "surgesEnabled"),
+  heartbeatEnabled:    toggleEnabled(process.env.BOT_HEARTBEAT_ENABLED,    "heartbeatEnabled"),
   // Separate from heartbeat/top/fades — stream-alerts warn about WS health
   // specifically. Cloudflare blocks the WS on some networks, in which case
   // the Helius fallback keeps the data flowing but this alert would keep
   // firing every 10 min. Set false to mute entirely.
-  streamAlertsEnabled: process.env.BOT_STREAM_ALERTS_ENABLED !== "false",
+  streamAlertsEnabled: toggleEnabled(process.env.BOT_STREAM_ALERTS_ENABLED, "streamAlertsEnabled"),
 
   // ─── Entry gate (confirmed / balanced) ───
   entryMode: process.env.ENTRY_MODE || "balanced", // early | balanced | conservative
