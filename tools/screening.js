@@ -1620,7 +1620,7 @@ function mergeCandidatePools({ meteoraPools = [], gmgnPools = [], botTrackerPool
   ));
 }
 
-async function buildBotTrackerCandidates({ existingPools = [], timeframe, limit } = {}) {
+export async function buildBotTrackerCandidates({ existingPools = [], timeframe, limit } = {}) {
   const injectedPools = [];
   const filteredExamples = [];
   try {
