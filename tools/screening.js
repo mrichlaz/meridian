@@ -1458,10 +1458,15 @@ function categorizeRejectReason(rawReason) {
   // just what filter fired but what threshold it fired against.
   const checks = [
     // ── Screening (Meteora + GMGN) ─────────────────────────────────
-    { re: /^mcap .* below minMcap\b/, label: () => `mcap below minMcap (${fmtThresholdUsd(s.minMcap)})` },
-    { re: /^mcap .* above maxMcap\b/, label: () => `mcap above maxMcap (${fmtThresholdUsd(s.maxMcap)})` },
-    { re: /^holders .* below minHolders\b/, label: () => `holders below minHolders (${s.minHolders ?? "n/a"})` },
-    { re: /^volume .* below minVolume\b/, label: () => `volume below minVolume (${fmtThresholdUsd(s.minVolume)})` },
+    // Meteora and GMGN emit the same reason shape for these keys but fire
+    // against different configured thresholds (screening.minMcap vs
+    // gmgn.minMcap, …). Read the threshold out of the raw reason string so
+    // the bucket label always shows the value that actually fired —
+    // otherwise GMGN rejects at $1M are counted under a "($500K)" header.
+    { re: /^mcap .* below minMcap\s*([\d.]+)?/, label: (m) => `mcap below minMcap (${fmtThresholdUsd(m[1] ?? s.minMcap)})` },
+    { re: /^mcap .* above maxMcap\s*([\d.]+)?/, label: (m) => `mcap above maxMcap (${fmtThresholdUsd(m[1] ?? s.maxMcap)})` },
+    { re: /^holders .* below minHolders\s*([\d.]+)?/, label: (m) => `holders below minHolders (${m[1] ?? s.minHolders ?? "n/a"})` },
+    { re: /^volume .* below minVolume\s*([\d.]+)?/, label: (m) => `volume below minVolume (${fmtThresholdUsd(m[1] ?? s.minVolume)})` },
     { re: /^TVL .* below minTvl\b/, label: () => `TVL below minTvl (${fmtThresholdUsd(s.minTvl)})` },
     { re: /^TVL .* above maxTvl\b/, label: () => `TVL above maxTvl (${fmtThresholdUsd(s.maxTvl)})` },
     { re: /^bin_step .* below minBinStep\b/, label: () => `bin_step below minBinStep (${s.minBinStep ?? "n/a"})` },
@@ -1504,13 +1509,11 @@ function categorizeRejectReason(rawReason) {
     { re: /^blacklisted token\b/, label: () => "blacklisted token" },
     { re: /^blocked deployer\b/, label: () => "blocked deployer" },
     // ── GMGN rank / security / info (now also use below/above words) ──
-    { re: /^mcap .+ below minMcap .+$/, label: () => `mcap below minMcap (gmgn, ${fmtThresholdUsd(g.minMcap)})` },
-    { re: /^mcap .+ above maxMcap .+$/, label: () => `mcap above maxMcap (gmgn, ${fmtThresholdUsd(g.maxMcap)})` },
+    // (mcap/volume/holders GMGN rejects are handled by the threshold-capturing
+    // matchers above — same string shape, so a duplicate entry here is dead.)
     { re: /^bundler .* above maxBundlerRate/, label: () => "bundler ratio above maxBundlerRate" },
     { re: /^token age .* below minTokenAgeHours\b/, label: () => `token age below minTokenAgeHours (gmgn, ${g.minTokenAgeHours != null ? `${g.minTokenAgeHours}h` : "n/a"})` },
     { re: /^token age .* above maxTokenAgeHours\b/, label: () => `token age above maxTokenAgeHours (gmgn, ${g.maxTokenAgeHours != null ? `${g.maxTokenAgeHours}h` : "n/a"})` },
-    { re: /^volume .+ below minVolume .+$/, label: () => `volume below minVolume (gmgn, ${fmtThresholdUsd(g.minVolume)})` },
-    { re: /^holders .+ below minHolders .+$/, label: () => `holders below minHolders (gmgn, ${g.minHolders ?? "n/a"})` },
     { re: /^total fee .* below minTotalFeeSol\b/, label: () => `total fee below minTotalFeeSol (${g.minTotalFeeSol ?? "n/a"} SOL)` },
     { re: /^top10 .* above maxTop10HolderRate/, label: () => "top10 concentration above maxTop10HolderRate" },
     { re: /^dev team .* above maxDevTeamHoldRate/, label: () => "dev team holdings above maxDevTeamHoldRate" },
