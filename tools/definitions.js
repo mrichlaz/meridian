@@ -409,6 +409,8 @@ Darwin (signal weighting): darwinEnabled, darwinWindowDays, darwinRecalcEvery, d
 HiveMind (cross-agent lessons): hiveMindUrl, hiveMindApiKey, agentId, hiveMindPullMode
 Agent Meridian API: publicApiKey, agentMeridianApiUrl, lpAgentRelayEnabled
 Chart Indicators: chartIndicatorsEnabled, indicatorEntryPreset, indicatorExitPreset, rsiLength, indicatorIntervals, indicatorCandles, rsiOversold, rsiOverbought, requireAllIntervals
+GMGN discovery (used when screeningSource is gmgn/merge; separate thresholds from the Screening section above): gmgnMinMcap, gmgnMaxMcap (null = no cap), gmgnMinTvl, gmgnMinVolume, gmgnMinHolders, gmgnMinTokenAgeHours (null = no floor), gmgnMaxTokenAgeHours (null = no cap), gmgnMaxBundlerRate (0-1), gmgnMaxRugRatio (0-1), gmgnMaxTop10HolderRate (0-1), gmgnMinTotalFeeSol, gmgnLimit, gmgnEnrichLimit, gmgnRequireKol, gmgnMinKolCount, gmgnMinSmartDegenCount, gmgnAthFilterPct (null = off), gmgnInterval, gmgnFeeSource, gmgnApiKey
+Bot tracker (candidate injection into screening): botTrackerLimit, botTrackerMaxAgeMinutes, botTrackerMinLiquidityUsd, botTrackerMinVolume24h, botTrackerPumpCeilingUsd (null = off), botTrackerStreamMode (stream/both/poll), botTrackerEntryMode (early/balanced/conservative)
 
 CRITICAL FORMAT: 'changes' MUST be a JSON object with key:value pairs. NOT a string, NOT an array, NOT nested.
 ✓ CORRECT: {"changes": {"minFeeActiveTvlRatio": 0.02, "maxTvl": 200000}}

@@ -58,8 +58,17 @@ if (gmgnUserConfig.apiKey || u.gmgnApiKey) {
 
 const indicatorUserConfig = u.chartIndicators ?? {};
 
+// user-config.json (the file /setcfg + update_config persist to) wins over
+// data/gmgn-config.json, so runtime tuning survives restarts. gmgn-config.json
+// is the bulk-defaults layer underneath — a value there only applies while the
+// operator has never overridden that key via Telegram/update_config.
+// Presence-based (`in`), not `??`: an explicit null in user-config is a real
+// setting (e.g. gmgnMaxTokenAgeHours null = "no cap") and must not fall
+// through to a non-null value in gmgn-config.json after a restart.
 function gmgnValue(key, legacyKey, fallback) {
-  return gmgnUserConfig[key] ?? u[legacyKey] ?? fallback;
+  if (legacyKey in u) return u[legacyKey];
+  if (key in gmgnUserConfig) return gmgnUserConfig[key];
+  return fallback;
 }
 
 function gmgnArray(key, legacyKey, fallback) {
@@ -131,45 +140,53 @@ export const config = {
   // talks to sandwiched.me's WS stream + Helius fallback) are merged into the
   // screening universe so the LLM sees wallets that arb bots are actively
   // working. These knobs control how many of them reach the merge step.
-  botTracker: {
-    // Top-N by trade_count from the bot-tracker SQL funnel. Bigger = more
-    // candidates but more DLMM-pool lookups per cycle (each token costs 1
-    // HTTP request to dlmm.datapi.meteora.ag). Default 50 covers ~1/4 of
-    // the typical 24h-active pool with comfortable headroom.
-    limit:               u.botTrackerLimit         ?? 50,
-    // How far back to count bot events. The bot-tracker keeps a 4h rolling
-    // window for activity; this lets the merger pull a longer history.
-    maxAgeMinutes:       u.botTrackerMaxAgeMinutes ?? 1440,   // 24h
-    minLiquidityUsd:     u.botTrackerMinLiquidity  ?? 5_000,  // $5k
-    minVolume24h:        u.botTrackerMinVolume24h  ?? 50_000, // $50k
-    // ── Opt-in scoring / parking filter ────────────────────────────
-    // Mirrors the bot-tracker's PUMP_CEILING_USD. null = "feature off" —
-    // the ceiling disappears entirely from rankSignals/detectSurges/detectFades
-    // and the pruner stops parking tokens. Set to null for fee-collection
-    // strategies where the highest-mcap tokens earn the best LP fees.
-    pumpCeilingUsd:      (() => {
-      const v = process.env.BOT_PUMP_CEILING_USD;
-      if (v == null || v === "" || v.toLowerCase() === "null") return null;
-      const n = Number(v);
-      return Number.isFinite(n) ? n : 3_000_000;
-    })(),
-    // ── Ingestion mode (mirrors bot-tracker's STREAM_MODE) ───────────
-    streamMode:          process.env.BOT_STREAM_MODE || "stream",   // stream | both | poll
-    entryMode:           process.env.BOT_ENTRY_MODE  || "balanced",  // early | balanced | conservative
-    // ── Telegram alert toggles (opt-out) ───────────────────────────
-    // Each is per-channel on/off. Backend ingestion keeps running; only
-    // the chat message is suppressed. /settings Bot tab exposes them as
-    // toggle buttons; /setcfg botTracker.topSignalsEnabled=false also works.
-    topSignalsEnabled:   process.env.BOT_TOP_SIGNALS_ENABLED !== "false",
-    fadesEnabled:        process.env.BOT_FADES_ENABLED        !== "false",
-    surgesEnabled:       process.env.BOT_SURGES_ENABLED       !== "false",
-    heartbeatEnabled:    process.env.BOT_HEARTBEAT_ENABLED    !== "false",
-    // Mutes the 'stream unhealthy' chat alert specifically. The underlying
-    // health probe still runs (Helius fallback toggles on/off regardless),
-    // the bot-tracker's events still populate the DB. Useful on networks
-    // where Cloudflare blocks the WS and the fallback is the primary path.
-    streamAlertsEnabled:  process.env.BOT_STREAM_ALERTS_ENABLED !== "false",
-  },
+  // Precedence per key: persisted nested u.botTracker.* (what /setcfg and
+  // update_config write) → legacy flat u.botTracker* keys / env vars →
+  // default. Without the nested read, Telegram-tuned values applied live but
+  // silently reverted on restart.
+  botTracker: (() => {
+    const bt = (u.botTracker && typeof u.botTracker === "object" && !Array.isArray(u.botTracker)) ? u.botTracker : {};
+    return {
+      // Top-N by trade_count from the bot-tracker SQL funnel. Bigger = more
+      // candidates but more DLMM-pool lookups per cycle (each token costs 1
+      // HTTP request to dlmm.datapi.meteora.ag). Default 50 covers ~1/4 of
+      // the typical 24h-active pool with comfortable headroom.
+      limit:               bt.limit           ?? u.botTrackerLimit         ?? 50,
+      // How far back to count bot events. The bot-tracker keeps a 4h rolling
+      // window for activity; this lets the merger pull a longer history.
+      maxAgeMinutes:       bt.maxAgeMinutes   ?? u.botTrackerMaxAgeMinutes ?? 1440,   // 24h
+      minLiquidityUsd:     bt.minLiquidityUsd ?? u.botTrackerMinLiquidity  ?? 5_000,  // $5k
+      minVolume24h:        bt.minVolume24h    ?? u.botTrackerMinVolume24h  ?? 50_000, // $50k
+      // ── Opt-in scoring / parking filter ────────────────────────────
+      // Mirrors the bot-tracker's PUMP_CEILING_USD. null = "feature off" —
+      // the ceiling disappears entirely from rankSignals/detectSurges/detectFades
+      // and the pruner stops parking tokens. Set to null for fee-collection
+      // strategies where the highest-mcap tokens earn the best LP fees.
+      // (null is a legal persisted value, so check `in` rather than ??.)
+      pumpCeilingUsd:      "pumpCeilingUsd" in bt ? bt.pumpCeilingUsd : (() => {
+        const v = process.env.BOT_PUMP_CEILING_USD;
+        if (v == null || v === "" || v.toLowerCase() === "null") return null;
+        const n = Number(v);
+        return Number.isFinite(n) ? n : 3_000_000;
+      })(),
+      // ── Ingestion mode (mirrors bot-tracker's STREAM_MODE) ───────────
+      streamMode:          bt.streamMode ?? (process.env.BOT_STREAM_MODE || "stream"),   // stream | both | poll
+      entryMode:           bt.entryMode  ?? (process.env.BOT_ENTRY_MODE  || "balanced"),  // early | balanced | conservative
+      // ── Telegram alert toggles (opt-out) ───────────────────────────
+      // Each is per-channel on/off. Backend ingestion keeps running; only
+      // the chat message is suppressed. /settings Bot tab exposes them as
+      // toggle buttons.
+      topSignalsEnabled:   bt.topSignalsEnabled  ?? (process.env.BOT_TOP_SIGNALS_ENABLED !== "false"),
+      fadesEnabled:        bt.fadesEnabled       ?? (process.env.BOT_FADES_ENABLED        !== "false"),
+      surgesEnabled:       bt.surgesEnabled      ?? (process.env.BOT_SURGES_ENABLED       !== "false"),
+      heartbeatEnabled:    bt.heartbeatEnabled   ?? (process.env.BOT_HEARTBEAT_ENABLED    !== "false"),
+      // Mutes the 'stream unhealthy' chat alert specifically. The underlying
+      // health probe still runs (Helius fallback toggles on/off regardless),
+      // the bot-tracker's events still populate the DB. Useful on networks
+      // where Cloudflare blocks the WS and the fallback is the primary path.
+      streamAlertsEnabled: bt.streamAlertsEnabled ?? (process.env.BOT_STREAM_ALERTS_ENABLED !== "false"),
+    };
+  })(),
 
   // ─── Position Management ────────────────
   management: {
@@ -272,7 +289,7 @@ export const config = {
 
   // ─── GMGN Configuration ────────────────
   gmgn: {
-    apiKey: nonEmptyString(gmgnUserConfig.apiKey, u.gmgnApiKey, process.env.GMGN_API_KEY),
+    apiKey: nonEmptyString(u.gmgnApiKey, gmgnUserConfig.apiKey, process.env.GMGN_API_KEY),
     baseUrl: nonEmptyString(gmgnUserConfig.baseUrl, u.gmgnBaseUrl, "https://openapi.gmgn.ai"),
     interval: gmgnValue("interval", "gmgnInterval", "5m"),
     orderBy: gmgnValue("orderBy", "gmgnOrderBy", "default"),
@@ -322,7 +339,7 @@ export const config = {
     maxBotDegenRate: gmgnValue("maxBotDegenRate", "gmgnMaxBotDegenRate", 0.4),
     athFilterPct: gmgnValue("athFilterPct", "gmgnAthFilterPct", null),
     // gmgn = use GMGN total_fee for global_fees_sol; jupiter = legacy Jupiter fees
-    feeSource: nonEmptyString(gmgnUserConfig.feeSource, u.gmgnFeeSource, "gmgn"),
+    feeSource: nonEmptyString(u.gmgnFeeSource, gmgnUserConfig.feeSource, "gmgn"),
   },
 
   // ─── LLM Settings ──────────────────────

@@ -326,6 +326,7 @@ function normalizeConfigValue(key, value) {
     "policyEnabled",
     "policyQuietHoursAuto",
     "disableAdaptiveOverride",
+    "gmgnRequireKol",
   ]);
   const arrayKeys = new Set(["allowedLaunchpads", "blockedLaunchpads", "indicatorIntervals"]);
   const stringKeys = new Set([
@@ -351,6 +352,9 @@ function normalizeConfigValue(key, value) {
     "pnlRpcUrl",
     "gmgnFeeSource",
     "gmgnApiKey",
+    "gmgnInterval",
+    "botTrackerStreamMode",
+    "botTrackerEntryMode",
     "policyQuietHoursUtc",
   ]);
   const numberKeys = new Set([
@@ -365,7 +369,16 @@ function normalizeConfigValue(key, value) {
     "autoSwapRetryAttempts", "autoSwapRetryDelayMs", "autoSwapMinUsdFloor",
     "walletSweepIntervalSec", "minSafeBinsBelow",
   ]);
+  // Keys where null is a legal "feature off" value. Accept the string forms
+  // Telegram /setcfg sends ("null" / "none" / "off") since its values always
+  // arrive as text.
+  const nullableKeys = new Set([
+    "maxTvl", "minTokenAgeHours", "maxTokenAgeHours", "athFilterPct",
+    "gmgnMaxMcap", "gmgnMinTokenAgeHours", "gmgnMaxTokenAgeHours", "gmgnAthFilterPct",
+    "botTrackerPumpCeilingUsd",
+  ]);
   if (value === null) return null;
+  if (nullableKeys.has(key) && typeof value === "string" && /^(null|none|off)$/i.test(value.trim())) return null;
   if (booleanKeys.has(key)) return coerceBoolean(value, key);
   if (key === "indicatorIntervals") {
     // Filter to valid interval values (must be "5_MINUTE" or "15_MINUTE")
@@ -623,9 +636,37 @@ const toolMap = {
       pnlRpcUrl: ["pnl", "rpcUrl", ["pnlRpcUrl"]],
       pnlPollIntervalSec: ["pnl", "pollIntervalSec", ["pnlPollIntervalSec"]],
       pnlDepositCacheTtlSec: ["pnl", "depositCacheTtlSec", ["pnlDepositCacheTtlSec"]],
-      // gmgn fee source
+      // gmgn discovery pipeline (persisted as flat gmgn* keys in
+      // user-config.json, which now wins over data/gmgn-config.json)
       gmgnFeeSource: ["gmgn", "feeSource", ["gmgnFeeSource"]],
       gmgnApiKey: ["gmgn", "apiKey", ["gmgnApiKey"]],
+      gmgnMinMcap: ["gmgn", "minMcap", ["gmgnMinMcap"]],
+      gmgnMaxMcap: ["gmgn", "maxMcap", ["gmgnMaxMcap"]],
+      gmgnMinTvl: ["gmgn", "minTvl", ["gmgnMinTvl"]],
+      gmgnMinVolume: ["gmgn", "minVolume", ["gmgnMinVolume"]],
+      gmgnMinHolders: ["gmgn", "minHolders", ["gmgnMinHolders"]],
+      gmgnMinTokenAgeHours: ["gmgn", "minTokenAgeHours", ["gmgnMinTokenAgeHours"]],
+      gmgnMaxTokenAgeHours: ["gmgn", "maxTokenAgeHours", ["gmgnMaxTokenAgeHours"]],
+      gmgnMaxBundlerRate: ["gmgn", "maxBundlerRate", ["gmgnMaxBundlerRate"]],
+      gmgnMaxRugRatio: ["gmgn", "maxRugRatio", ["gmgnMaxRugRatio"]],
+      gmgnMaxTop10HolderRate: ["gmgn", "maxTop10HolderRate", ["gmgnMaxTop10HolderRate"]],
+      gmgnMinTotalFeeSol: ["gmgn", "minTotalFeeSol", ["gmgnMinTotalFeeSol"]],
+      gmgnLimit: ["gmgn", "limit", ["gmgnLimit"]],
+      gmgnEnrichLimit: ["gmgn", "enrichLimit", ["gmgnEnrichLimit"]],
+      gmgnRequireKol: ["gmgn", "requireKol", ["gmgnRequireKol"]],
+      gmgnMinKolCount: ["gmgn", "minKolCount", ["gmgnMinKolCount"]],
+      gmgnMinSmartDegenCount: ["gmgn", "minSmartDegenCount", ["gmgnMinSmartDegenCount"]],
+      gmgnAthFilterPct: ["gmgn", "athFilterPct", ["gmgnAthFilterPct"]],
+      gmgnInterval: ["gmgn", "interval", ["gmgnInterval"]],
+      // bot-tracker candidate injection (flat keys usable from /setcfg;
+      // persisted nested so config.js's botTracker reader survives restarts)
+      botTrackerLimit: ["botTracker", "limit", ["botTracker", "limit"]],
+      botTrackerMaxAgeMinutes: ["botTracker", "maxAgeMinutes", ["botTracker", "maxAgeMinutes"]],
+      botTrackerMinLiquidityUsd: ["botTracker", "minLiquidityUsd", ["botTracker", "minLiquidityUsd"]],
+      botTrackerMinVolume24h: ["botTracker", "minVolume24h", ["botTracker", "minVolume24h"]],
+      botTrackerPumpCeilingUsd: ["botTracker", "pumpCeilingUsd", ["botTracker", "pumpCeilingUsd"]],
+      botTrackerStreamMode: ["botTracker", "streamMode", ["botTracker", "streamMode"]],
+      botTrackerEntryMode: ["botTracker", "entryMode", ["botTracker", "entryMode"]],
       // chart indicators
       chartIndicatorsEnabled: ["indicators", "enabled", ["chartIndicators", "enabled"]],
       indicatorEntryPreset: ["indicators", "entryPreset", ["chartIndicators", "entryPreset"]],
