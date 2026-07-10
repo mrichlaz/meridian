@@ -8,9 +8,20 @@
  */
 import { getDB } from "./db.js";
 import { log } from "./logger.js";
-import { CONFIG } from "./config.js";
+import { CONFIG, readUserConfigOverrides } from "./config.js";
 import { rankSignals, detectFades, detectSurges } from "./scoring.js";
 import { ensureSafety } from "./safety.js";
+
+// Per-call lookup of the runtime overrides — the in-memory CONFIG snapshot
+// is frozen at module load, so the /settings toggle values written to
+// data/user-config.json AFTER startup would be invisible. Reading fresh
+// on every call lets the operator flip a toggle mid-flight and have it
+// take effect on the next notify tick.
+function isChannelEnabled(field, envFallback) {
+  const u = readUserConfigOverrides();
+  if (Object.prototype.hasOwnProperty.call(u, field)) return u[field] !== false;
+  return envFallback !== "false";
+}
 import { recordAlerts } from "./outcomes.js";
 import { getTrackedWallets } from "./arb-wallets.js";
 
@@ -53,7 +64,7 @@ export async function notifyStreamStale({ lastFrameAt, healthy = false, heliusAc
   // Allow the operator to mute the stream-stale alert entirely. The
   // underlying health probe still runs (so the orchestrator flips Helius
   // on/off automatically), but the chat stays quiet.
-  if (CONFIG.streamAlertsEnabled === false) return false;
+  if (!isChannelEnabled("streamAlertsEnabled", process.env.BOT_STREAM_ALERTS_ENABLED)) return false;
   // Use the caller-supplied sinceMs (atomically snapshotted with the other
   // values) when available, so the message can't lie when the stream
   // recovers between the orchestrator's tick and the alert call. Fall back
@@ -111,7 +122,7 @@ export async function notifyOnline() {
 
 /** Periodic health summary. */
 export async function notifyHeartbeat() {
-  if (CONFIG.heartbeatEnabled === false) return false;
+  if (!isChannelEnabled("heartbeatEnabled", process.env.BOT_HEARTBEAT_ENABLED)) return false;
   const db = getDB();
   const c = (q) => db.prepare(q).get().c;
   const lastEv = db.prepare("SELECT MAX(last_event) m FROM tokens").get().m;
@@ -240,6 +251,9 @@ function renderSurge(s) {
  * Score, pick the best N (respecting cooldown), notify, and stamp last_notified.
  */
 export async function notifyTop() {
+  if (!isChannelEnabled("topSignalsEnabled", process.env.BOT_TOP_SIGNALS_ENABLED)) {
+    return { sent: 0, skipped: "topSignalsDisabled" };
+  }
   const db = getDB();
   const now = Date.now();
   const cooldownMs = TG.cooldownMin * 60_000;
@@ -273,7 +287,7 @@ export async function notifyTop() {
  */
 export async function notifyFades() {
   if (!CONFIG.fadeAlerts) return { sent: 0 };
-  if (CONFIG.fadesEnabled === false) return { sent: 0, skipped: "fadesDisabled" };
+  if (!isChannelEnabled("fadesEnabled", process.env.BOT_FADES_ENABLED)) return { sent: 0, skipped: "fadesDisabled" };
   const db = getDB();
   const now = Date.now();
   const fades = detectFades();
@@ -300,7 +314,7 @@ export async function notifyFades() {
  */
 export async function notifySurges() {
   if (!CONFIG.surgeAlerts) return { sent: 0 };
-  if (CONFIG.surgesEnabled === false) return { sent: 0, skipped: "surgesDisabled" };
+  if (!isChannelEnabled("surgesEnabled", process.env.BOT_SURGES_ENABLED)) return { sent: 0, skipped: "surgesDisabled" };
   const db = getDB();
   const now = Date.now();
   const surges = detectSurges();

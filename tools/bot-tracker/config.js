@@ -77,7 +77,7 @@ export const PATHS = {
 // Set BOT_TOP_SIGNALS_ENABLED / BOT_FADES_ENABLED / BOT_SURGES_ENABLED /
 // BOT_HEARTBEAT_ENABLED / BOT_STREAM_ALERTS_ENABLED to "false" in .env to
 // hard-mute. Or use /settings → Bot tab for runtime toggles.
-function readUserConfigOverrides() {
+export function readUserConfigOverrides() {
   try {
     // tools/bot-tracker/ → tools/ → <meridian>/ → data/user-config.json
     const userConfigPath = path.resolve(__dirname, "..", "..", "data", "user-config.json");
@@ -88,7 +88,7 @@ function readUserConfigOverrides() {
     return {};
   }
 }
-function toggleEnabled(envValue, field) {
+export function toggleEnabled(envValue, field) {
   // Default true. .env "false" disables. user-config.json.botTracker[field]
   // is the runtime override written by Meridian's update_config.
   const u = readUserConfigOverrides();
