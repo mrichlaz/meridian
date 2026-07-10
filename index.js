@@ -234,6 +234,83 @@ const TRAILING_DROP_CONFIRM_TOLERANCE_PCT = 1.0;
 // below range). Normal alerts wait a full management interval; emergencies
 // only wait long enough to avoid hammering the RPC during one dump.
 const EMERGENCY_POLL_COOLDOWN_MS = 90_000;
+// Stuck-cycle watchdog + emergency direct close (see resetStuckCycles /
+// maybeEmergencyDirectClose below).
+let _managementBusySince = 0; // epoch ms — when the current busy hold began
+let _screeningBusySince = 0;
+let _pnlPollBusySince = 0;
+const _emergencyCloseState = new Map(); // position → { firstSeen, lastAttempt }
+const EMERGENCY_DIRECT_CLOSE_AFTER_MS = 120_000; // breach must persist this long before bypassing the cycle
+const EMERGENCY_DIRECT_CLOSE_RETRY_MS = 180_000; // min gap between direct close attempts per position
+
+// Self-healing for wedged cycles: a hung await inside a cycle leaves its
+// _busy flag true forever (the finally never runs), which silently kills all
+// future management/screening — positions bleed past their stops with zero
+// feedback (Jul 6 + Jul 10 exports show deep-loss positions held 7h+, then
+// closed together the moment cycles resumed). Force-release locks held far
+// past any plausible cycle duration. The zombie promise may still settle
+// later — a rare overlapping run beats a dead daemon with open positions.
+function resetStuckCycles() {
+  const now = Date.now();
+  const stuck = [];
+  const mgmtCapMs = Math.max(3 * (config.schedule.managementIntervalMin || 10), 30) * 60_000;
+  if (_managementBusy && _managementBusySince && now - _managementBusySince > mgmtCapMs) {
+    _managementBusy = false;
+    stuck.push(`management (held ${Math.round((now - _managementBusySince) / 60_000)}m)`);
+  }
+  const screenCapMs = Math.max(3 * (config.schedule.screeningIntervalMin || 30), 45) * 60_000;
+  if (_screeningBusy && _screeningBusySince && now - _screeningBusySince > screenCapMs) {
+    _screeningBusy = false;
+    stuck.push(`screening (held ${Math.round((now - _screeningBusySince) / 60_000)}m)`);
+  }
+  if (_pnlPollBusy && _pnlPollBusySince && now - _pnlPollBusySince > 10 * 60_000) {
+    _pnlPollBusy = false;
+    stuck.push(`pnl-poll (held ${Math.round((now - _pnlPollBusySince) / 60_000)}m)`);
+  }
+  if (stuck.length) {
+    log("cron_warn", `Watchdog: force-released stuck cycle lock(s): ${stuck.join(", ")}`);
+    if (telegramEnabled()) {
+      sendMessage(`⚠️ Watchdog: force-released stuck ${stuck.join(", ")} lock(s). Cycles resume now — if this repeats, restart the container and check logs.`).catch(() => {});
+    }
+  }
+}
+
+// Last-resort close path for loss-cutting breaches (stop loss / below range).
+// The normal path asks runManagementCycle to do the close; when that cycle is
+// wedged, still running, or its close attempt keeps failing, the breach
+// persists tick after tick while the position bleeds. Once it has persisted
+// past EMERGENCY_DIRECT_CLOSE_AFTER_MS, close directly from the poller —
+// executeTool runs the same safety checks, notifications, and auto-swap as
+// the management path.
+async function maybeEmergencyDirectClose(position, reason) {
+  const now = Date.now();
+  let st = _emergencyCloseState.get(position.position);
+  if (!st) {
+    st = { firstSeen: now, lastAttempt: 0 };
+    _emergencyCloseState.set(position.position, st);
+  }
+  if (now - st.firstSeen < EMERGENCY_DIRECT_CLOSE_AFTER_MS) return; // give the triggered cycle time to act
+  if (now - st.lastAttempt < EMERGENCY_DIRECT_CLOSE_RETRY_MS) return;
+  st.lastAttempt = now;
+  log("cron_warn", `[PnL poll] Direct emergency close for ${position.pair}: ${reason} (breach persisted ${Math.round((now - st.firstSeen) / 1000)}s without a completed close)`);
+  try {
+    const result = await executeTool("close_position", { position_address: position.position });
+    if (result?.success || result?.already_closed) {
+      _emergencyCloseState.delete(position.position);
+      log("cron", `[PnL poll] Direct emergency close succeeded for ${position.pair}`);
+      if (telegramEnabled()) {
+        await sendMessage(`🚨 Emergency close executed directly for ${position.pair}\nReason: ${reason}\n(The management cycle hadn't completed this close in time.)`).catch(() => {});
+      }
+    } else {
+      log("cron_error", `[PnL poll] Direct emergency close FAILED for ${position.pair}: ${result?.error || "unknown error"}`);
+      if (telegramEnabled()) {
+        await sendMessage(`❌ Emergency close FAILED for ${position.pair}: ${result?.error || "unknown error"}\nTriggered by: ${reason}\nRetrying every ${Math.round(EMERGENCY_DIRECT_CLOSE_RETRY_MS / 1000)}s while the breach persists.`).catch(() => {});
+      }
+    }
+  } catch (error) {
+    log("cron_error", `[PnL poll] Direct emergency close error for ${position.pair}: ${error.message}`);
+  }
+}
 
 /** Strip <think>...</think> reasoning blocks that some models leak into output */
 function stripThink(text) {
@@ -343,6 +420,7 @@ function stopCronJobs() {
 export async function runManagementCycle({ silent = false, triggerScreening = true } = {}) {
   if (_managementBusy) return null;
   _managementBusy = true;
+  _managementBusySince = Date.now();
   timers.managementLastRun = Date.now();
   log("cron", "Starting management cycle");
   let mgmtReport = null;
@@ -585,6 +663,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     return null;
   }
   _screeningBusy = true; // set immediately — prevents TOCTOU race with concurrent callers
+  _screeningBusySince = Date.now();
   _screeningLastTriggered = Date.now();
 
   // Hard guards — don't even run the agent if preconditions aren't met
@@ -1333,12 +1412,14 @@ export function startCronJobs() {
   writeHeartbeat("startup"); // fresh boot isn't stale to the watchdog
 
   const mgmtTask = cron.schedule(`*/${Math.max(1, config.schedule.managementIntervalMin)} * * * *`, async () => {
+    resetStuckCycles();
     if (_managementBusy) return;
     timers.managementLastRun = Date.now();
     await runManagementCycle();
   });
 
   const screenTask = cron.schedule(`*/${Math.max(1, config.schedule.screeningIntervalMin)} * * * *`, async () => {
+    resetStuckCycles();
     if (_screeningBusy) {
       log("cron", "Screening cron skipped — previous cycle still running");
       return;
@@ -1358,6 +1439,7 @@ export function startCronJobs() {
   const healthTask = cron.schedule(`0 * * * *`, async () => {
     if (_managementBusy) return;
     _managementBusy = true;
+    _managementBusySince = Date.now();
     log("cron", "Starting health check");
     try {
       const [balances, mine] = await Promise.all([
@@ -1442,7 +1524,18 @@ export function startCronJobs() {
   // Runs on public infra (RPC + Jupiter + Meteora deposits) so it can poll aggressively.
   const pnlPollMs = Math.max(1, Number(config.pnl.pollIntervalSec ?? 10)) * 1000;
   const pnlPollInterval = safeSetInterval(async () => {
-    if (_managementBusy || _screeningBusy || _pnlPollBusy) return;
+    // Runs every tick, before any busy gate — this is what revives the daemon
+    // when a cycle wedges (hung await → busy flag never released).
+    resetStuckCycles();
+    if (_pnlPollBusy) return;
+    // A normal management/screening cycle finishes in a couple of minutes —
+    // keep the old yield-to-cycle behavior for those. But a slow or wedged
+    // cycle must not blind stop-loss detection (a -27% dump fits inside one
+    // long LLM-bound run, and a hung cycle used to block exits for hours):
+    // after 5 minutes of continuous busy, poll anyway — breach detection and
+    // the direct emergency close both work while the cycle lock is held.
+    if (_managementBusy && Date.now() - _managementBusySince < 5 * 60_000) return;
+    if (_screeningBusy && Date.now() - _screeningBusySince < 5 * 60_000) return;
     if (getTrackedPositions(true).length === 0) return;
     // Calm-skip: each poll is a full RPC position decode (the main steady CPU
     // cost of the daemon). When the last poll showed every position in range,
@@ -1453,9 +1546,14 @@ export function startCronJobs() {
       return;
     }
     _pnlPollBusy = true;
+    _pnlPollBusySince = Date.now();
     try {
       const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
       if (!result?.positions?.length) return;
+      // Drop emergency bookkeeping for positions that no longer exist.
+      for (const key of [..._emergencyCloseState.keys()]) {
+        if (!result.positions.some((p) => p.position === key)) _emergencyCloseState.delete(key);
+      }
       const stopLoss = Number(config.management.stopLossPct ?? -50);
       const allCalm = result.positions.every((p) => {
         // Judge calmness on the more pessimistic of reported/derived so a
@@ -1499,6 +1597,7 @@ export function startCronJobs() {
           } else {
             log("state", `[PnL poll] Exit alert: ${p.pair} — ${exit.reason} — cooldown (${Math.round((cooldownMs - sinceLastTrigger) / 1000)}s left)`);
           }
+          if (isEmergency) await maybeEmergencyDirectClose(p, exit.reason);
           break;
         }
         const closeRule = getDeterministicCloseRule(p, config.management);
@@ -1517,8 +1616,12 @@ export function startCronJobs() {
           } else {
             log("state", `[PnL poll] Deterministic close rule: ${p.pair} — Rule ${closeRule.rule}: ${closeRule.reason} — cooldown (${Math.round((cooldownMs - sinceLastTrigger) / 1000)}s left)`);
           }
+          if (isEmergency) await maybeEmergencyDirectClose(p, `Rule ${closeRule.rule}: ${closeRule.reason}`);
           break;
         }
+        // No breach on this position this tick — reset its emergency clock so
+        // a later, separate breach starts a fresh persistence window.
+        _emergencyCloseState.delete(p.position);
       }
     } finally {
       _pnlPollBusy = false;

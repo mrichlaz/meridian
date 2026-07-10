@@ -362,6 +362,23 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             attempt -= 1;
             continue;
           }
+          // A model the provider doesn't recognize fails identically on every
+          // attempt AND every cycle (e.g. a misconfigured screeningModel →
+          // 403 "Model/provider not recognized" → every screening/management
+          // cycle dies at step 0 and no deploys/closes ever run). Swap to the
+          // fallback model for the rest of this run instead of throwing.
+          const rejectionText = String(error?.message || error?.error?.message || "");
+          if (
+            usedModel !== FALLBACK_MODEL &&
+            (error?.status === 400 || error?.status === 403 || error?.status === 404) &&
+            /not recognized|not found|does not exist|invalid model|unknown model|no such model|not a valid model|no endpoints found/i.test(rejectionText)
+          ) {
+            log("agent_warn", `Provider rejected model '${usedModel}' (${error.status}) — switching to fallback ${FALLBACK_MODEL} for this run. Fix llm.*Model in user-config.json (or LLM_MODEL in .env).`);
+            usedModel = FALLBACK_MODEL;
+            forcedModel = FALLBACK_MODEL;
+            attempt -= 1;
+            continue;
+          }
           throw error;
         }
         if (response.choices?.length) break;

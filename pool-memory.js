@@ -27,7 +27,16 @@ function sanitizeStoredNote(text, maxLen = MAX_NOTE_LENGTH) {
 function load() {
   if (!fs.existsSync(POOL_MEMORY_FILE)) return {};
   try {
-    return JSON.parse(fs.readFileSync(POOL_MEMORY_FILE, "utf8"));
+    const db = JSON.parse(fs.readFileSync(POOL_MEMORY_FILE, "utf8"));
+    // Self-heal aggregates on every read. win_rate was briefly persisted as a
+    // 0-1 fraction while every consumer treats it as a 0-100 percentage —
+    // recallForPool printed "win rate 0.77%" for a 77%-win pool and
+    // ml/features' /100 normalization turned it into ~0, so the screener
+    // LLM and the ML gate both punished exactly the pools with the best
+    // proven history. Recomputing from the raw deploys array is cheap and
+    // always right, so stale/legacy values can never poison a decision again.
+    for (const entry of Object.values(db)) recomputeAggregates(entry);
+    return db;
   } catch {
     return {};
   }
@@ -48,6 +57,26 @@ function isAdjustedWinRateExcludedReason(reason) {
     text.includes("pumped far above range") ||
     text === "oor" ||
     text.includes("oor");
+}
+
+// Recompute a pool entry's aggregate stats from its raw deploys array.
+// win_rate / adjusted_win_rate are 0-100 percentages.
+function recomputeAggregates(entry) {
+  if (!Array.isArray(entry?.deploys) || entry.deploys.length === 0) return;
+  const withPnl = entry.deploys.filter((d) => d.pnl_pct != null);
+  if (withPnl.length > 0) {
+    entry.avg_pnl_pct = Math.round(
+      (withPnl.reduce((s, d) => s + d.pnl_pct, 0) / withPnl.length) * 100
+    ) / 100;
+    entry.win_rate = Math.round(
+      (withPnl.filter((d) => d.pnl_pct >= 0).length / withPnl.length) * 10000
+    ) / 100;
+  }
+  const adjusted = withPnl.filter((d) => !isAdjustedWinRateExcludedReason(d.close_reason));
+  entry.adjusted_win_rate_sample_count = adjusted.length;
+  entry.adjusted_win_rate = adjusted.length > 0
+    ? Math.round((adjusted.filter((d) => d.pnl_pct >= 0).length / adjusted.length) * 10000) / 100
+    : 0;
 }
 
 function isFeeGeneratingDeploy(deploy) {
@@ -170,21 +199,7 @@ export function recordPoolDeploy(poolAddress, deployData) {
   entry.last_deployed_at = deploy.closed_at;
   entry.last_outcome = (deploy.pnl_pct ?? 0) >= 0 ? "profit" : "loss";
 
-  // Recompute aggregates
-  const withPnl = entry.deploys.filter((d) => d.pnl_pct != null);
-  if (withPnl.length > 0) {
-    entry.avg_pnl_pct = Math.round(
-      (withPnl.reduce((s, d) => s + d.pnl_pct, 0) / withPnl.length) * 100
-    ) / 100;
-    entry.win_rate = Math.round(
-      (withPnl.filter((d) => d.pnl_pct >= 0).length / withPnl.length) * 100
-    ) / 100;
-  }
-  const adjusted = withPnl.filter((d) => !isAdjustedWinRateExcludedReason(d.close_reason));
-  entry.adjusted_win_rate_sample_count = adjusted.length;
-  entry.adjusted_win_rate = adjusted.length > 0
-    ? Math.round((adjusted.filter((d) => d.pnl_pct >= 0).length / adjusted.length) * 10000) / 100
-    : 0;
+  recomputeAggregates(entry);
 
   // Aggregate markouts (adverse-selection meter) across deploys that have one
   for (const [key, aggKey] of [["markout_15m", "avg_markout_15m"], ["markout_60m", "avg_markout_60m"]]) {
@@ -395,9 +410,13 @@ export function recallForPool(poolAddress) {
 
   const lines = [];
 
-  // Deploy history summary
+  // Deploy history summary. Spell out the win/loss counts so a model can't
+  // misread the percentage scale (win rate 77% (27/35 wins) is unambiguous).
   if (entry.total_deploys > 0) {
-    lines.push(`POOL MEMORY [${entry.name}]: ${entry.total_deploys} past deploy(s), avg PnL ${entry.avg_pnl_pct}%, win rate ${entry.win_rate}%, last outcome: ${entry.last_outcome}`);
+    const withPnl = (entry.deploys || []).filter((d) => d.pnl_pct != null);
+    const winCount = withPnl.filter((d) => d.pnl_pct >= 0).length;
+    const counts = withPnl.length > 0 ? ` (${winCount}/${withPnl.length} wins)` : "";
+    lines.push(`POOL MEMORY [${entry.name}]: ${entry.total_deploys} past deploy(s), avg PnL ${entry.avg_pnl_pct}%, win rate ${entry.win_rate}%${counts}, last outcome: ${entry.last_outcome}`);
   }
 
   // Adverse-selection meter: consistently negative post-deploy markout means
