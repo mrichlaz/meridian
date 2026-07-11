@@ -445,6 +445,18 @@ export function effectiveLossPnlPct(positionData) {
   return Math.max(pnl_pct, pnl_pct_derived);
 }
 
+// Profit-side mirror: take profit closes on a single tick with no two-phase
+// recheck, so it must not trust the provider's precomputed pct alone — a
+// glitched reported pct with no derived mark to sanity-check against
+// (pnl_pct_diff is null, so the suspicious flag can't raise) once closed a
+// -1.33% position as "take profit". A real profit shows in BOTH marks, so
+// when both exist take the min; otherwise prefer the derived (fresh) mark.
+export function effectiveProfitPnlPct(positionData) {
+  const { pnl_pct, pnl_pct_derived } = positionData;
+  if (pnl_pct != null && pnl_pct_derived != null) return Math.min(pnl_pct, pnl_pct_derived);
+  return pnl_pct_derived ?? pnl_pct ?? null;
+}
+
 export function updatePnlAndCheckExits(position_address, positionData, mgmtConfig) {
   const { pnl_pct: currentPnlPct, pnl_pct_suspicious, in_range, fee_per_tvl_24h } = positionData;
   const state = load();
@@ -582,10 +594,15 @@ export function setLastBriefingDate() {
  */
 const SYNC_GRACE_MS = 5 * 60_000; // don't auto-close positions deployed < 5 min ago
 
+// Returns the positions it auto-closed (address + a snapshot of the tracked
+// entry) so the caller can backfill performance/pool-memory for closes that
+// happened outside the agent (Meteora web, Phantom) — this function only
+// flips the local flag and records nothing else.
 export function syncOpenPositions(active_addresses) {
   const state = load();
   const activeSet = new Set(active_addresses);
   let changed = false;
+  const autoClosed = [];
 
   for (const posId in state.positions) {
     const pos = state.positions[posId];
@@ -602,8 +619,10 @@ export function syncOpenPositions(active_addresses) {
     pos.closed_at = new Date().toISOString();
     pos.notes.push(`Auto-closed during state sync (not found on-chain)`);
     changed = true;
+    autoClosed.push({ address: posId, tracked: { ...pos } });
     log("state", `Position ${posId} auto-closed (missing from on-chain data)`);
   }
 
   if (changed) save(state);
+  return autoClosed;
 }

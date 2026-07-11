@@ -39,7 +39,7 @@ import {
   ackPendingUpdates,
 } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, effectiveLossPnlPct, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, effectiveLossPnlPct, effectiveProfitPnlPct, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
 import { logScreeningSnapshot, summarizeScreeningSnapshots, readScreeningSnapshots } from "./screening-snapshot.js";
@@ -558,8 +558,13 @@ export async function runManagementCycle({ silent = false, triggerScreening = tr
       log("cron", `Management: Executing immediate ${act.action} for ${p.pair} (${act.reason || ""})`);
       
       const toolName = act.action === "CLOSE" ? "close_position" : "claim_fees";
-      // FIX: Use position_address to match executor expectations
-      const result = await executeTool(toolName, { position_address: p.position });
+      // Pass the rule's reason through: closePosition defaults a missing
+      // reason to "agent decision", which mislabels every deterministic
+      // close in state/lessons/pool-memory and skips the executor's
+      // low-yield pool annotation (it greps the close reason).
+      const result = await executeTool(toolName, act.action === "CLOSE"
+        ? { position_address: p.position, reason: act.reason || `Rule ${act.rule}` }
+        : { position_address: p.position });
 
       if (result?.success && !result.already_closed) {
         log("cron", `Management: Successfully executed ${act.action} for ${p.pair}`);
@@ -1848,8 +1853,16 @@ export function getDeterministicCloseRule(position, managementConfig) {
   // and a hard cap here would cut exactly the fat right tail that pays for
   // the book (Jul 1-7: the five ≥5% closes made $223 — more than the whole
   // 1.5–5% range combined). Fires only when trailing TP is off or not armed.
-  if (!pnlSuspect && !tracked?.trailing_active && position.pnl_pct != null && position.pnl_pct >= managementConfig.takeProfitPct) {
-    return { action: "CLOSE", rule: 2, reason: "take profit" };
+  // Acts on the corroborated profit-side mark AND requires the confirmed peak
+  // to agree: peak_pnl_pct only updates after the 15s two-phase recheck, so a
+  // single phantom provider tick can never satisfy it (Jul 12: reported pct
+  // spiked past TP on one tick, peak recheck rejected the same spike, yet
+  // Rule 2 closed a -1.33% position as "take profit"). A genuine run-up
+  // confirms its peak within one recheck and fires on the next evaluation.
+  const profitPnlPct = effectiveProfitPnlPct(position);
+  const peakCorroboratesTp = tracked ? (tracked.peak_pnl_pct ?? 0) >= managementConfig.takeProfitPct : true;
+  if (!pnlSuspect && !tracked?.trailing_active && profitPnlPct != null && profitPnlPct >= managementConfig.takeProfitPct && peakCorroboratesTp) {
+    return { action: "CLOSE", rule: 2, reason: `take profit: ${profitPnlPct}% >= ${managementConfig.takeProfitPct}% (peak ${tracked ? (tracked.peak_pnl_pct ?? 0) : "untracked"}%)` };
   }
   if (
     position.active_bin != null &&
