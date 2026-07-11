@@ -321,7 +321,7 @@ All persistent files are loaded/saved on each call — no in-memory caching laye
 | `LLM_BASE_URL` | no | Override for any OpenAI-compatible endpoint (LM Studio: `http://localhost:1234/v1`). |
 | `LLM_MODEL` | no | Default model. Per-role models in `user-config.json` override. |
 | `HELIUS_API_KEY` | recommended | Wallet balance lookups via Helius. |
-| `LPAGENT_API_KEY` | optional | Direct LPAgent positions fetch fallback. |
+| `LPAGENT_API_KEY` | optional | Direct LPAgent open-api access: positions fetch fallback (dlmm.js) AND the LP study (study.js hits `/pools/{id}/top-lpers` directly, bypassing the Agent Meridian proxy whose shared upstream key gets rate-limited). |
 | `JUPITER_API_KEY` | optional | Better rate limit on Jupiter Swap. Default key baked in. |
 | `TELEGRAM_BOT_TOKEN` | no | Notifications + REPL. |
 | `TELEGRAM_CHAT_ID` | no | Default chat (also persisted to `user-config.telegramChatId`). |

@@ -3586,7 +3586,10 @@ async function enrichAndFilterCandidates({ limit = 10, liveMessage = null } = {}
           studySkipped
             ? Promise.resolve(null)
             : withTimeout(
-                studyTopLPers({ pool_address: pool.pool, limit: 3 }).catch(() => null),
+                // Preserve the failure reason: a fast upstream error (e.g.
+                // Agent Meridian returning "upstream HTTP 429") is not a
+                // timeout, and logging it as one hides the real problem.
+                studyTopLPers({ pool_address: pool.pool, limit: 3 }).catch((e) => ({ _studyError: e?.message || "unknown error" })),
                 STUDY_TIMEOUT_MS,
               ),
         ]);
@@ -3594,10 +3597,14 @@ async function enrichAndFilterCandidates({ limit = 10, liveMessage = null } = {}
         const swValue = smartWallets.status === "fulfilled" ? smartWallets.value : null;
         const narrativeValue = narrative.status === "fulfilled" ? narrative.value : null;
         const tokenInfoValue = tokenInfo.status === "fulfilled" ? tokenInfo.value : null;
-        const studyValue = study.status === "fulfilled" ? study.value : null;
+        const studyRaw = study.status === "fulfilled" ? study.value : null;
+        const studyValue = studyRaw && !studyRaw._studyError ? studyRaw : null;
 
-        if (!studySkipped && study.status === "fulfilled" && study.value == null) {
-          log("screening", `Study timeout: ${pool.name} exceeded ${STUDY_TIMEOUT_MS}ms — continuing without LP study`);
+        if (!studySkipped && study.status === "fulfilled" && studyValue == null) {
+          const studyWhy = studyRaw?._studyError
+            ? `failed (${String(studyRaw._studyError).slice(0, 120)})`
+            : `timed out after ${STUDY_TIMEOUT_MS}ms`;
+          log("screening", `LP study ${studyWhy}: ${pool.name} — continuing without LP study`);
           _studyFailStreak += 1;
           // Two consecutive timeouts = the study API is slow/down, not a blip.
           // Open the circuit for 10 min instead of eating 8s per candidate.
@@ -3605,7 +3612,7 @@ async function enrichAndFilterCandidates({ limit = 10, liveMessage = null } = {}
             _studySkipUntil = Date.now() + 10 * 60 * 1000;
             log("screening", "LP study circuit opened for 10 min after consecutive timeouts");
           }
-        } else if (!studySkipped && study.status === "fulfilled" && study.value != null) {
+        } else if (!studySkipped && study.status === "fulfilled" && studyValue != null) {
           _studyFailStreak = 0;
         }
         if (tokenInfo.status === "fulfilled" && tokenInfo.value == null) {
