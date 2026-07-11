@@ -136,6 +136,12 @@ const FEATURE_SPEC = [
   "policy_toxic_flow",         // 81: boolean toxic-flow flag
   "policy_regime_risk_off",    // 82: boolean
   "policy_regime_risk_on",     // 83: boolean
+
+  // ─── USER ENRICHMENT: structured notes/tags/holders ──
+  "mem_user_flag_count",        // 84: count of negative user flags (rugpull-suspect, etc.)
+  "mem_user_tag_count",         // 85: count of user tags (watchlist, favorite, etc.)
+  "mem_narrative_strength",     // 86: |narrative_tags| / 5, clipped 0-1
+  "mem_enrichment_age_hours",   // 87: hours since pool was last enriched (999 if never)
 ];
 
 const FEATURE_COUNT = FEATURE_SPEC.length;
@@ -190,6 +196,10 @@ const NORM_BOUNDS = Object.fromEntries(
       case "mem_adjusted_win_rate":    return [name, null]; // already 0-1
       case "mem_last_outcome":         return [name, null]; // -1/0/1 already
       case "mem_recent_snapshot_pnl":  return [name, [-50, 100]];
+      case "mem_user_flag_count":     return [name, [0, 10]];
+      case "mem_user_tag_count":      return [name, [0, 10]];
+      case "mem_narrative_strength":  return [name, null]; // already 0-1
+      case "mem_enrichment_age_hours": return [name, [0, 720]];
       case "study_avg_hold_hours":     return [name, [0, 720]];
       case "study_avg_win_rate":       return [name, [0, 1]];
       case "study_scalper_ratio":      return [name, [0, 1]];
@@ -305,6 +315,19 @@ export function extractFeatures({
     vec[FEATURE_INDEX.mem_is_on_cooldown] = poolMemory.cooldown_until ? isActive(poolMemory.cooldown_until) : 0;
     vec[FEATURE_INDEX.mem_is_token_cooldown] = poolMemory.base_mint_cooldown_until ? isActive(poolMemory.base_mint_cooldown_until) : 0;
     vec[FEATURE_INDEX.mem_recent_snapshot_pnl] = computeRecentPnlTrend(poolMemory);
+
+    // Enrichment block — user-curated intel that survives across sessions.
+    // Defensive: enrichment may be absent (older entries, never-enriched pools).
+    const enrichment = poolMemory.enrichment || {};
+    const flags = Array.isArray(enrichment.user_flags) ? enrichment.user_flags : [];
+    const tags = Array.isArray(enrichment.user_tags) ? enrichment.user_tags : [];
+    const narrativeTags = Array.isArray(enrichment.narrative_tags) ? enrichment.narrative_tags : [];
+    vec[FEATURE_INDEX.mem_user_flag_count] = flags.length;
+    vec[FEATURE_INDEX.mem_user_tag_count] = tags.length;
+    vec[FEATURE_INDEX.mem_narrative_strength] = Math.min(1, narrativeTags.length / 5);
+    vec[FEATURE_INDEX.mem_enrichment_age_hours] = enrichment.enriched_at
+      ? (Date.now() - Date.parse(enrichment.enriched_at)) / 3600_000
+      : 999;
   }
 
   // ─── STUDY ─────────────────────────────────────

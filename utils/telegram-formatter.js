@@ -87,6 +87,7 @@ const ACTION_BUTTONS = {
       [
         { text: "🔗 Pool", url: `${SOLSCAN_URL}/account/${poolAddress}` },
         { text: "📊 PnL", callback_data: `pnl:${positionAddress}` },
+        { text: "🔍 Enrich", callback_data: `enrich:${poolAddress}` },
       ],
       [
         { text: "💰 Claim", callback_data: `claim:${positionAddress}` },
@@ -755,6 +756,62 @@ export function formatLessons(lessons, options = {}) {
   });
   if (list.length > showCount) lines.push(`… and ${list.length - showCount} more`);
   return { text: lines.join("\n").slice(0, 3900), buttons: ACTION_BUTTONS.status() };
+}
+
+/**
+ * Format an enrichment result for Telegram. Truncates to fit 4096-char
+ * Telegram message limit and escapes HTML so the parser doesn't choke on
+ * addresses or narrative tags with weird characters.
+ */
+export function formatEnrichmentResult(result) {
+  if (!result) return "No enrichment result.";
+  if (result.error) return `Enrichment failed: ${esc(result.error)}`;
+
+  const lines = [];
+  lines.push(b(`🔍 Enrichment ${result.persisted ? "persisted" : "(dry-run)"}`));
+  lines.push(`Mint: <code>${esc((result.mint || "").slice(0, 12))}…</code>`);
+  if (result.pool_address && result.pool_address !== `mint:${result.mint}`) {
+    lines.push(`Pool: <code>${esc((result.pool_address || "").slice(0, 12))}…</code>`);
+  }
+
+  const e = result.enrichment || result.summary || {};
+  if (e.holders_count != null) lines.push(`Holders: <b>${e.holders_count}</b>`);
+  if (e.holders_top10_pct != null) lines.push(`Top 10 holders: <b>${Number(e.holders_top10_pct).toFixed(1)}%</b>${e.holders_top10_pct >= 40 ? " ⚠️" : ""}`);
+  if (e.organic_score != null) lines.push(`Organic score: <b>${e.organic_score}</b>${e.organic_score < 30 ? " ⚠️" : ""}`);
+  if (e.dev_wallet_holds_pct != null) lines.push(`Dev holds: <b>${Number(e.dev_wallet_holds_pct).toFixed(1)}%</b>${e.dev_wallet_holds_pct >= 10 ? " ⚠️" : ""}`);
+  if (e.bundle_pct != null) lines.push(`Bundle: <b>${Number(e.bundle_pct).toFixed(1)}%</b>${e.bundle_pct >= 10 ? " ⚠️" : ""}`);
+  if (e.sniper_pct != null) lines.push(`Sniper: <b>${Number(e.sniper_pct).toFixed(1)}%</b>${e.sniper_pct >= 10 ? " ⚠️" : ""}`);
+
+  const tags = Array.isArray(e.narrative_tags) ? e.narrative_tags : [];
+  if (tags.length) lines.push(`\nNarrative: ${tags.slice(0, 6).map((t) => `<code>${esc(t)}</code>`).join(", ")}`);
+
+  const socials = e.socials || {};
+  const socialParts = [];
+  if (socials.twitter) socialParts.push(`𝕏 <code>${esc(socials.twitter)}</code>`);
+  if (socials.telegram) socialParts.push(`TG <code>${esc(socials.telegram)}</code>`);
+  if (socials.website) socialParts.push(`Web <code>${esc(socials.website)}</code>`);
+  if (socialParts.length) lines.push(`Socials: ${socialParts.join(" • ")}`);
+
+  const flags = Array.isArray(e.user_flags) ? e.user_flags : [];
+  const userTags = Array.isArray(e.user_tags) ? e.user_tags : [];
+  if (flags.length) lines.push(`\n🏴 User flags: ${flags.map((f) => `<code>${esc(f)}</code>`).join(", ")}`);
+  if (userTags.length) lines.push(`🏷️ User tags: ${userTags.map((t) => `<code>${esc(t)}</code>`).join(", ")}`);
+
+  if (result.enrichment?.enrichments_count != null) {
+    lines.push(`\n<i>Refreshed ${result.enrichment.enrichments_count}×, last at ${esc((result.enrichment.enriched_at || "").slice(0, 19).replace("T", " "))}Z</i>`);
+  }
+
+  const sources = result.sources || {};
+  if (sources && Object.keys(sources).length) {
+    const ok = Object.entries(sources).filter(([, v]) => v).map(([k]) => k).join(", ");
+    const bad = Object.entries(sources).filter(([, v]) => !v).map(([k]) => k).join(", ");
+    const parts = [];
+    if (ok) parts.push(`✓ ${ok}`);
+    if (bad) parts.push(`⚠ ${bad}`);
+    lines.push(`<i>Sources: ${parts.join(" | ")}</i>`);
+  }
+
+  return lines.join("\n").slice(0, 3900);
 }
 
 export function formatPerformance(summary, history, options = {}) {

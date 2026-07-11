@@ -3370,6 +3370,279 @@ async function telegramHandler(msg) {
     return;
   }
 
+  // ── /enrich <pool_or_mint> [--flags a,b] [--tags c,d] ──────────────
+  if (text === "/enrich" || text.startsWith("/enrich ")) {
+    try {
+      const argText = text.slice("/enrich".length).trim();
+      const parts = argText ? argText.split(/\s+/) : [];
+      const target = parts[0];
+      const flagsInline = parts.find((p) => p.startsWith("--flags"));
+      const tagsInline = parts.find((p) => p.startsWith("--tags"));
+      const userFlags = flagsInline ? flagsInline.replace(/^--flags=/, "").replace(/^--flags/, "").trim().split(",").map((s) => s.trim()).filter(Boolean) : [];
+      const userTags = tagsInline ? tagsInline.replace(/^--tags=/, "").replace(/^--tags/, "").trim().split(",").map((s) => s.trim()).filter(Boolean) : [];
+
+      if (!target) {
+        await sendMessage("Usage: /enrich <pool_address_or_mint> [--flags a,b] [--tags c,d]\n\nOr tap 🔍 Enrich on any position card to enrich that pool.").catch(() => {});
+        return;
+      }
+      if (target === "--flags" || target === "--tags") {
+        await sendMessage("Pass the address/mint before the flags.\nExample: /enrich J4x1EMmQ --flags rugpull-suspect --tags watchlist").catch(() => {});
+        return;
+      }
+
+      const isLikelyPool = target.length >= 32 && !target.endsWith("11111111111111111111111111111111");
+      const params = { persist: true, user_flags: userFlags, user_tags: userTags };
+      if (isLikelyPool) params.pool_address = target;
+      else params.base_mint = target;
+
+      const sent = await sendHTML("🔍 <i>Fetching holders, narrative, and risk…</i>").catch(() => null);
+      const msgId = sent?.result?.message_id;
+      const result = await executeTool("enrich_pool_record", params);
+      const body = formatEnrichmentResult(result);
+      if (msgId) await editMessage(body, msgId).catch(() => sendMessage(body));
+      else await sendMessage(body).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Enrich failed: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  // ── /enrichall — enrich every open position's pool ─────────────────
+  if (text === "/enrichall") {
+    try {
+      const { getMyPositions } = await import("./tools/dlmm.js");
+      const { positions = [] } = await getMyPositions({ force: true }).catch(() => ({ positions: [] }));
+      const pools = [...new Set(positions.map((p) => p.pool).filter(Boolean))];
+      if (pools.length === 0) {
+        await sendMessage("No open positions to enrich.").catch(() => {});
+        return;
+      }
+      const sent = await sendHTML(`🔍 <i>Enriching ${pools.length} pool${pools.length === 1 ? "" : "s"}…</i>`).catch(() => null);
+      const msgId = sent?.result?.message_id;
+      const results = [];
+      for (const pool of pools) {
+        const r = await executeTool("enrich_pool_record", { pool_address: pool, persist: true });
+        results.push({ pool, ok: r.persisted, count: r.enrichment?.enrichments_count, error: r.error });
+      }
+      const okCount = results.filter((r) => r.ok).length;
+      const body = [
+        `<b>🔍 Enrichment complete</b>`,
+        `${okCount}/${pools.length} pools updated.`,
+        ...results.map((r) => r.ok ? `  ✓ ${r.pool.slice(0, 8)}… (count=${r.count})` : `  ✗ ${r.pool.slice(0, 8)}… ${r.error || "failed"}`),
+      ].join("\n");
+      if (msgId) await editMessage(body, msgId).catch(() => sendMessage(body));
+      else await sendMessage(body).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Enrich-all failed: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  // ── /enrichments — list pools with user flags/tags ──────────────────
+  if (text === "/enrichments") {
+    try {
+      const { load } = await import("./pool-memory.js");
+      const db = load();
+      const flagged = [];
+      for (const [addr, entry] of Object.entries(db)) {
+        const e = entry.enrichment;
+        if (!e) continue;
+        const flags = e.user_flags || [];
+        const tags = e.user_tags || [];
+        if (flags.length === 0 && tags.length === 0) continue;
+        flagged.push({
+          pool: addr,
+          name: entry.name || addr.slice(0, 8),
+          flags,
+          tags,
+          enriched_at: e.enriched_at,
+          count: e.enrichments_count,
+        });
+      }
+      if (flagged.length === 0) {
+        await sendMessage("No pools have user flags or tags yet. Use /enrich or tap 🔍 Enrich on a position.").catch(() => {});
+        return;
+      }
+      const lines = [`<b>🏷️ ${flagged.length} pool${flagged.length === 1 ? "" : "s"} with user intel</b>`];
+      for (const f of flagged.slice(0, 20)) {
+        const ageH = f.enriched_at ? ((Date.now() - Date.parse(f.enriched_at)) / 3600_000).toFixed(1) : "?";
+        lines.push(`\n<b>${f.name}</b> <code>${f.pool.slice(0, 8)}…</code> (${ageH}h old, refreshed ${f.count}×)`);
+        if (f.flags.length) lines.push(`  flags: ${f.flags.map((x) => `<code>${x}</code>`).join(", ")}`);
+        if (f.tags.length) lines.push(`  tags: ${f.tags.map((x) => `<code>${x}</code>`).join(", ")}`);
+      }
+      await sendHTML(lines.join("\n")).catch(() => {});
+    } catch (e) {
+      await sendMessage(`List failed: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  // ── /reconstruct <position_address> ──────────────────────────────
+  // Manual RPC backfill for a single closed position. The agent fires this
+  // automatically when it detects an external close, but you can use this
+  // to backfill a position that was missed (RPC blip, closed before the
+  // detector shipped, etc.).
+  if (text === "/reconstruct" || text.startsWith("/reconstruct ")) {
+    try {
+      const positionAddress = text.slice("/reconstruct".length).trim();
+      if (!positionAddress) {
+        await sendMessage("Usage: /reconstruct <position_address>").catch(() => {});
+        return;
+      }
+      const { getTrackedPosition } = await import("./state.js");
+      const { esc } = await import("./utils/telegram-formatter.js");
+      const tracked = getTrackedPosition(positionAddress);
+      const baseMint = tracked?.base_mint || null;
+      const initialUsd = tracked?.initial_value_usd || 0;
+      const walletAddress = tracked?.wallet_address || null;
+      if (!walletAddress) {
+        // Fall back to the agent's wallet if state doesn't carry it
+        const { _wallet: w } = await import("./tools/dlmm.js");
+        if (!w?.publicKey) {
+          await sendMessage("Could not determine wallet address. Make sure the agent's wallet is loaded.").catch(() => {});
+          return;
+        }
+      }
+      const sent = await sendHTML("🔎 <i>Searching recent wallet transactions…</i>").catch(() => null);
+      const msgId = sent?.result?.message_id;
+      const { reconstructClosedPosition } = await import("./tools/position-reconstructor.js");
+      const rpc = await reconstructClosedPosition({
+        position_address: positionAddress,
+        wallet_address: walletAddress || (await import("./tools/dlmm.js"))._wallet.publicKey.toString(),
+        base_mint: baseMint,
+        initial_value_usd: initialUsd,
+      });
+      if (!rpc.found) {
+        const body = `❌ Reconstruction failed: <code>${esc(rpc.reason || "unknown")}</code>\n\nPosition: <code>${esc(positionAddress.slice(0, 12))}…</code>\nThis usually means the close tx is older than the last 50 wallet transactions. Older backfills would need a Birdeye/Helius tx history API.`;
+        if (msgId) await editMessage(body, msgId).catch(() => sendMessage(body));
+        else await sendMessage(body).catch(() => {});
+        return;
+      }
+      // Persist as a performance record so it shows in /lessons, /performance,
+      // and feeds the cooldown streak. Use the close-at timestamp if available.
+      const { recordPerformance } = await import("./lessons.js");
+      const deployedAtMs = tracked?.deployed_at ? Date.parse(tracked.deployed_at) : (rpc.closed_at ? Date.parse(rpc.closed_at) - 60 * 60_000 : Date.now() - 60 * 60_000);
+      const minutesHeld = Math.max(0, Math.round((Date.parse(rpc.closed_at || new Date().toISOString()) - deployedAtMs) / 60000));
+      await recordPerformance({
+        position: positionAddress,
+        pool: tracked?.pool || `mint:${baseMint || "unknown"}`,
+        pool_name: tracked?.pool_name || "unknown",
+        base_mint: baseMint,
+        strategy: tracked?.strategy || "spot",
+        bin_step: tracked?.bin_step || null,
+        amount_sol: tracked?.amount_sol || null,
+        volatility: tracked?.volatility ?? null,
+        fee_tvl_ratio: tracked?.fee_tvl_ratio ?? null,
+        organic_score: tracked?.organic_score ?? null,
+        initial_value_usd: initialUsd || 1, // validation requires > 0
+        final_value_usd: rpc.final_value_usd,
+        fees_earned_usd: rpc.fees_earned_usd,
+        minutes_held: minutesHeld,
+        minutes_in_range: minutesHeld,
+        close_reason: "manual reconstruction via /reconstruct",
+        deployed_at: tracked?.deployed_at || null,
+      }).catch((e) => {
+        log("telegram_warn", `recordPerformance (manual reconstruct) failed: ${e.message}`);
+      });
+      const body = [
+        `<b>🔎 Reconstruction</b>`,
+        `Position: <code>${esc(positionAddress.slice(0, 12))}…</code>`,
+        `Closed at: ${esc((rpc.closed_at || "?").replace("T", " ").slice(0, 19))}Z`,
+        `Tx: <code>${esc(rpc.signature.slice(0, 16))}…</code>`,
+        ``,
+        `SOL returned to wallet: <b>${rpc.final_sol.toFixed(4)} SOL</b> ($${rpc.prices.sol_usd?.toFixed(2) || "?"})`,
+        baseMint ? `Base tokens returned: <b>${rpc.final_base_tokens.toLocaleString()}</b> ($${rpc.prices.base_usd?.toFixed(6) || "?"}/unit)` : "",
+        ``,
+        `<b>Final value:</b> $${rpc.final_value_usd.toFixed(2)}`,
+        `<b>Estimated fees:</b> $${rpc.fees_earned_usd.toFixed(2)}`,
+        ``,
+        `<i>Recorded to /lessons and /performance.</i>`,
+      ].filter(Boolean).join("\n");
+      if (msgId) await editMessage(body, msgId).catch(() => sendMessage(body));
+      else await sendMessage(body).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Reconstruct failed: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  // ── /reconstructall — try to reconstruct every still-tracked position
+  if (text === "/reconstructall") {
+    try {
+      const { load: loadState } = await import("./state.js");
+      const { esc } = await import("./utils/telegram-formatter.js");
+      const { reconstructClosedPosition } = await import("./tools/position-reconstructor.js");
+      const { recordPerformance } = await import("./lessons.js");
+      const state = loadState();
+      const positions = Object.values(state.positions || {}).filter((p) => !p.closed && p.position);
+      if (positions.length === 0) {
+        await sendMessage("No open positions to reconstruct.").catch(() => {});
+        return;
+      }
+      const sent = await sendHTML(`🔎 <i>Reconstructing ${positions.length} position${positions.length === 1 ? "" : "s"}…</i>`).catch(() => null);
+      const msgId = sent?.result?.message_id;
+      const { _wallet: w } = await import("./tools/dlmm.js");
+      const walletAddress = w?.publicKey?.toString();
+      if (!walletAddress) {
+        await sendMessage("Wallet not loaded.").catch(() => {});
+        return;
+      }
+      const results = [];
+      for (const p of positions) {
+        try {
+          const rpc = await reconstructClosedPosition({
+            position_address: p.position,
+            wallet_address: walletAddress,
+            base_mint: p.base_mint,
+            initial_value_usd: p.initial_value_usd || 0,
+          });
+          if (rpc.found) {
+            await recordPerformance({
+              position: p.position,
+              pool: p.pool || `mint:${p.base_mint || "unknown"}`,
+              pool_name: p.pool_name || "unknown",
+              base_mint: p.base_mint || null,
+              strategy: p.strategy || "spot",
+              bin_step: p.bin_step || null,
+              amount_sol: p.amount_sol || null,
+              volatility: p.volatility ?? null,
+              initial_value_usd: p.initial_value_usd || 1,
+              final_value_usd: rpc.final_value_usd,
+              fees_earned_usd: rpc.fees_earned_usd,
+              minutes_held: p.deployed_at ? Math.max(0, Math.round((Date.now() - Date.parse(p.deployed_at)) / 60000)) : 60,
+              minutes_in_range: 60,
+              close_reason: "reconstructed via /reconstructall",
+              deployed_at: p.deployed_at || null,
+            }).catch((e) => log("telegram_warn", `reconstructall: recordPerformance failed for ${p.position.slice(0, 8)}: ${e.message}`));
+            results.push({ pos: p, ok: true, rpc });
+          } else {
+            results.push({ pos: p, ok: false, reason: rpc.reason });
+          }
+        } catch (e) {
+          results.push({ pos: p, ok: false, reason: e.message });
+        }
+      }
+      const okCount = results.filter((r) => r.ok).length;
+      const notFound = results.filter((r) => !r.ok).length;
+      const body = [
+        `<b>🔎 Reconstruct-all complete</b>`,
+        `${okCount} reconstructed, ${notFound} not found in recent window.`,
+        ...results.slice(0, 10).map((r) => {
+          if (r.ok) return `  ✓ ${r.pos.pair || r.pos.position.slice(0, 8)}… → $${r.rpc.final_value_usd.toFixed(2)} ($${r.rpc.fees_earned_usd.toFixed(2)} fees)`;
+          return `  · ${r.pos.pair || r.pos.position.slice(0, 8)}… still open (tx not in last 50)`;
+        }),
+        results.length > 10 ? `… and ${results.length - 10} more` : "",
+        ``,
+        notFound > 0 ? `<i>Tip: positions still showing as "still open" likely aren't closed on-chain yet — they're real open positions.</i>` : "",
+      ].filter(Boolean).join("\n");
+      if (msgId) await editMessage(body, msgId).catch(() => sendMessage(body));
+      else await sendMessage(body).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Reconstruct-all failed: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
   busy = true;
   let liveMessage = null;
   try {

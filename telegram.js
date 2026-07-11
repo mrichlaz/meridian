@@ -287,6 +287,7 @@ function toolLabel(name) {
     search_pools: "search pools",
     discover_pools: "discover pools",
     get_crypto_bot_tokens: "crypto bot tokens",
+    enrich_pool_record: "enrich pool",
   };
   return labels[name] || name.replace(/_/g, " ");
 }
@@ -313,6 +314,10 @@ function summarizeToolResult(name, result) {
     case "study_top_lpers":
     case "get_top_lpers":
       return `${result.lpers?.length ?? 0} LPers`;
+    case "enrich_pool_record":
+      return result.persisted
+        ? `persisted (count=${result.enrichment?.enrichments_count ?? "?"})`
+        : (result.error || "preview");
     default:
       return result.success === false ? "failed" : "done";
   }
@@ -502,6 +507,11 @@ const BOT_COMMANDS = [
   { command: "sweep",      description: "Run wallet sweeper once (swap stray base tokens to SOL)" },
   { command: "restart",    description: "Clean restart (exit, supervisor relaunches)" },
   { command: "stop",       description: "Shut down agent" },
+  { command: "enrich",     description: "Pull holders/narrative/risk for a pool or mint, persist to memory" },
+  { command: "enrichall",  description: "Enrich every currently open position's pool" },
+  { command: "enrichments",description: "List pools that have user flags/tags" },
+  { command: "reconstruct",description: "Backfill a closed position's PnL from RPC (auto-fires on external close)" },
+  { command: "reconstructall",description: "Try to reconstruct every position tracked as open in state.json" },
 ];
 
 async function registerCommands() {

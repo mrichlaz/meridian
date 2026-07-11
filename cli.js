@@ -273,6 +273,9 @@ const { values: flags } = parseArgs({
     "silent":     { type: "boolean" },
     "max-age":    { type: "string" },
     limit:        { type: "string" },
+    flags:       { type: "string" },
+    tags:        { type: "string" },
+    persist:     { type: "boolean" },
   },
   allowPositionals: true,
   strict: false,
@@ -594,6 +597,28 @@ switch (subcommand) {
     if (!flags.pool) die("Usage: meridian pool-memory --pool <addr>");
     const { getPoolMemory } = await import("./pool-memory.js");
     out(getPoolMemory({ pool_address: flags.pool }));
+    break;
+  }
+
+  // ── enrich ──────────────────────────────────────────────────────
+  case "enrich": {
+    // Accept pool address OR mint as the positional arg (first non-flag arg after "enrich").
+    const target = argv.find((a, i) => !a.startsWith("-") && i > 0 && a !== "enrich");
+    if (!target) die("Usage: meridian enrich <pool_address_or_mint> [--persist|--dry-run] [--flags a,b,c] [--tags x,y]");
+    const { executeTool } = await import("./tools/executor.js");
+    const isLikelyPool = target.length >= 32 && !target.endsWith("11111111111111111111111111111111");
+    const flagsList = (flags.flags || "").split(",").map((s) => s.trim()).filter(Boolean);
+    const tagsList = (flags.tags || "").split(",").map((s) => s.trim()).filter(Boolean);
+    const persist = !flags["dry-run"];
+    const params = {
+      persist,
+      user_flags: flagsList,
+      user_tags: tagsList,
+    };
+    if (isLikelyPool) params.pool_address = target;
+    else params.base_mint = target;
+    const result = await executeTool("enrich_pool_record", params);
+    out(result);
     break;
   }
 

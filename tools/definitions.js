@@ -1064,6 +1064,53 @@ Use when you observe something worth remembering about a specific pool:
     }
   },
 
+  // ─── Pool Enrichment ────────────────────────────────────────────
+
+  {
+    type: "function",
+    function: {
+      name: "enrich_pool_record",
+      description: `Fetch on-chain intelligence for a pool's base token (holders, narrative, risk)
+and persist it to pool-memory so future deploys, lessons, and ML features can see it.
+
+Use this when:
+- researching a pool before deploying (combine with get_pool_detail)
+- investigating why a recent close lost money (cross-reference user_flags × historical PnL)
+- refreshing stale enrichment data (anything older than ~24h)
+
+Returns a summary plus the persisted enrichment block. Set persist=false for a dry-run preview.`,
+      parameters: {
+        type: "object",
+        properties: {
+          pool_address: {
+            type: "string",
+            description: "Pool address to enrich. If omitted, base_mint must be provided."
+          },
+          base_mint: {
+            type: "string",
+            description: "Base token mint to enrich. If pool_address is given but no mint, the pool's base mint is resolved automatically."
+          },
+          persist: {
+            type: "boolean",
+            description: "Write the result to pool-memory. Default true. Set false for a dry-run preview.",
+            default: true
+          },
+          user_flags: {
+            type: "array",
+            items: { type: "string" },
+            description: "Adversarial signals you've observed, e.g. ['rugpull-suspect','wash-trading','dev-dump']"
+          },
+          user_tags: {
+            type: "array",
+            items: { type: "string" },
+            description: "Custom tags for your own categorization, e.g. ['avoid','watchlist','favorite']"
+          }
+        },
+        required: []
+      }
+    }
+  },
+
   // ─── Token Blacklist ────────────────────────────────────────────
 
   {

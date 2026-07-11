@@ -491,3 +491,88 @@ export function addPoolNote({ pool_address, note }) {
   log("pool-memory", `Note added to ${pool_address.slice(0, 8)}: ${safeNote}`);
   return { saved: true, pool_address, note: safeNote };
 }
+
+// ─── Enrichment ──────────────────────────────────────────────
+
+// Whitelist of fields an enrichment update is allowed to write. Keeps LLM
+// output from polluting the record and gives ML features a stable schema
+// to read against.
+const ENRICHMENT_FIELDS = [
+  "holders_top10_pct",
+  "holders_count",
+  "organic_score",
+  "top10_holder_lp_pct",
+  "narrative_tags",
+  "socials",
+  "dev_wallet_holds_pct",
+  "bundle_pct",
+  "sniper_pct",
+  "user_flags",
+  "user_tags",
+];
+
+/**
+ * Merge-update the enrichment block for a pool. Lazy-initializes the entry
+ * and the enrichment object if missing. Only whitelisted fields are persisted;
+ * everything else is dropped. Bumps `enriched_at` and `enrichments_count`.
+ *
+ * @param {string} poolAddress
+ * @param {Object} partial  any subset of ENRICHMENT_FIELDS
+ * @returns {{ saved: boolean, pool_address: string, enrichment: Object }}
+ */
+export function setPoolEnrichment(poolAddress, partial = {}) {
+  if (!poolAddress) return { saved: false, error: "pool_address required" };
+  if (!partial || typeof partial !== "object") return { saved: false, error: "partial required" };
+
+  const db = load();
+
+  if (!db[poolAddress]) {
+    db[poolAddress] = {
+      name: poolAddress.slice(0, 8),
+      base_mint: null,
+      deploys: [],
+      total_deploys: 0,
+      avg_pnl_pct: 0,
+      win_rate: 0,
+      last_deployed_at: null,
+      last_outcome: null,
+      notes: [],
+    };
+  }
+
+  const entry = db[poolAddress];
+  if (!entry.enrichment || typeof entry.enrichment !== "object") {
+    entry.enrichment = {};
+  }
+
+  const cleaned = {};
+  for (const field of ENRICHMENT_FIELDS) {
+    if (partial[field] === undefined) continue;
+    cleaned[field] = partial[field];
+  }
+
+  // user_flags / user_tags / narrative_tags are append-or-replace arrays.
+  // If the caller passes an array, replace. If they pass strings like
+  // ["avoid", "watchlist"], treat as replace.
+  const arrayFields = ["narrative_tags", "user_flags", "user_tags"];
+  for (const f of arrayFields) {
+    if (cleaned[f] !== undefined && !Array.isArray(cleaned[f])) {
+      cleaned[f] = [String(cleaned[f])];
+    }
+  }
+
+  Object.assign(entry.enrichment, cleaned);
+  entry.enrichment.enriched_at = new Date().toISOString();
+  entry.enrichment.enrichments_count = (entry.enrichment.enrichments_count || 0) + 1;
+
+  save(db);
+  log("pool-memory", `Enrichment updated for ${poolAddress.slice(0, 8)} (count=${entry.enrichment.enrichments_count})`);
+  return { saved: true, pool_address: poolAddress, enrichment: entry.enrichment };
+}
+
+export function getPoolEnrichment(poolAddress) {
+  if (!poolAddress) return null;
+  const db = load();
+  const entry = db[poolAddress];
+  return entry?.enrichment || null;
+}

@@ -14,7 +14,7 @@ import { studyTopLPers } from "./study.js";
 import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons } from "../lessons.js";
 import { getTrackedPosition, setPositionInstruction } from "../state.js";
 
-import { getPoolMemory, addPoolNote } from "../pool-memory.js";
+import { getPoolMemory, addPoolNote, setPoolEnrichment } from "../pool-memory.js";
 import { getCryptoBotTokens } from "./crypto-signals.js";
 import { addStrategy, listStrategies, getStrategy, setActiveStrategy, removeStrategy } from "../strategy-library.js";
 import { addToBlacklist, removeFromBlacklist, listBlacklist } from "../token-blacklist.js";
@@ -459,6 +459,77 @@ const toolMap = {
   remove_strategy:     removeStrategy,
   get_pool_memory: getPoolMemory,
   add_pool_note: addPoolNote,
+  enrich_pool_record: async ({ pool_address, base_mint, persist = true, user_flags = [], user_tags = [] } = {}) => {
+    let poolAddr = pool_address;
+    let mint = base_mint;
+
+    // Resolve pool → mint when only one is given.
+    if (!mint && poolAddr) {
+      try {
+        const detail = await getPoolDetail({ pool_address: poolAddr });
+        mint = detail?.base_mint || null;
+      } catch (e) {
+        return { error: `Could not resolve mint from pool_address ${poolAddr}: ${e.message}` };
+      }
+    }
+    if (!mint) return { error: "Either pool_address or base_mint is required." };
+    if (!poolAddr) poolAddr = `mint:${mint}`; // synthetic key for mint-only enrichment
+
+    // Fetch all four sources in parallel. Each is independently fault-tolerant —
+    // a missing narrative or holder fetch should not block the rest.
+    const [info, holders, narrative] = await Promise.all([
+      getTokenInfo({ query: mint }).catch((e) => ({ error: e.message })),
+      getTokenHolders({ mint }).catch((e) => ({ error: e.message })),
+      getTokenNarrative({ mint }).catch((e) => ({ error: e.message })),
+    ]);
+
+    const primary = info?.results?.[0] || null;
+    const audit = primary?.audit || null;
+
+    const partial = {
+      holders_count:        primary?.holders ?? null,
+      holders_top10_pct:    holders?.top_10_real_holders_pct != null ? Number(holders.top_10_real_holders_pct) : null,
+      organic_score:        primary?.organic_score ?? null,
+      dev_wallet_holds_pct: audit?.top_holders_pct != null ? Number(audit.top_holders_pct) : null,
+      bundle_pct:           primary?.bundle_pct ?? null,
+      sniper_pct:           primary?.sniper_pct ?? null,
+      narrative_tags:       narrative?.tags || primary?.tags || [],
+      socials:              {
+        twitter:  primary?.twitter  ?? null,
+        telegram: primary?.telegram ?? null,
+        website:  primary?.website  ?? null,
+      },
+      user_flags: Array.isArray(user_flags) ? user_flags.filter(Boolean) : [],
+      user_tags:  Array.isArray(user_tags)  ? user_tags.filter(Boolean)  : [],
+    };
+
+    if (!persist) {
+      return {
+        persisted: false,
+        pool_address: poolAddr,
+        mint,
+        summary: partial,
+        sources: {
+          info_ok: !info?.error,
+          holders_ok: !holders?.error,
+          narrative_ok: !narrative?.error,
+        },
+      };
+    }
+
+    const result = setPoolEnrichment(poolAddr, partial);
+    return {
+      persisted: result.saved !== false,
+      pool_address: poolAddr,
+      mint,
+      enrichment: result.enrichment,
+      sources: {
+        info_ok: !info?.error,
+        holders_ok: !holders?.error,
+        narrative_ok: !narrative?.error,
+      },
+    };
+  },
   get_crypto_bot_tokens: getCryptoBotTokens,
   add_to_blacklist: addToBlacklist,
   remove_from_blacklist: removeFromBlacklist,
