@@ -3512,7 +3512,44 @@ async function telegramHandler(msg) {
       const tracked = getTrackedPosition(positionAddress);
       const baseMint = tracked?.base_mint || null;
       const initialUsd = tracked?.initial_value_usd || 0;
-      const walletAddress = tracked?.wallet_address || null;
+
+      // SAFETY: refuse if the position is still tracked as open. The
+      // reconstructor scans recent wallet txs for the position address,
+      // which catches the *open* tx (or any claim tx) and would otherwise
+      // treat it as a close — poisoning pool-memory + cooldown with bogus
+      // data. The user can override with --force.
+      if (tracked && !tracked.closed && !force) {
+        await sendMessage(`⚠️ Position <code>${esc(positionAddress.slice(0, 12))}…</code> is still tracked as open.\n\nThe auto-detector will fire reconstruction automatically when it sees the close on-chain. If you're sure it's closed externally and the detector missed it, re-run with <code>--force</code>:\n\n<code>/reconstruct --force ${esc(positionAddress.slice(0, 12))}…</code>`).catch(() => {});
+        return;
+      }
+
+      // Idempotency: if pool-memory already has a deploy record for this
+      // position, nothing to do. Skip rather than risk double-recording.
+      if (!force) {
+        try {
+          const { load: loadPoolMemory } = await import("./pool-memory.js");
+          const poolDb = loadPoolMemory();
+          for (const entry of Object.values(poolDb)) {
+            if (entry?.deploys?.some((d) => d.position === positionAddress)) {
+              await sendMessage(`Position <code>${esc(positionAddress.slice(0, 12))}…</code> already has a pool-memory record. Use <code>/lessons</code> or <code>/performance</code> to inspect — nothing to reconstruct.`).catch(() => {});
+              return;
+            }
+          }
+        } catch {}
+      }
+
+      // Resolve wallet pubkey without forcing a keypair load.
+      let walletAddress = null;
+      try {
+        const { Keypair } = await import("@solana/web3.js");
+        const bs58mod = await import("bs58");
+        const pk = process.env.WALLET_PRIVATE_KEY;
+        if (pk) walletAddress = Keypair.fromSecretKey(bs58mod.default.decode(pk)).publicKey.toString();
+      } catch {}
+      if (!walletAddress) {
+        await sendMessage("Wallet not loaded — WALLET_PRIVATE_KEY env var is missing or invalid.").catch(() => {});
+        return;
+      }
 
       // SAFETY: refuse if the position is still tracked as open. The
       // reconstructor scans recent wallet txs for the position address,
@@ -3603,33 +3640,63 @@ async function telegramHandler(msg) {
   // avoid the "open tx misread as close" bug.
   if (text === "/reconstructall") {
     try {
-      const { getTrackedPositions, load: loadState } = await import("./state.js");
+      const { getTrackedPositions } = await import("./state.js");
+      const { load: loadPoolMemory } = await import("./pool-memory.js");
       const { esc } = await import("./utils/telegram-formatter.js");
       const { reconstructClosedPosition } = await import("./tools/position-reconstructor.js");
       const { recordPerformance } = await import("./lessons.js");
 
-      // Iterate state.json directly — the close flag is set there by
-      // recordClose() in tools/dlmm.js. getTrackedPositions(true) would
-      // skip the very positions we want to backfill.
       const allTracked = getTrackedPositions(false);
       const closed = allTracked.filter((p) => p.closed && p.position);
       const openCount = allTracked.filter((p) => !p.closed).length;
-      if (closed.length === 0) {
-        await sendMessage(`No closed positions in state.json to backfill. (${openCount} still open.)`).catch(() => {});
+
+      // Skip positions that already have a deploy record in pool-memory.
+      // long-running state.js accumulates hundreds of closed positions, most
+      // already recorded by the auto-detector — only the genuinely missing
+      // ones need reconstruction. Without this filter, /reconstructall
+      // would attempt hundreds of redundant RPC calls and risk creating
+      // duplicates.
+      const poolDb = loadPoolMemory();
+      const positionsByPool = new Map(); // pool_address → [deploy records]
+      for (const entry of Object.values(poolDb)) {
+        if (!entry?.deploys) continue;
+        const list = positionsByPool.get(entry.pool_address || "") || [];
+        for (const d of entry.deploys) list.push(d);
+        positionsByPool.set(entry.pool_address || "", list);
+      }
+      const recordedPositions = new Set();
+      for (const list of positionsByPool.values()) {
+        for (const d of list) if (d.position) recordedPositions.add(d.position);
+      }
+      const needsReconstruction = closed.filter((p) => !recordedPositions.has(p.position));
+      const alreadyRecorded = closed.length - needsReconstruction.length;
+
+      if (needsReconstruction.length === 0) {
+        await sendMessage(`All ${closed.length} closed positions already have pool-memory records. (${openCount} still open.) Nothing to reconstruct.`).catch(() => {});
         return;
       }
 
-      const sent = await sendHTML(`🔎 <i>Reconstructing ${closed.length} closed position${closed.length === 1 ? "" : "s"} (${openCount} still open, skipped)…</i>`).catch(() => null);
+      const sent = await sendHTML(`🔎 <i>Reconstructing ${needsReconstruction.length} of ${closed.length} closed positions (${alreadyRecorded} already recorded, ${openCount} still open — skipped)…</i>`).catch(() => null);
       const msgId = sent?.result?.message_id;
-      const { _wallet: w } = await import("./tools/dlmm.js");
-      const walletAddress = w?.publicKey?.toString();
+
+      // Resolve wallet pubkey without forcing a keypair load — the agent
+      // may have never touched the wallet yet (e.g., /reconstructall fired
+      // during a quiet period).
+      let walletAddress = null;
+      try {
+        const { Keypair } = await import("@solana/web3.js");
+        const bs58mod = await import("bs58");
+        const pk = process.env.WALLET_PRIVATE_KEY;
+        if (pk) walletAddress = Keypair.fromSecretKey(bs58mod.default.decode(pk)).publicKey.toString();
+      } catch {}
       if (!walletAddress) {
-        await sendMessage("Wallet not loaded.").catch(() => {});
+        if (msgId) await editMessage("❌ Wallet not loaded — WALLET_PRIVATE_KEY env var is missing or invalid.", msgId).catch(() => sendMessage("Wallet not loaded."));
+        else await sendMessage("Wallet not loaded.").catch(() => {});
         return;
       }
 
       const results = [];
-      for (const p of closed) {
+      for (const p of needsReconstruction) {
         try {
           const rpc = await reconstructClosedPosition({
             position_address: p.position,
@@ -3667,7 +3734,8 @@ async function telegramHandler(msg) {
       const notFound = results.filter((r) => !r.ok).length;
       const body = [
         `<b>🔎 Reconstruct-all complete</b>`,
-        `${okCount}/${closed.length} reconstructed, ${notFound} tx not in recent window. (${openCount} positions still open — skipped.)`,
+        `${okCount}/${needsReconstruction.length} reconstructed, ${notFound} tx not in recent window.`,
+        `(${alreadyRecorded} already had records, ${openCount} still open — skipped.)`,
         ...results.slice(0, 10).map((r) => {
           if (r.ok) return `  ✓ ${r.pos.pool_name || r.pos.position.slice(0, 8)}… → $${r.rpc.final_value_usd.toFixed(2)} ($${r.rpc.fees_earned_usd.toFixed(2)} fees)`;
           return `  · ${r.pos.pool_name || r.pos.position.slice(0, 8)}… ${esc(r.reason || "tx not found")}`;
