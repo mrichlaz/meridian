@@ -35,15 +35,17 @@ const SIGNAL_NAMES = [
 
 const DEFAULT_WEIGHTS = Object.fromEntries(SIGNAL_NAMES.map((s) => [s, 1.0]));
 
-// Signals where higher values generally indicate better candidates
-const HIGHER_IS_BETTER = new Set([
-  "organic_score",
-  "fee_tvl_ratio",
-  "volume",
-  "holder_count",
-  "study_win_rate",
-  "hive_consensus",
-]);
+// For these signals, lower deploy-time values are the favorable direction.
+// Keeping the sign is important: the old absolute-difference calculation
+// could boost a signal merely because it was strongly associated with losses.
+const LOWER_IS_BETTER = new Set(["volatility"]);
+const MIN_ACTIONABLE_LIFT = 0.05;
+
+function actionForLift(lift, isTopQuartile, isBottomQuartile) {
+  if (isTopQuartile && lift >= MIN_ACTIONABLE_LIFT) return "boost";
+  if (isBottomQuartile && lift <= -MIN_ACTIONABLE_LIFT) return "decay";
+  return "hold";
+}
 
 // Boolean signals — compared by win rate when present vs absent
 const BOOLEAN_SIGNALS = new Set(["smart_wallets_present"]);
@@ -162,9 +164,10 @@ export function recalculateWeights(perfData, cfg = {}) {
     const prev = weights[signal];
     let next = prev;
 
-    if (topQuartile.has(signal)) {
+    const action = actionForLift(lift, topQuartile.has(signal), bottomQuartile.has(signal));
+    if (action === "boost") {
       next = Math.min(prev * boostFactor, weightCeiling);
-    } else if (bottomQuartile.has(signal)) {
+    } else if (action === "decay") {
       next = Math.max(prev * decayFactor, weightFloor);
     }
 
@@ -226,7 +229,8 @@ function computeNumericLift(signal, wins, losses, minSamples) {
   const winMean  = mean(winVals.map(normalize));
   const lossMean = mean(lossVals.map(normalize));
 
-  return HIGHER_IS_BETTER.has(signal) ? winMean - lossMean : Math.abs(winMean - lossMean);
+  const signedDifference = winMean - lossMean;
+  return LOWER_IS_BETTER.has(signal) ? -signedDifference : signedDifference;
 }
 
 function computeBooleanLift(signal, wins, losses, minSamples) {
@@ -291,6 +295,8 @@ function mean(arr) {
   if (arr.length === 0) return 0;
   return arr.reduce((s, v) => s + v, 0) / arr.length;
 }
+
+export { actionForLift, computeNumericLift };
 
 // ─── Summary for LLM Prompt Injection ────────────────────────────
 

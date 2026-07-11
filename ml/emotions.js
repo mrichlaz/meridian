@@ -200,24 +200,22 @@ export function onScreenerCycle({ deployed, skipReason }) {
  */
 export function onModelTrained(trainingResult) {
   const state = load();
-  const val = trainingResult?.validation;
+  const val = trainingResult?.cv || trainingResult?.validation;
 
   if (val) {
-    const dirAcc = val.directionAccuracy || 50;
-    // Model predicting better than 55% accuracy → boost confidence
-    if (dirAcc > 55) {
+    const lift = Number(val.lift);
+    const dirAcc = Number(val.directionAccuracy || 50);
+    if (Number.isFinite(lift) && lift >= 5) {
       state.confidence = clamp(state.confidence + 0.08, 0.1, 0.9);
-    } else if (dirAcc < 45) {
+    } else if ((Number.isFinite(lift) && lift < 0) || dirAcc < 45) {
       state.confidence = clamp(state.confidence - 0.06, 0.1, 0.9);
     }
   }
 
-  // Every training run slightly increases confidence baseline
-  state.confidence = clamp(state.confidence + 0.01, 0.1, 0.9);
-
   recordEvent(state, "train", {
     samples: trainingResult?.sampleCount,
     dirAcc: val?.directionAccuracy,
+    lift: val?.lift,
   });
   save(state);
 

@@ -69,7 +69,7 @@ export function scoreCandidate(candidate, opts = {}) {
 
   // ML score
   let mlScore = 0.5; // neutral default
-  let criticValue = 0;
+  let criticValue = null;
   let modelUsed = false;
 
   try {
@@ -94,7 +94,7 @@ export function scoreCandidate(candidate, opts = {}) {
 
   return {
     mlScore: round(mlScore),
-    criticValue: round(criticValue),
+    criticValue: criticValue == null ? null : round(criticValue),
     heuristicScore: round(heuristicScore),
     blendedScore: round(blendedScore),
     // Confidence = predictiveness (can the model actually separate?) times
@@ -168,7 +168,7 @@ export function getMlPromptContext(scoredCandidates) {
     lines.push(
       `  ${c.name || c.pool_address?.slice(0, 8) || "?"}: ` +
       `ml=${fmt(ml.mlScore)} blend=${fmt(ml.blendedScore)} heur=${fmt(ml.heuristicScore)} ` +
-      `(critic=${fmt(ml.criticValue)}%) [${label}]`,
+      `(oos_return=${fmt(ml.criticValue)}${ml.criticValue == null ? "" : "%"}) [${label}]`,
     );
   }
 
@@ -180,7 +180,9 @@ export function getMlPromptContext(scoredCandidates) {
     lines.push(`Top candidate by ML: ${top.name || top.pool_address}`);
     if (ml.modelUsed) {
       lines.push(`  ML score: ${fmt(ml.mlScore)} (λ=${ml.lambda} → blend=${fmt(ml.blendedScore)})`);
-      lines.push(`  Expected PnL (critic): ${fmt(ml.criticValue)}%`);
+      lines.push(ml.criticValue == null
+        ? "  Out-of-sample return estimate: unavailable until the next validated retrain"
+        : `  Calibrated out-of-sample return estimate: ${fmt(ml.criticValue)}%`);
       lines.push(`  Model confidence: ${fmt(emo.confidence)}`);
     } else {
       lines.push("  No trained model — using heuristic scoring only.");
@@ -333,7 +335,7 @@ function round(v, decimals = 3) {
 }
 
 function fmt(val) {
-  if (val == null || !Number.isFinite(val)) return "0.00";
+  if (val == null || !Number.isFinite(val)) return "n/a";
   return val.toFixed(2);
 }
 

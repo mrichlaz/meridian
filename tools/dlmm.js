@@ -1232,6 +1232,24 @@ function resolvePerformanceSignalSnapshot({ poolAddress, baseMint, tracked }) {
   return Object.values(snapshot).some((value) => value != null) ? snapshot : null;
 }
 
+export function deployLearningMetadata(tracked, signalSnapshot = null) {
+  if (!tracked) return {};
+  return {
+    deployed_at: tracked.deployed_at || null,
+    signal_snapshot: signalSnapshot || tracked.signal_snapshot || null,
+    ml_snapshot: tracked.ml_snapshot || null,
+    entry_mcap: tracked.entry_mcap ?? null,
+    entry_tvl: tracked.entry_tvl ?? null,
+    entry_volume: tracked.entry_volume ?? null,
+    entry_holders: tracked.entry_holders ?? null,
+    entry_score: tracked.entry_score ?? null,
+    entry_regime: tracked.entry_regime ?? null,
+    entry_fee_volatility_ratio: tracked.entry_fee_volatility_ratio ?? null,
+    entry_volume_persistence_ratio: tracked.entry_volume_persistence_ratio ?? null,
+    entry_toxic_flow: tracked.entry_toxic_flow ?? null,
+  };
+}
+
 function getClosedPnlValue(posEntry, solMode = false) {
   return solMode
     ? maybeNum(posEntry?.pnlSol) ?? maybeNum(posEntry?.pnl?.valueNative) ?? 0
@@ -1380,7 +1398,7 @@ async function backfillExternalClose(positionAddress, tracked) {
       minutes_in_range: minutesHeld, // unknown — assume fully in range as neutral default
       minutes_held: minutesHeld,
       close_reason: "external close via wallet",
-      deployed_at: tracked.deployed_at || null,
+      ...deployLearningMetadata(tracked),
     });
     log("close_warn", `Backfilled performance for externally-closed ${positionAddress.slice(0, 12)} (${tracked.pool_name || "?"})`);
   } catch (e) {
@@ -1910,7 +1928,7 @@ export async function closePosition({ position_address, reason }) {
             minutes_in_range: minutesHeld, // unknown — assume fully in range as neutral default
             minutes_held: minutesHeld,
             close_reason: externalCloseReason,
-            deployed_at: tracked.deployed_at || null,
+            ...deployLearningMetadata(tracked),
           });
           log("close_warn", `Backfilled recordPerformance for externally-closed position ${position_address.slice(0, 12)}`);
         } catch (e) {
@@ -2131,13 +2149,7 @@ export async function closePosition({ position_address, reason }) {
           minutes_in_range: minutesHeld - minutesOOR,
           minutes_held: minutesHeld,
           close_reason: reason || "agent decision",
-          deployed_at: tracked.deployed_at || null,
-          signal_snapshot: signalSnapshot,
-          ml_snapshot: tracked.ml_snapshot || null,
-          entry_mcap: tracked.entry_mcap ?? null,
-          entry_tvl: tracked.entry_tvl ?? null,
-          entry_volume: tracked.entry_volume ?? null,
-          entry_holders: tracked.entry_holders ?? null,
+          ...deployLearningMetadata(tracked, signalSnapshot),
           ...exitMarket,
         }).catch((e) => log("close_warn", `recordPerformance failed (close still succeeded): ${e.message}`));
 
@@ -2463,11 +2475,7 @@ export async function closePosition({ position_address, reason }) {
         minutes_in_range: minutesHeld - minutesOOR,
         minutes_held: minutesHeld,
         close_reason: reason || "agent decision",
-        signal_snapshot: signalSnapshot,
-        entry_mcap: tracked.entry_mcap ?? null,
-        entry_tvl: tracked.entry_tvl ?? null,
-        entry_volume: tracked.entry_volume ?? null,
-        entry_holders: tracked.entry_holders ?? null,
+        ...deployLearningMetadata(tracked, signalSnapshot),
         ...exitMarket,
       }).catch((e) => log("close_warn", `recordPerformance failed (close still succeeded): ${e.message}`));
 

@@ -176,10 +176,11 @@ export async function recordPerformance(perf) {
     });
   }
 
-  // Auto-evolve every 5 closed positions (only runs if evolveEnabled)
-  if (data.performance.length % MIN_EVOLVE_POSITIONS === 0 && config.management.evolveEnabled !== false) {
+  const closeCount = data.performance.length;
 
-    // Threshold evolution — gated by thresholdEvolveEnabled
+  // Threshold and quiet-hours evolution retain the established five-close
+  // cadence. Darwin and ML use their existing configured cadences below.
+  if (closeCount % MIN_EVOLVE_POSITIONS === 0 && config.management.evolveEnabled !== false) {
     if (config.management.thresholdEvolveEnabled !== false) {
       const result = evolveThresholds(data.performance, config);
       if (result?.changes && Object.keys(result.changes).length > 0) {
@@ -190,8 +191,6 @@ export async function recordPerformance(perf) {
       log("evolve", "Threshold evolution skipped (thresholdEvolveEnabled=false)");
     }
 
-    // Quiet-hours evolution — re-derive the negative UTC deploy windows
-    // from recent closes (gated by policyQuietHoursAuto, default on)
     try {
       const qResult = evolveQuietHours(data.performance, config);
       if (qResult) {
@@ -201,42 +200,33 @@ export async function recordPerformance(perf) {
       log("evolve", `Quiet-hours evolution failed (non-fatal): ${err.message}`);
     }
 
-    // Darwinian signal weight recalculation — always runs
-    if (config.darwin?.enabled) {
-      const { recalculateWeights } = await import("./signal-weights.js");
-      const wResult = recalculateWeights(data.performance, config);
-      if (wResult.changes.length > 0) {
-        log("evolve", `Darwin: adjusted ${wResult.changes.length} signal weight(s)`);
-      }
-    }
+  }
 
-    // ML model training — always runs
-    if (config.ml?.enabled) {
-      try {
-        const { onModelTrained } = await import("./ml/emotions.js");
-        const { trainModel } = await import("./ml/trainer.js");
-        const { invalidateBlendLambda } = await import("./ml/inference.js");
-        const trainResult = await trainModel({ config: config.ml });
-        if (trainResult.trained) {
-          invalidateBlendLambda(); // pick up new predictiveness
-          onModelTrained(trainResult);
-          log("evolve", `ML: trained on ${trainResult.trainSize} samples, loss=${trainResult.finalLoss?.totalLoss?.toFixed(4) || "N/A"}`);
-        }
-      } catch (mlErr) {
-        log("ml_error", `ML training failed: ${mlErr.message}`);
-      }
+  const darwinEvery = Math.max(1, Math.round(Number(config.darwin?.recalcEvery) || MIN_EVOLVE_POSITIONS));
+  if (config.darwin?.enabled && closeCount % darwinEvery === 0) {
+    const { recalculateWeights } = await import("./signal-weights.js");
+    const wResult = recalculateWeights(data.performance, config);
+    if (wResult.changes.length > 0) {
+      log("evolve", `Darwin: adjusted ${wResult.changes.length} signal weight(s)`);
     }
   }
 
-  // Online ML update for every close (not just batch training)
-  if (config.ml?.enabled) {
+  const mlTrainEvery = Math.max(1, Math.round(Number(config.ml?.trainEvery) || MIN_EVOLVE_POSITIONS));
+  if (config.ml?.enabled && closeCount % mlTrainEvery === 0) {
     try {
-      const { onlineUpdate } = await import("./ml/trainer.js");
-      const updateResult = await onlineUpdate(entry);
-      if (updateResult.updated) {
-        log("ml", `Online update: gen ${updateResult.generation}`);
+      const { onModelTrained } = await import("./ml/emotions.js");
+      const { trainModel } = await import("./ml/trainer.js");
+      const { invalidateBlendLambda } = await import("./ml/inference.js");
+      const trainResult = await trainModel({ config: config.ml });
+      if (trainResult.trained) {
+        invalidateBlendLambda();
+        onModelTrained(trainResult);
+        const lossText = Number.isFinite(trainResult.finalLoss) ? trainResult.finalLoss.toFixed(4) : "N/A";
+        log("evolve", `ML: validated retrain on ${trainResult.sampleCount} samples, loss=${lossText}`);
       }
-    } catch {} // online update is best-effort
+    } catch (mlErr) {
+      log("ml_error", `ML training failed: ${mlErr.message}`);
+    }
   }
 
   // Update emotions on position close

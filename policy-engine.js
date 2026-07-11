@@ -1,6 +1,8 @@
 import { config } from "./config.js";
 import { getPerformanceSummary, getPerformanceHistory } from "./lessons.js";
 
+const LOSS_PAUSE_MS = 6 * 60 * 60 * 1000;
+
 function n(value, fallback = 0) {
   const x = Number(value);
   return Number.isFinite(x) ? x : fallback;
@@ -102,19 +104,36 @@ export function getMarketRegime({ performanceSummary = getPerformanceSummary(), 
   return { regime: "NEUTRAL", minScore: n(config.policy?.neutralMinScore, 66), sizeMultiplier: 1, reason: "normal operating regime" };
 }
 
-export function checkCircuitBreaker({ positions = null, balance = null, performanceSummary = getPerformanceSummary() } = {}) {
+function closeTimestamp(record) {
+  return Date.parse(record?.recorded_at || record?.closed_at || record?.deployed_at || "") || 0;
+}
+
+export function checkCircuitBreaker({
+  positions = null,
+  balance = null,
+  recentPerformance = null,
+  now = Date.now(),
+} = {}) {
   // A failed balance lookup (Helius/RPC down, rate-limited right after a
   // restart) returns { sol: 0, error: "..." } — that is NOT a real zero
   // balance, so it must not trip the emergency floor.
   if (balance && !balance.error && n(balance.sol) < 0.25) return { blocked: true, reason: `SOL balance ${balance.sol} below 0.25 emergency floor` };
   if (positions && positions.total_positions >= positions.maxPositions) return { blocked: true, reason: "max positions reached" };
-  const recent = getPerformanceHistory({ limit: 6 })?.records || [];
+  const recent = recentPerformance || getPerformanceHistory({ limit: 12 })?.records || [];
+  const latestCloseAt = closeTimestamp(recent.at(-1));
+  const lossPauseActive = latestCloseAt > 0 && now - latestCloseAt < LOSS_PAUSE_MS;
+  const remainingMinutes = Math.max(1, Math.ceil((LOSS_PAUSE_MS - (now - latestCloseAt)) / 60000));
   const last3 = recent.slice(-3);
-  if (last3.length === 3 && last3.every((p) => n(p.pnl_usd) < 0)) {
-    return { blocked: true, reason: "3 consecutive losing closes — pause deploys until reviewed" };
+  if (lossPauseActive && last3.length === 3 && last3.every((p) => n(p.pnl_usd) < 0)) {
+    return { blocked: true, reason: `3 consecutive losing closes — cooling down for ${remainingMinutes}m` };
   }
-  if (performanceSummary?.total_positions_closed >= 5 && n(performanceSummary.win_rate_pct) < 25) {
-    return { blocked: true, reason: `win rate ${performanceSummary.win_rate_pct}% below 25% circuit breaker` };
+  const recentWindow = recent.slice(-12);
+  if (lossPauseActive && recentWindow.length >= 5) {
+    const recentWins = recentWindow.filter((p) => n(p.pnl_usd) > 0).length;
+    const recentWinRate = (recentWins / recentWindow.length) * 100;
+    if (recentWinRate < 25) {
+      return { blocked: true, reason: `recent win rate ${recentWinRate.toFixed(1)}% below 25% — cooling down for ${remainingMinutes}m` };
+    }
   }
   return { blocked: false };
 }
@@ -167,3 +186,5 @@ export function sizeMultiplierForScore(score, regime = getMarketRegime()) {
   const confidence = score >= 85 ? 1.25 : score >= 72 ? 1 : 0.65;
   return clamp(confidence * regime.sizeMultiplier, 0.4, 1.25) * getQuietHourAdjustment().multiplier;
 }
+
+export { LOSS_PAUSE_MS };
