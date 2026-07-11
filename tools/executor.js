@@ -28,7 +28,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { execSync, spawn } from "child_process";
 
-import { normalizeTimeframe, scaleScreeningToTimeframe, getEffectiveWindowThresholds } from "../screening-scales.js";
+import { normalizeTimeframe, getEffectiveWindowThresholds } from "../screening-scales.js";
 
 import { PATHS } from "../utils/paths.js";
 
@@ -773,15 +773,17 @@ const toolMap = {
     // rewrites that need the file's current state.)
     void userConfig;
 
-    // Auto-scale fee/volume when timeframe changes (unless user set them explicitly in same call).
-    if (applied.timeframe != null && applied.minFeeActiveTvlRatio == null && applied.minVolume == null) {
-      const tf = normalizeTimeframe(applied.timeframe);
-      applied.timeframe = tf;
-      const scaled = scaleScreeningToTimeframe(tf);
-      applied.minFeeActiveTvlRatio = scaled.minFeeActiveTvlRatio;
-      applied.minVolume = scaled.minVolume;
-      applied._timeframeScaled = true;
-      log("config", `timeframe ${tf} → auto-scaled minFeeActiveTvlRatio=${scaled.minFeeActiveTvlRatio}, minVolume=${scaled.minVolume}`);
+    // Timeframe changes do NOT rewrite minFeeActiveTvlRatio / minVolume:
+    // config stores 5m-BASELINE values and getEffectiveWindowThresholds
+    // scales them to the active window at runtime (per-metric rules in
+    // screening-scales.js). The old auto-scale here wrote window-scaled
+    // defaults into config, which the runtime then scaled AGAIN — e.g.
+    // `timeframe 30m` persisted minFeeActiveTvlRatio 0.15 and the screener
+    // applied 0.15 x 6^0.72 = 0.54, a floor almost nothing passes — and it
+    // clobbered the user's own tuned values on every timeframe switch.
+    if (applied.timeframe != null) {
+      applied.timeframe = normalizeTimeframe(applied.timeframe);
+      log("config", `timeframe ${applied.timeframe} — minFeeActiveTvlRatio/minVolume stay as 5m baselines, scaled per-window at runtime`);
     }
 
     // Apply to live config immediately after the persisted config is known-good.

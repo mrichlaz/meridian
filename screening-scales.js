@@ -7,17 +7,6 @@
  * - power: sublinear scaling for rate-like market-quality metrics
  */
 
-// Pool discovery API accepts: 5m, 30m, 1h, 2h, 4h, 12h, 24h (no 15m).
-export const TIMEFRAME_SCREENING_SCALES = {
-  "5m":  { minFeeActiveTvlRatio: 0.02, minVolume: 500 },
-  "30m": { minFeeActiveTvlRatio: 0.15, minVolume: 1_000 },
-  "1h":  { minFeeActiveTvlRatio: 0.2,  minVolume: 10_000 },
-  "2h":  { minFeeActiveTvlRatio: 0.4,  minVolume: 20_000 },
-  "4h":  { minFeeActiveTvlRatio: 0.4,  minVolume: 2_000 },
-  "12h": { minFeeActiveTvlRatio: 1.5,  minVolume: 60_000 },
-  "24h": { minFeeActiveTvlRatio: 2.0,  minVolume: 10_000 },
-};
-
 export const TIMEFRAME_MINUTES = {
   "5m": 5,
   "30m": 30,
@@ -33,13 +22,20 @@ const POWER_LAW_EXPONENT = 0.72;
 
 export const THRESHOLD_SCALING_RULES = {
   // Linear scale: cumulative activity / counts
-  minVolume: "linear",
-  minFeeVolume: "linear",
   minTxCount: "linear",
   minUniqueWallets: "linear",
   minNewWallets: "linear",
 
-  // Power-law scale: sublinear scaling for rate-like metrics
+  // Power-law scale: sublinear scaling for rate-like metrics.
+  // minVolume is deliberately POWER, not linear: trending pools are bursty,
+  // so a pool's 30m volume is nowhere near 6x its current 5m volume.
+  // Measured on live pool-discovery data (43 pools present in both windows,
+  // Jul 2026): median volume(30m)/volume(5m) = 3.46x — almost exactly the
+  // 6^0.72 = 3.63x the power law predicts, while linear (6x) rejected the
+  // majority of pools that genuinely qualified at 5m. Linear scaling was why
+  // running `timeframe: 30m` produced near-zero deploys.
+  minVolume: "power",
+  minFeeVolume: "power",
   minFeeActiveTvlRatio: "power",
   maxSpread: "power",
   maxPriceImpact: "power",
@@ -59,6 +55,29 @@ export const THRESHOLD_SCALING_RULES = {
   minVolatility: "none",
   minPriceChange: "none",
 };
+
+// Built-in fallback floors (used only when the user's config carries no
+// finite minFeeActiveTvlRatio / minVolume). Expressed once as a 5m baseline
+// and derived per window via the scaling rules above — the old hand-written
+// table had drifted inconsistent (4h volume floor below 1h's, 24h below 12h).
+const BASE_5M_DEFAULTS = { minFeeActiveTvlRatio: 0.02, minVolume: 500 };
+
+const scaleByRatio = (value, ratio, mode) =>
+  mode === "linear" ? value * ratio
+  : mode === "power" ? value * Math.pow(ratio, POWER_LAW_EXPONENT)
+  : value;
+
+// Pool discovery API accepts: 5m, 30m, 1h, 2h, 4h, 12h, 24h (no 15m).
+export const TIMEFRAME_SCREENING_SCALES = Object.fromEntries(
+  Object.entries(TIMEFRAME_MINUTES).map(([tf, minutes]) => {
+    const ratio = minutes / TIMEFRAME_MINUTES["5m"];
+    const round = (v) => Number(v.toPrecision(3));
+    return [tf, {
+      minFeeActiveTvlRatio: round(scaleByRatio(BASE_5M_DEFAULTS.minFeeActiveTvlRatio, ratio, THRESHOLD_SCALING_RULES.minFeeActiveTvlRatio)),
+      minVolume: round(scaleByRatio(BASE_5M_DEFAULTS.minVolume, ratio, THRESHOLD_SCALING_RULES.minVolume)),
+    }];
+  })
+);
 
 export function normalizeTimeframe(timeframe) {
   const tf = String(timeframe || DEFAULT_TIMEFRAME).trim().toLowerCase();
