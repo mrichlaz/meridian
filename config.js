@@ -235,9 +235,17 @@ export const config = {
     // the 120-240m bucket — winners exit earlier via trailing TP.
     maxHoldMinutes:        u.maxHoldMinutes        ?? 300,
     // Rule 8: close when this % of a single-sided ladder has converted to the
-    // base token AND PnL is negative (< -2%). 0 disables. Catches deep ranges
-    // that stay "in range" through a large bleed so OOR rules never arm.
+    // base token AND PnL is at or below conversionExitPnlPct. 0 disables (no
+    // conversion exit). Catches deep ranges that stay "in range" through a
+    // large bleed so OOR rules never arm.
     conversionExitPct:     u.conversionExitPct     ?? 65,
+    // Rule 8 PnL floor: only fire the conversion exit when PnL has reached
+    // this loss threshold. -2 was found to be too tight (cut positions that
+    // had only briefly dipped); -5 lets normal in-range variance breathe
+    // while still catching true directional bags. Set to 0 (or any positive
+    // number) to fire the rule on any negative PnL — preserves the spirit
+    // of the original "lossPnlPct < 0" gate without an artificial floor.
+    conversionExitPnlPct:  u.conversionExitPnlPct  ?? -5,
     pnlSanityMaxDiffPct:   u.pnlSanityMaxDiffPct   ?? 5,    // max allowed diff between reported and derived pnl % before ignoring a tick
     // SOL mode — positions, PnL, and balances reported in SOL instead of USD
     solMode:               u.solMode               ?? false,

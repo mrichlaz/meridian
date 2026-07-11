@@ -697,6 +697,7 @@ export function formatThresholds(config, options = {}) {
   if (m.trailingTakeProfit) lines.push(`${b("Trailing TP:")} trigger ${m.trailingTriggerPct}%, drop max(${m.trailingDropPct}%, peak×${m.trailingRetracePct ?? 0})`);
   lines.push(`${b("OOR wait:")} ${m.outOfRangeWaitMinutes}m, close when &gt; ${m.outOfRangeBinsToClose} bins above range`);
   lines.push(`${b("Below range:")} exit after ${m.belowRangeExitMinutes ?? "—"}m (inventory fully converted)`);
+  if (m.conversionExitPct) lines.push(`${b("Conv exit:")} ≥ ${m.conversionExitPct}% converted + PnL ≤ ${m.conversionExitPnlPct ?? -2}% → close`);
   lines.push(`${b("Low yield close:")} fee/TVL 24h &lt; ${m.minFeePerTvl24h}% after ${m.minAgeBeforeYieldCheck}m`);
   lines.push(`${b("Claim threshold:")} ≥ ${formatUsd(m.minClaimAmount, 2)}`);
   return { text: lines.join("\n").slice(0, 3900), buttons: ACTION_BUTTONS.status() };

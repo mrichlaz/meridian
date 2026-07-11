@@ -1906,6 +1906,7 @@ export function getDeterministicCloseRule(position, managementConfig) {
   // the base token and PnL is negative, the position is a directional bag
   // wearing an LP costume — cut the inventory instead of riding the range.
   const convExitPct = Number(managementConfig.conversionExitPct ?? 0);
+  const convExitPnlPct = Number(managementConfig.conversionExitPnlPct ?? -2); // -2 = legacy hardcoded default if user hasn't set conversionExitPnlPct yet
   if (
     convExitPct > 0 &&
     !pnlSuspect &&
@@ -1917,11 +1918,11 @@ export function getDeterministicCloseRule(position, managementConfig) {
     position.active_bin <= position.upper_bin
   ) {
     const convertedPct = ((position.upper_bin - position.active_bin) / (position.upper_bin - position.lower_bin)) * 100;
-    if (convertedPct >= convExitPct && lossPnlPct != null && lossPnlPct <= -2) {
+    if (convertedPct >= convExitPct && lossPnlPct != null && lossPnlPct <= convExitPnlPct) {
       return {
         action: "CLOSE",
         rule: 8,
-        reason: `inventory ${Math.round(convertedPct)}% converted with PnL ${lossPnlPct.toFixed(1)}%`,
+        reason: `inventory ${Math.round(convertedPct)}% converted with PnL ${lossPnlPct.toFixed(1)}% (≤ ${convExitPnlPct}%)`,
       };
     }
   }
@@ -2025,6 +2026,8 @@ function settingValue(key) {
     trailingRetracePct: config.management.trailingRetracePct,
     belowRangeExitMinutes: config.management.belowRangeExitMinutes,
     outOfRangeWaitMinutes: config.management.outOfRangeWaitMinutes,
+    conversionExitPct: config.management.conversionExitPct,
+    conversionExitPnlPct: config.management.conversionExitPnlPct,
     minMcap: config.screening.minMcap,
     repeatDeployCooldownEnabled: config.management.repeatDeployCooldownEnabled,
     repeatDeployCooldownTriggerCount: config.management.repeatDeployCooldownTriggerCount,
@@ -2118,6 +2121,8 @@ function renderSettingsMenu(page = "main") {
       stepButtons("trailingRetracePct", "Trail retrace", 0.05, { digits: 2 }),
       stepButtons("belowRangeExitMinutes", "Below-range min", 5, { digits: 0 }),
       stepButtons("outOfRangeWaitMinutes", "OOR wait min", 5, { digits: 0 }),
+      stepButtons("conversionExitPct", "Conv exit %", 5, { digits: 0 }),
+      stepButtons("conversionExitPnlPct", "Conv PnL %", 1, { digits: 0 }),
       [toggleButton("repeatDeployCooldownEnabled", "Repeat cooldown")],
       stepButtons("repeatDeployCooldownTriggerCount", "Repeat count", 1, { digits: 0 }),
       stepButtons("repeatDeployCooldownHours", "Repeat hrs", 1, { digits: 0 }),
@@ -2333,6 +2338,13 @@ async function applySettingsMenuCallback(msg) {
     if (key === "trailingRetracePct") value = Math.max(0, Math.min(0.9, value));
     if (key === "belowRangeExitMinutes") value = Math.max(1, Math.round(value));
     if (key === "outOfRangeWaitMinutes") value = Math.max(5, Math.round(value));
+    // Conversion exit: rule 8 fires when `conversionExitPct` % of the ladder has
+    // converted at a loss. 0 disables the rule; 100 fires on any in-range
+    // conversion. Allowed 0..100, integer, since the comparison is integer %.
+    if (key === "conversionExitPct") value = Math.max(0, Math.min(100, Math.round(value)));
+    // PnL floor for rule 8. Clamp to ≤ 0 so a positive slip can't quietly make
+    // rule 8 fire on every positive PnL tick. 0 means "fire on any loss".
+    if (key === "conversionExitPnlPct") value = Math.min(0, Number(value.toFixed(2)));
     if (key === "minMcap") value = Math.max(0, Math.round(value));
   } else if (action === "set") {
     value = normalizeMenuValue(key, parts.slice(3).join(":"));

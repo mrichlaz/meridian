@@ -554,6 +554,7 @@ const toolMap = {
       belowRangeExitMinutes: ["management", "belowRangeExitMinutes"],
       maxHoldMinutes: ["management", "maxHoldMinutes"],
       conversionExitPct: ["management", "conversionExitPct"],
+      conversionExitPnlPct: ["management", "conversionExitPnlPct"],
       pnlSanityMaxDiffPct: ["management", "pnlSanityMaxDiffPct"],
       solMode: ["management", "solMode"],
       evolveEnabled: ["management", "evolveEnabled"],
