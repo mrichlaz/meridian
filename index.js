@@ -2993,6 +2993,13 @@ async function telegramHandler(msg) {
         ].join("\n")).catch(() => {});
         return;
       }
+      if (result.blocked) {
+        // Safety check refused the deploy (e.g. minTvl, minFeeActiveTvlRatio,
+        // volatility feed down, duplicate base mint). Surface the actual block
+        // reason instead of the generic "unknown error" fallback.
+        await sendMessage(`⛔ Deploy blocked for ${candidate.name} (safety check)\n${result.reason || "no reason given"}`).catch(() => {});
+        return;
+      }
       if (!result.success) {
         await sendMessage(`❌ Deploy failed for ${candidate.name}: ${result.error || "unknown error"}`).catch(() => {});
         return;
