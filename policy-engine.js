@@ -103,7 +103,10 @@ export function getMarketRegime({ performanceSummary = getPerformanceSummary(), 
 }
 
 export function checkCircuitBreaker({ positions = null, balance = null, performanceSummary = getPerformanceSummary() } = {}) {
-  if (balance && n(balance.sol) < 0.25) return { blocked: true, reason: `SOL balance ${balance.sol} below 0.25 emergency floor` };
+  // A failed balance lookup (Helius/RPC down, rate-limited right after a
+  // restart) returns { sol: 0, error: "..." } — that is NOT a real zero
+  // balance, so it must not trip the emergency floor.
+  if (balance && !balance.error && n(balance.sol) < 0.25) return { blocked: true, reason: `SOL balance ${balance.sol} below 0.25 emergency floor` };
   if (positions && positions.total_positions >= positions.maxPositions) return { blocked: true, reason: "max positions reached" };
   const recent = getPerformanceHistory({ limit: 6 })?.records || [];
   const last3 = recent.slice(-3);

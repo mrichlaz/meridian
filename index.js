@@ -673,7 +673,13 @@ export async function runScreeningCycle({ silent = false } = {}) {
   try {
     [prePositions, preBalance] = await Promise.all([getMyPositions({ force: true }), getWalletBalances()]);
     const breaker = checkCircuitBreaker({ positions: prePositions, balance: preBalance });
-    if (breaker.blocked) {
+    if (preBalance?.error) {
+      // Failed lookup returns { sol: 0, error } — a transient RPC/Helius
+      // failure, not a real zero balance. Skip quietly and retry next cycle
+      // instead of tripping the emergency floor or the insufficient-SOL gate.
+      log("cron", `Screening skipped — wallet balance lookup failed (${preBalance.error})`);
+      screenReport = `Screening skipped — wallet balance lookup failed (${preBalance.error}); will retry next cycle.`;
+    } else if (breaker.blocked) {
       screenReport = `Screening skipped — circuit breaker: ${breaker.reason}.`;
     } else if (prePositions.total_positions >= config.risk.maxPositions) {
       log("cron", `Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions})`);
@@ -1499,7 +1505,9 @@ export function startCronJobs() {
     cron.schedule(restartCron, async () => {
       const msg = `🛌 Daily clean restart at ${restartAt} — clearing state, exit and let the supervisor relaunch.`;
       log("cron", msg);
-      try { await sendMessage(msg); } catch {}
+      // Bound the farewell notification — sendMessage has no abort signal,
+      // and a wedged Telegram call must not delay the restart.
+      try { await Promise.race([sendMessage(msg), new Promise((r) => setTimeout(r, 10_000))]); } catch {}
       // Drain in-flight cycles (up to 30s) so we don't kill a deploy.
       const drainDeadline = Date.now() + 30_000;
       while ((_managementBusy || _screeningBusy || _pnlPollBusy) && Date.now() < drainDeadline) {
@@ -1512,8 +1520,18 @@ export function startCronJobs() {
       try { closeDB(); } catch {}
       // Brief beat for log flush.
       await new Promise((r) => setTimeout(r, 500));
-      log("cron", "Daily restart: exiting now.");
-      process.exit(0);
+      // Exit NON-ZERO on purpose: supervisors configured with an
+      // `on-failure` restart condition (Docker Swarm / EasyPanel default)
+      // treat exit 0 as "completed successfully — leave it stopped", which
+      // strands the container until someone redeploys. Exit 1 relaunches
+      // under `on-failure`, `always`, AND `unless-stopped`. Override with
+      // CRON_DAILY_RESTART_EXIT_CODE=0 if your supervisor restarts on any
+      // exit and you want clean-exit semantics back.
+      const exitCode = Number.isFinite(Number(process.env.CRON_DAILY_RESTART_EXIT_CODE))
+        ? Number(process.env.CRON_DAILY_RESTART_EXIT_CODE)
+        : 1;
+      log("cron", `Daily restart: exiting now (code ${exitCode} so the supervisor relaunches).`);
+      process.exit(exitCode);
     }, { timezone: process.env.MERIDIAN_TZ || "UTC" });
     log("cron", `Daily clean restart scheduled at ${restartAt} (${restartCron}) ${process.env.MERIDIAN_TZ || "UTC"}`);
   } else {
