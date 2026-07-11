@@ -3525,10 +3525,12 @@ async function telegramHandler(msg) {
 
       // Idempotency: if pool-memory already has a deploy record for this
       // position, nothing to do. Skip rather than risk double-recording.
+      // pool-memory.js doesn't export its loader — read the JSON directly.
       if (!force) {
         try {
-          const { load: loadPoolMemory } = await import("./pool-memory.js");
-          const poolDb = loadPoolMemory();
+          const { PATHS } = await import("./utils/paths.js");
+          const fs = await import("fs");
+          const poolDb = JSON.parse(fs.readFileSync(PATHS.poolMemory, "utf8"));
           for (const entry of Object.values(poolDb)) {
             if (entry?.deploys?.some((d) => d.position === positionAddress)) {
               await sendMessage(`Position <code>${esc(positionAddress.slice(0, 12))}…</code> already has a pool-memory record. Use <code>/lessons</code> or <code>/performance</code> to inspect — nothing to reconstruct.`).catch(() => {});
@@ -3641,7 +3643,8 @@ async function telegramHandler(msg) {
   if (text === "/reconstructall") {
     try {
       const { getTrackedPositions } = await import("./state.js");
-      const { load: loadPoolMemory } = await import("./pool-memory.js");
+      const { PATHS } = await import("./utils/paths.js");
+      const fs = await import("fs");
       const { esc } = await import("./utils/telegram-formatter.js");
       const { reconstructClosedPosition } = await import("./tools/position-reconstructor.js");
       const { recordPerformance } = await import("./lessons.js");
@@ -3650,13 +3653,16 @@ async function telegramHandler(msg) {
       const closed = allTracked.filter((p) => p.closed && p.position);
       const openCount = allTracked.filter((p) => !p.closed).length;
 
+      // pool-memory.js doesn't export its loader — read the JSON directly.
+      let poolDb = {};
+      try { poolDb = JSON.parse(fs.readFileSync(PATHS.poolMemory, "utf8")); } catch {}
+
       // Skip positions that already have a deploy record in pool-memory.
       // long-running state.js accumulates hundreds of closed positions, most
       // already recorded by the auto-detector — only the genuinely missing
       // ones need reconstruction. Without this filter, /reconstructall
       // would attempt hundreds of redundant RPC calls and risk creating
       // duplicates.
-      const poolDb = loadPoolMemory();
       const positionsByPool = new Map(); // pool_address → [deploy records]
       for (const entry of Object.values(poolDb)) {
         if (!entry?.deploys) continue;
