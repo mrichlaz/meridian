@@ -3412,23 +3412,41 @@ async function telegramHandler(msg) {
     try {
       const { getMyPositions } = await import("./tools/dlmm.js");
       const { positions = [] } = await getMyPositions({ force: true }).catch(() => ({ positions: [] }));
-      const pools = [...new Set(positions.map((p) => p.pool).filter(Boolean))];
-      if (pools.length === 0) {
+      // Pair pool → mint so enrich_pool_record can skip the pool→mint resolve
+      // step. The resolve hits a discovery API that doesn't know every pool —
+      // when it fails, we still have the mint from the position record itself.
+      const poolMintPairs = new Map(); // pool → mint (first seen wins)
+      for (const p of positions) {
+        if (!p.pool) continue;
+        if (!poolMintPairs.has(p.pool) && p.base_mint) poolMintPairs.set(p.pool, p.base_mint);
+      }
+      // Pools with no mint at all get a no-mint entry so we still try them.
+      for (const p of positions) {
+        if (p.pool && !poolMintPairs.has(p.pool)) poolMintPairs.set(p.pool, null);
+      }
+      if (poolMintPairs.size === 0) {
         await sendMessage("No open positions to enrich.").catch(() => {});
         return;
       }
-      const sent = await sendHTML(`🔍 <i>Enriching ${pools.length} pool${pools.length === 1 ? "" : "s"}…</i>`).catch(() => null);
+      const sent = await sendHTML(`🔍 <i>Enriching ${poolMintPairs.size} pool${poolMintPairs.size === 1 ? "" : "s"}…</i>`).catch(() => null);
       const msgId = sent?.result?.message_id;
       const results = [];
-      for (const pool of pools) {
-        const r = await executeTool("enrich_pool_record", { pool_address: pool, persist: true });
-        results.push({ pool, ok: r.persisted, count: r.enrichment?.enrichments_count, error: r.error });
+      for (const [pool, mint] of poolMintPairs.entries()) {
+        const params = { persist: true };
+        // Pass mint when we have it — saves a discovery-API roundtrip and
+        // rescues pools the discovery API doesn't know about.
+        if (mint) params.base_mint = mint;
+        else params.pool_address = pool;
+        const r = await executeTool("enrich_pool_record", params);
+        results.push({ pool, mint, ok: r.persisted, count: r.enrichment?.enrichments_count, error: r.error });
       }
       const okCount = results.filter((r) => r.ok).length;
       const body = [
         `<b>🔍 Enrichment complete</b>`,
-        `${okCount}/${pools.length} pools updated.`,
-        ...results.map((r) => r.ok ? `  ✓ ${r.pool.slice(0, 8)}… (count=${r.count})` : `  ✗ ${r.pool.slice(0, 8)}… ${r.error || "failed"}`),
+        `${okCount}/${poolMintPairs.size} pools updated.`,
+        ...results.map((r) => r.ok
+          ? `  ✓ ${r.pool.slice(0, 8)}… (count=${r.count})`
+          : `  ✗ ${r.pool.slice(0, 8)}… ${r.error || "failed"}`),
       ].join("\n");
       if (msgId) await editMessage(body, msgId).catch(() => sendMessage(body));
       else await sendMessage(body).catch(() => {});
@@ -3569,16 +3587,19 @@ async function telegramHandler(msg) {
   // ── /reconstructall — try to reconstruct every still-tracked position
   if (text === "/reconstructall") {
     try {
-      const { load: loadState } = await import("./state.js");
+      const { getTrackedPosition } = await import("./state.js");
+      const { getMyPositions } = await import("./tools/dlmm.js");
       const { esc } = await import("./utils/telegram-formatter.js");
       const { reconstructClosedPosition } = await import("./tools/position-reconstructor.js");
       const { recordPerformance } = await import("./lessons.js");
-      const state = loadState();
-      const positions = Object.values(state.positions || {}).filter((p) => !p.closed && p.position);
-      if (positions.length === 0) {
+      // getMyPositions is the source of truth — it carries base_mint which
+      // state.js doesn't track, and reflects actual on-chain open positions.
+      const { positions: livePositions = [] } = await getMyPositions({ force: true }).catch(() => ({ positions: [] }));
+      if (livePositions.length === 0) {
         await sendMessage("No open positions to reconstruct.").catch(() => {});
         return;
       }
+      const positions = livePositions.map((p) => ({ ...p, ...(getTrackedPosition(p.position) || {}) }));
       const sent = await sendHTML(`🔎 <i>Reconstructing ${positions.length} position${positions.length === 1 ? "" : "s"}…</i>`).catch(() => null);
       const msgId = sent?.result?.message_id;
       const { _wallet: w } = await import("./tools/dlmm.js");
