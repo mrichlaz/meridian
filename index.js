@@ -3459,8 +3459,9 @@ async function telegramHandler(msg) {
   // ── /enrichments — list pools with user flags/tags ──────────────────
   if (text === "/enrichments") {
     try {
-      const { load } = await import("./pool-memory.js");
-      const db = load();
+      const { PATHS } = await import("./utils/paths.js");
+      const fs = await import("fs");
+      const db = JSON.parse(fs.readFileSync(PATHS.poolMemory, "utf8"));
       const flagged = [];
       for (const [addr, entry] of Object.entries(db)) {
         const e = entry.enrichment;
