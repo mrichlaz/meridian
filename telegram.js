@@ -487,6 +487,7 @@ const BOT_COMMANDS = [
   { command: "pause",      description: "Stop cron cycles" },
   { command: "resume",     description: "Start cron cycles again" },
   { command: "sweep",      description: "Run wallet sweeper once (swap stray base tokens to SOL)" },
+  { command: "restart",    description: "Clean restart (exit, supervisor relaunches)" },
   { command: "stop",       description: "Shut down agent" },
 ];
 

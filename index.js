@@ -1413,6 +1413,40 @@ IMPORTANT:
   return screenReport;
 }
 
+// Clean process restart: drain in-flight cycles, stop auxiliary services,
+// then exit and let the supervisor relaunch a fresh process. Shared by the
+// daily-restart cron and the Telegram /restart command.
+async function performCleanRestart(msg) {
+  log("cron", msg);
+  // Bound the farewell notification — sendMessage has no abort signal,
+  // and a wedged Telegram call must not delay the restart.
+  try { await Promise.race([sendMessage(msg), new Promise((r) => setTimeout(r, 10_000))]); } catch {}
+  // Drain in-flight cycles (up to 30s) so we don't kill a deploy.
+  const drainDeadline = Date.now() + 30_000;
+  while ((_managementBusy || _screeningBusy || _pnlPollBusy) && Date.now() < drainDeadline) {
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  // Stop auxiliary services.
+  try { stopBotTracker?.(); } catch {}
+  // Best-effort DB close — node-cron / setInterval handles are not
+  // unref-able from here, but process.exit() drops them anyway.
+  try { closeDB(); } catch {}
+  // Brief beat for log flush.
+  await new Promise((r) => setTimeout(r, 500));
+  // Exit NON-ZERO on purpose: supervisors configured with an
+  // `on-failure` restart condition (Docker Swarm / EasyPanel default)
+  // treat exit 0 as "completed successfully — leave it stopped", which
+  // strands the container until someone redeploys. Exit 1 relaunches
+  // under `on-failure`, `always`, AND `unless-stopped`. Override with
+  // CRON_DAILY_RESTART_EXIT_CODE=0 if your supervisor restarts on any
+  // exit and you want clean-exit semantics back.
+  const exitCode = Number.isFinite(Number(process.env.CRON_DAILY_RESTART_EXIT_CODE))
+    ? Number(process.env.CRON_DAILY_RESTART_EXIT_CODE)
+    : 1;
+  log("cron", `Clean restart: exiting now (code ${exitCode} so the supervisor relaunches).`);
+  process.exit(exitCode);
+}
+
 export function startCronJobs() {
   stopCronJobs(); // stop any running tasks before (re)starting
   writeHeartbeat("startup"); // fresh boot isn't stale to the watchdog
@@ -1503,35 +1537,7 @@ export function startCronJobs() {
   if (Number.isFinite(rHour) && Number.isFinite(rMin)) {
     const restartCron = `${rMin} ${rHour} * * *`;
     cron.schedule(restartCron, async () => {
-      const msg = `🛌 Daily clean restart at ${restartAt} — clearing state, exit and let the supervisor relaunch.`;
-      log("cron", msg);
-      // Bound the farewell notification — sendMessage has no abort signal,
-      // and a wedged Telegram call must not delay the restart.
-      try { await Promise.race([sendMessage(msg), new Promise((r) => setTimeout(r, 10_000))]); } catch {}
-      // Drain in-flight cycles (up to 30s) so we don't kill a deploy.
-      const drainDeadline = Date.now() + 30_000;
-      while ((_managementBusy || _screeningBusy || _pnlPollBusy) && Date.now() < drainDeadline) {
-        await new Promise((r) => setTimeout(r, 500));
-      }
-      // Stop auxiliary services.
-      try { stopBotTracker?.(); } catch {}
-      // Best-effort DB close — node-cron / setInterval handles are not
-      // unref-able from here, but process.exit() drops them anyway.
-      try { closeDB(); } catch {}
-      // Brief beat for log flush.
-      await new Promise((r) => setTimeout(r, 500));
-      // Exit NON-ZERO on purpose: supervisors configured with an
-      // `on-failure` restart condition (Docker Swarm / EasyPanel default)
-      // treat exit 0 as "completed successfully — leave it stopped", which
-      // strands the container until someone redeploys. Exit 1 relaunches
-      // under `on-failure`, `always`, AND `unless-stopped`. Override with
-      // CRON_DAILY_RESTART_EXIT_CODE=0 if your supervisor restarts on any
-      // exit and you want clean-exit semantics back.
-      const exitCode = Number.isFinite(Number(process.env.CRON_DAILY_RESTART_EXIT_CODE))
-        ? Number(process.env.CRON_DAILY_RESTART_EXIT_CODE)
-        : 1;
-      log("cron", `Daily restart: exiting now (code ${exitCode} so the supervisor relaunches).`);
-      process.exit(exitCode);
+      await performCleanRestart(`🛌 Daily clean restart at ${restartAt} — clearing state, exit and let the supervisor relaunch.`);
     }, { timezone: process.env.MERIDIAN_TZ || "UTC" });
     log("cron", `Daily clean restart scheduled at ${restartAt} (${restartCron}) ${process.env.MERIDIAN_TZ || "UTC"}`);
   } else {
@@ -2413,6 +2419,7 @@ function formatHelpText() {
     "/thresholdevolve — toggle threshold evolution (TVL/MC/%TP/%SL) on/off",
     "/pause — stop cron cycles",
     "/resume — start cron cycles again",
+    "/restart — clean restart (supervisor relaunches)",
     "/stop — shut down agent",
   ].join("\n");
 }
@@ -2727,6 +2734,14 @@ async function telegramHandler(msg) {
   if (text === "/settings" || text === "/menu" || text === "/configmenu") {
     await showSettingsMenu().catch((e) => sendMessage(`Settings error: ${e.message}`).catch(() => {}));
     return;
+  }
+  // /restart must run even while a cycle is busy or wedged — that is its
+  // main use case — so it is handled BEFORE the busy-queue gate below.
+  // performCleanRestart drains in-flight cycles (30s cap) before exiting,
+  // and exits non-zero so the supervisor (Docker/EasyPanel) relaunches.
+  if (text === "/restart") {
+    await performCleanRestart("🔄 Restart requested via Telegram — draining cycles, exit and let the supervisor relaunch.");
+    return; // unreachable — performCleanRestart calls process.exit()
   }
   if (_managementBusy || _screeningBusy || busy) {
     if (_telegramQueue.length < 5) {
