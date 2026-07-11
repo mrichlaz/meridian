@@ -3502,7 +3502,7 @@ async function telegramHandler(msg) {
   // detector shipped, etc.).
   if (text === "/reconstruct" || text.startsWith("/reconstruct ")) {
     try {
-      const positionAddress = text.slice("/reconstruct".length).trim();
+      const positionAddress = text.slice("/reconstruct".length).trim().replace(/\s*--force\s*/i, "").trim();
       if (!positionAddress) {
         await sendMessage("Usage: /reconstruct <position_address>").catch(() => {});
         return;
@@ -3513,6 +3513,19 @@ async function telegramHandler(msg) {
       const baseMint = tracked?.base_mint || null;
       const initialUsd = tracked?.initial_value_usd || 0;
       const walletAddress = tracked?.wallet_address || null;
+
+      // SAFETY: refuse if the position is still tracked as open. The
+      // reconstructor scans recent wallet txs for the position address,
+      // which catches the *open* tx (or any claim tx) and would otherwise
+      // treat it as a close — poisoning pool-memory + cooldown with bogus
+      // data. The user can either wait for auto-detection or explicitly
+      // force this via /reconstruct --force <addr>.
+      const force = text.includes("--force");
+      if (tracked && !tracked.closed && !force) {
+        await sendMessage(`⚠️ Position <code>${esc(positionAddress.slice(0, 12))}…</code> is still tracked as open.\n\nThe auto-detector will fire reconstruction automatically when it sees the close on-chain. If you're sure it's closed externally and the detector missed it, re-run with <code>--force</code>:\n\n<code>/reconstruct --force ${esc(positionAddress.slice(0, 12))}…</code>`).catch(() => {});
+        return;
+      }
+
       if (!walletAddress) {
         // Fall back to the agent's wallet if state doesn't carry it
         const { _wallet: w } = await import("./tools/dlmm.js");
@@ -3585,22 +3598,28 @@ async function telegramHandler(msg) {
   }
 
   // ── /reconstructall — try to reconstruct every still-tracked position
+  // Iterates state.json positions that are marked closed: true but might
+  // have been missed by the auto-detector. Skips positions still open to
+  // avoid the "open tx misread as close" bug.
   if (text === "/reconstructall") {
     try {
-      const { getTrackedPosition } = await import("./state.js");
-      const { getMyPositions } = await import("./tools/dlmm.js");
+      const { getTrackedPositions, load: loadState } = await import("./state.js");
       const { esc } = await import("./utils/telegram-formatter.js");
       const { reconstructClosedPosition } = await import("./tools/position-reconstructor.js");
       const { recordPerformance } = await import("./lessons.js");
-      // getMyPositions is the source of truth — it carries base_mint which
-      // state.js doesn't track, and reflects actual on-chain open positions.
-      const { positions: livePositions = [] } = await getMyPositions({ force: true }).catch(() => ({ positions: [] }));
-      if (livePositions.length === 0) {
-        await sendMessage("No open positions to reconstruct.").catch(() => {});
+
+      // Iterate state.json directly — the close flag is set there by
+      // recordClose() in tools/dlmm.js. getTrackedPositions(true) would
+      // skip the very positions we want to backfill.
+      const allTracked = getTrackedPositions(false);
+      const closed = allTracked.filter((p) => p.closed && p.position);
+      const openCount = allTracked.filter((p) => !p.closed).length;
+      if (closed.length === 0) {
+        await sendMessage(`No closed positions in state.json to backfill. (${openCount} still open.)`).catch(() => {});
         return;
       }
-      const positions = livePositions.map((p) => ({ ...p, ...(getTrackedPosition(p.position) || {}) }));
-      const sent = await sendHTML(`🔎 <i>Reconstructing ${positions.length} position${positions.length === 1 ? "" : "s"}…</i>`).catch(() => null);
+
+      const sent = await sendHTML(`🔎 <i>Reconstructing ${closed.length} closed position${closed.length === 1 ? "" : "s"} (${openCount} still open, skipped)…</i>`).catch(() => null);
       const msgId = sent?.result?.message_id;
       const { _wallet: w } = await import("./tools/dlmm.js");
       const walletAddress = w?.publicKey?.toString();
@@ -3608,8 +3627,9 @@ async function telegramHandler(msg) {
         await sendMessage("Wallet not loaded.").catch(() => {});
         return;
       }
+
       const results = [];
-      for (const p of positions) {
+      for (const p of closed) {
         try {
           const rpc = await reconstructClosedPosition({
             position_address: p.position,
@@ -3647,14 +3667,12 @@ async function telegramHandler(msg) {
       const notFound = results.filter((r) => !r.ok).length;
       const body = [
         `<b>🔎 Reconstruct-all complete</b>`,
-        `${okCount} reconstructed, ${notFound} not found in recent window.`,
+        `${okCount}/${closed.length} reconstructed, ${notFound} tx not in recent window. (${openCount} positions still open — skipped.)`,
         ...results.slice(0, 10).map((r) => {
-          if (r.ok) return `  ✓ ${r.pos.pair || r.pos.position.slice(0, 8)}… → $${r.rpc.final_value_usd.toFixed(2)} ($${r.rpc.fees_earned_usd.toFixed(2)} fees)`;
-          return `  · ${r.pos.pair || r.pos.position.slice(0, 8)}… still open (tx not in last 50)`;
+          if (r.ok) return `  ✓ ${r.pos.pool_name || r.pos.position.slice(0, 8)}… → $${r.rpc.final_value_usd.toFixed(2)} ($${r.rpc.fees_earned_usd.toFixed(2)} fees)`;
+          return `  · ${r.pos.pool_name || r.pos.position.slice(0, 8)}… ${esc(r.reason || "tx not found")}`;
         }),
         results.length > 10 ? `… and ${results.length - 10} more` : "",
-        ``,
-        notFound > 0 ? `<i>Tip: positions still showing as "still open" likely aren't closed on-chain yet — they're real open positions.</i>` : "",
       ].filter(Boolean).join("\n");
       if (msgId) await editMessage(body, msgId).catch(() => sendMessage(body));
       else await sendMessage(body).catch(() => {});
