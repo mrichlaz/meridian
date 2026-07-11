@@ -25,7 +25,6 @@ import {
   updatePositionLiveSnapshot,
 } from "../state.js";
 import { recordPerformance } from "../lessons.js";
-import { reconstructClosedPosition, mergeWithCache } from "./position-reconstructor.js";
 import { getBaseMintDeployCap, isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { normalizeMint } from "./wallet.js";
 import { appendDecision } from "../decision-log.js";
@@ -1827,52 +1826,14 @@ export async function closePosition({ position_address, reason }) {
       // same pool+mint forever. recordPerformance() never throws — it
       // validates and either appends or quarantines — so this is safe.
       //
-      // Field sources, in priority order:
-      //   1. cached `_positionsCache` snapshot — freshest, has live PnL
-      //   2. `tracked.last_live_*` from state.json — last persisted live snapshot
-      //   3. RPC reconstruction — searches the wallet's recent transactions
-      //      for the close, parses SOL+token balance deltas, prices via
-      //      Jupiter, derives final_value_usd and a fee estimate
-      //   4. (no backfill) — recordPerformance rejects initial_value_usd<=0
-      //      so we just return the already-closed success without poisoning
-      //      pool-memory.
+      // Source: cached `_positionsCache` snapshot or `tracked.last_live_*`
+      // from state.json. RPC reconstruction was removed — too noisy for the
+      // marginal value, and the cache is usually sufficient when the
+      // position was tracked before close.
       if (initialUsd > 0 && tracked) {
         try {
           const deployedAtMs = Date.parse(tracked.deployed_at || tracked.opened_at || "") || Date.now();
           const minutesHeld = Math.max(0, Math.round((Date.now() - deployedAtMs) / 60000));
-
-          // If the cache didn't give us a final_value_usd or fees_earned_usd,
-          // try to reconstruct them from the wallet's recent transactions.
-          // This catches positions that were closed and abandoned (cache wiped)
-          // or where the live snapshot was already too stale to be useful.
-          let enrichedFinalValue = finalValueUsd;
-          let enrichedFees = feesUsd;
-          if ((!Number.isFinite(finalValueUsd) || finalValueUsd <= 0) || (!Number.isFinite(feesUsd) || feesUsd < 0)) {
-            try {
-              const walletAddress = _wallet?.publicKey?.toString() || null;
-              if (walletAddress && (poolMeta?.base_mint || tracked.base_mint)) {
-                const rpc = await reconstructClosedPosition({
-                  position_address,
-                  wallet_address: walletAddress,
-                  base_mint: poolMeta?.base_mint || tracked.base_mint,
-                  initial_value_usd: initialUsd,
-                });
-                if (rpc?.found) {
-                  const merged = mergeWithCache(
-                    { final_value_usd: finalValueUsd, fees_earned_usd: feesUsd },
-                    rpc
-                  );
-                  enrichedFinalValue = merged.final_value_usd;
-                  enrichedFees = merged.fees_earned_usd;
-                  log("close_warn", `RPC reconstruction for ${position_address.slice(0, 12)}: final=$${enrichedFinalValue} fees=$${enrichedFees} sig=${rpc.signature?.slice(0, 8)}`);
-                } else {
-                  log("close_warn", `RPC reconstruction failed for ${position_address.slice(0, 12)}: ${rpc?.reason || "unknown"}`);
-                }
-              }
-            } catch (e) {
-              log("close_warn", `RPC reconstruction error for ${position_address.slice(0, 12)}: ${e.message}`);
-            }
-          }
 
           await recordPerformance({
             position: position_address,
@@ -1885,9 +1846,9 @@ export async function closePosition({ position_address, reason }) {
             volatility: tracked.volatility ?? null,
             fee_tvl_ratio: tracked.fee_tvl_ratio ?? null,
             organic_score: tracked.organic_score ?? null,
-            amount_sol: tracked.amount_sol ?? null,
-            fees_earned_usd: Number.isFinite(enrichedFees) ? enrichedFees : 0,
-            final_value_usd: Number.isFinite(enrichedFinalValue) ? enrichedFinalValue : 0,
+            amount_sol: tracked.amount_sol || null,
+            fees_earned_usd: Number.isFinite(feesUsd) ? feesUsd : 0,
+            final_value_usd: Number.isFinite(finalValueUsd) ? finalValueUsd : 0,
             initial_value_usd: initialUsd,
             minutes_in_range: minutesHeld, // unknown — assume fully in range as neutral default
             minutes_held: minutesHeld,

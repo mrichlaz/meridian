@@ -510,8 +510,6 @@ const BOT_COMMANDS = [
   { command: "enrich",     description: "Pull holders/narrative/risk for a pool or mint, persist to memory" },
   { command: "enrichall",  description: "Enrich every currently open position's pool" },
   { command: "enrichments",description: "List pools that have user flags/tags" },
-  { command: "reconstruct",description: "Backfill a closed position's PnL from RPC (auto-fires on external close)" },
-  { command: "reconstructall",description: "Try to reconstruct every position tracked as open in state.json" },
 ];
 
 async function registerCommands() {
