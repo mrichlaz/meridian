@@ -3703,21 +3703,7 @@ async function telegramHandler(msg) {
       }
 
       const results = [];
-      // Rate-limit RPC + Jupiter calls. Each iteration makes 2+ RPC calls
-      // (getSignaturesForAddress + getParsedTransaction per matching sig)
-      // plus 1-2 Jupiter price API calls. With 50+ positions to backfill,
-      // a tight loop hits 429 immediately. 1.5s between iterations keeps
-      // us well under most free-tier rate limits.
-      const RPC_DELAY_MS = 1500;
-      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-      for (let i = 0; i < needsReconstruction.length; i++) {
-        const p = needsReconstruction[i];
-        if (i > 0) await sleep(RPC_DELAY_MS);
-        // Live progress every 10 positions so the operator knows we're alive
-        if (i > 0 && i % 10 === 0 && msgId) {
-          await editMessage(`🔎 <i>Reconstructing… ${i}/${needsReconstruction.length} (${results.filter((r) => r.ok).length} ok, ${results.filter((r) => !r.ok).length} skipped)</i>`, msgId).catch(() => {});
-        }
+      for (const p of needsReconstruction) {
         try {
           const rpc = await reconstructClosedPosition({
             position_address: p.position,
