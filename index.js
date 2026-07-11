@@ -2484,9 +2484,13 @@ async function runDeterministicScreen(limit = 5) {
     : "No candidates available right now.";
 }
 
-async function deployLatestCandidate(index) {
+async function deployLatestCandidate(index, { manual = false } = {}) {
   const { total_positions } = await getMyPositions({ force: true });
-  if (total_positions >= config.risk.maxPositions) {
+  // Manual /deploy is the operator force-deploy path — override maxPositions
+  // too, since the operator typed the command knowingly. The deploy amount
+  // and bin layout below still derive from config (deployAmountSol, binsBelow,
+  // strategy) so `force` only relaxes the guard rails, never the size.
+  if (!manual && total_positions >= config.risk.maxPositions) {
     throw new Error(`Max positions reached (${total_positions}/${config.risk.maxPositions})`);
   }
   const candidate = _latestCandidates[index];
@@ -2503,8 +2507,9 @@ async function deployLatestCandidate(index) {
   // Lone-candidate guard. We use the displayed candidate count (after the
   // shared pipeline's hard filters), so the same pool that would be flagged
   // on the auto path is flagged here. The enriched cache is rebuilt by every
-  // /screen call, so this is always up to date.
-  if (_latestCandidates.length === 1) {
+  // /screen call, so this is always up to date. Manual /deploy bypasses this
+  // too — operator override covers all screener-side thinning.
+  if (!manual && _latestCandidates.length === 1) {
     const skipReason = getLoneCandidateSkipReason(context);
     if (skipReason) {
       appendDecision({
@@ -2576,6 +2581,7 @@ async function deployLatestCandidate(index) {
     entry_score: manualPolicy.score,
     entry_regime: getMarketRegime().regime,
     entry_fee_volatility_ratio: manualPolicy.flow?.feeVolatilityRatio ?? null,
+    ...(manual ? { _skipSafety: true, _manualDeploy: true } : {}),
     entry_volume_persistence_ratio: manualPolicy.flow?.volumePersistenceRatio ?? null,
     entry_toxic_flow: manualPolicy.flow?.toxicReasons ?? null,
   });
@@ -2981,7 +2987,12 @@ async function telegramHandler(msg) {
   if (deployMatch) {
     try {
       const idx = parseInt(deployMatch[1]) - 1;
-      const { candidate, result, deployAmount, binsBelow } = await deployLatestCandidate(idx);
+      // /deploy is the operator force-deploy path. Safety pre-checks
+      // (minTvl, minFee/active-TVL, volatility feed, duplicate pool, etc.)
+      // are bypassed — the operator typed the command knowing the pool.
+      // Deploy amount + bin layout still come from config (deployAmountSol,
+      // binsBelow, strategy) so size discipline is preserved.
+      const { candidate, result, deployAmount, binsBelow } = await deployLatestCandidate(idx, { manual: true });
       if (result.dry_run) {
         const wouldDeploy = result.would_deploy || {};
         await sendMessage([
@@ -3008,12 +3019,13 @@ async function telegramHandler(msg) {
         ? `Range: ${fmtPct(result.range_coverage.downside_pct)} downside | ${fmtPct(result.range_coverage.upside_pct)} upside`
         : `Strategy: ${config.strategy.strategy} | binsBelow: ${binsBelow}`;
       await sendMessage([
-        `✅ Deployed ${candidate.name}`,
+        `✅ Deployed (manual /deploy) ${candidate.name}`,
         `Pool: ${candidate.pool}`,
         `Amount: ${deployAmount} SOL`,
         coverage,
         `Position: ${result.position || "n/a"}`,
         result.txs?.length ? `Tx: ${result.txs[0]}` : null,
+        `_skipSafety=true — screener pre-checks were bypassed for this manual force deploy.`,
       ].filter(Boolean).join("\n")).catch(() => {});
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});

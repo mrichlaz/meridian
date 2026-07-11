@@ -897,7 +897,13 @@ export async function executeTool(name, args) {
   }
 
   // ─── Pre-execution safety checks ──────────
-  if (PROTECTED_TOOLS.has(name)) {
+  // Manual operator overrides (set by /deploy N in index.js) skip pool-level
+  // pre-checks — the operator typed the command knowing the candidate. The
+  // _skipSafety flag is not propagated to deployPosition() (which still
+  // enforces single-side SOL, amount_x=0, quote token = SOL, etc.); the flag
+  // only relaxes the SCREENER-side guard rails (minTvl/minFee/volatility/
+  // duplicate-pool/duplicate-mint/max-positions).
+  if (PROTECTED_TOOLS.has(name) && !args._skipSafety) {
     const safetyCheck = await runSafetyChecks(name, args);
     if (!safetyCheck.pass) {
       log("safety_block", `${name} blocked: ${safetyCheck.reason}`);
@@ -906,6 +912,8 @@ export async function executeTool(name, args) {
         reason: safetyCheck.reason,
       };
     }
+  } else if (args._skipSafety && name === "deploy_position") {
+    log("executor", `Manual override: deploy_position safety checks bypassed for pool ${args.pool_address?.slice(0, 12)} (operator /deploy)`);
   }
 
   // ─── Execute ──────────────────────────────
