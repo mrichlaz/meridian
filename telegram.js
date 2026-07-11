@@ -414,6 +414,19 @@ export async function createLiveMessage(title, intro = "Starting...") {
 }
 
 
+// Commit the current update offset to Telegram's servers. The offset only
+// commits as a side effect of the NEXT getUpdates call — a process that
+// exits right after handling a message (e.g. /restart) never makes that
+// call, so Telegram redelivers the same update to the fresh process on
+// boot. For /restart that meant an infinite restart loop. Call this before
+// any intentional process exit.
+export async function ackPendingUpdates() {
+  if (!TOKEN) return;
+  try {
+    await fetch(`${BASE}/getUpdates?offset=${_offset}&timeout=0`, { signal: AbortSignal.timeout(5_000) });
+  } catch {}
+}
+
 // ─── Long polling ────────────────────────────────────────────────
 async function poll(onMessage) {
   while (_polling) {

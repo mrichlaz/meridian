@@ -36,6 +36,7 @@ import {
   notifyOutOfRange,
   isEnabled as telegramEnabled,
   createLiveMessage,
+  ackPendingUpdates,
 } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, effectiveLossPnlPct, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
@@ -1421,6 +1422,11 @@ async function performCleanRestart(msg) {
   // Bound the farewell notification — sendMessage has no abort signal,
   // and a wedged Telegram call must not delay the restart.
   try { await Promise.race([sendMessage(msg), new Promise((r) => setTimeout(r, 10_000))]); } catch {}
+  // Commit the Telegram update offset BEFORE exiting. Without this, the
+  // /restart message that triggered us is redelivered to the fresh process
+  // on boot (offsets only commit on the next getUpdates call) and the agent
+  // restart-loops forever.
+  try { await ackPendingUpdates(); } catch {}
   // Drain in-flight cycles (up to 30s) so we don't kill a deploy.
   const drainDeadline = Date.now() + 30_000;
   while ((_managementBusy || _screeningBusy || _pnlPollBusy) && Date.now() < drainDeadline) {
@@ -2740,6 +2746,16 @@ async function telegramHandler(msg) {
   // performCleanRestart drains in-flight cycles (30s cap) before exiting,
   // and exits non-zero so the supervisor (Docker/EasyPanel) relaunches.
   if (text === "/restart") {
+    // Stale-redelivery guard: Telegram redelivers un-acked updates on boot,
+    // and a /restart that survives its own process exit would restart-loop
+    // the agent forever (observed live, ~30s loop). ackPendingUpdates()
+    // in performCleanRestart is the primary fix; this guard is the backstop
+    // for when that ack call fails, and it breaks any already-running loop.
+    const msgAgeSec = Number(msg.date) > 0 ? Date.now() / 1000 - Number(msg.date) : 0;
+    if (msgAgeSec > 300) {
+      log("telegram", `Ignoring stale /restart (message ${Math.round(msgAgeSec / 60)}m old — redelivered after a previous restart)`);
+      return;
+    }
     await performCleanRestart("🔄 Restart requested via Telegram — draining cycles, exit and let the supervisor relaunch.");
     return; // unreachable — performCleanRestart calls process.exit()
   }
@@ -3310,7 +3326,15 @@ async function telegramHandler(msg) {
   }
 
   if (text === "/stop") {
+    // Same stale-redelivery guard as /restart: an un-acked /stop redelivered
+    // after the supervisor relaunches would keep shutting the agent down.
+    const stopAgeSec = Number(msg.date) > 0 ? Date.now() / 1000 - Number(msg.date) : 0;
+    if (stopAgeSec > 300) {
+      log("telegram", `Ignoring stale /stop (message ${Math.round(stopAgeSec / 60)}m old — redelivered after a restart)`);
+      return;
+    }
     await sendMessage("🛑 Shutting down...").catch(() => {});
+    try { await ackPendingUpdates(); } catch {}
     await shutdown("telegram command");
     return;
   }
