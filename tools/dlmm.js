@@ -1337,6 +1337,57 @@ async function fetchRawOpenPositionsFromMeridian({ walletAddress, agentId }) {
   };
 }
 
+// Backfill performance + pool-memory for positions closed outside the agent
+// (Meteora web, Phantom). syncOpenPositions only flips closed=true in
+// state.json — without this backfill an external close never reaches
+// recordPerformance, so pool-memory cooldowns (OOR streak, repeat-deploy,
+// per-token 24h cap) never arm and the screener redeploys straight into the
+// pool the operator just manually abandoned. Economics come from the
+// last_live_* snapshot getMyPositions persisted before the account vanished;
+// recordPerformance dedups by position address, so a later close_position
+// call on the same address can't double-record.
+async function backfillExternalClose(positionAddress, tracked) {
+  try {
+    const initialUsd = Number(tracked?.initial_value_usd ?? 0);
+    if (!tracked || !(initialUsd > 0)) {
+      log("close_warn", `External close of ${positionAddress.slice(0, 12)} has no initial value snapshot — cooldowns will not arm for this deploy`);
+      return;
+    }
+    const feesUsd = Number(tracked.last_live_collected_fees_true_usd ?? 0) + Number(tracked.last_live_unclaimed_fees_true_usd ?? 0);
+    let finalValueUsd = Number(tracked.last_live_total_value_true_usd ?? tracked.last_live_total_value_usd ?? 0);
+    if (!(finalValueUsd > 0)) {
+      const pnlUsd = Number(tracked.last_live_pnl_true_usd ?? tracked.last_live_pnl_usd ?? 0);
+      finalValueUsd = Math.max(0, initialUsd + pnlUsd - feesUsd);
+    }
+    const deployedAtMs = Date.parse(tracked.deployed_at || "") || Date.now();
+    const minutesHeld = Math.max(0, Math.round((Date.now() - deployedAtMs) / 60000));
+
+    await recordPerformance({
+      position: positionAddress,
+      pool: tracked.pool,
+      pool_name: tracked.pool_name || String(tracked.pool || "").slice(0, 8),
+      base_mint: tracked.base_mint || null,
+      strategy: tracked.strategy || "spot",
+      bin_range: tracked.bin_range || null,
+      bin_step: tracked.bin_step || null,
+      volatility: tracked.volatility ?? null,
+      fee_tvl_ratio: tracked.fee_tvl_ratio ?? null,
+      organic_score: tracked.organic_score ?? null,
+      amount_sol: tracked.amount_sol || null,
+      fees_earned_usd: Number.isFinite(feesUsd) ? feesUsd : 0,
+      final_value_usd: Number.isFinite(finalValueUsd) ? finalValueUsd : 0,
+      initial_value_usd: initialUsd,
+      minutes_in_range: minutesHeld, // unknown — assume fully in range as neutral default
+      minutes_held: minutesHeld,
+      close_reason: "external close via wallet",
+      deployed_at: tracked.deployed_at || null,
+    });
+    log("close_warn", `Backfilled performance for externally-closed ${positionAddress.slice(0, 12)} (${tracked.pool_name || "?"})`);
+  } catch (e) {
+    log("close_warn", `External-close backfill failed for ${positionAddress.slice(0, 12)}: ${e.message}`);
+  }
+}
+
 // ─── Get My Positions ──────────────────────────────────────────
 export async function getMyPositions({ force = false, silent = false, wallet_address = null } = {}) {
   let walletOverride = null;
@@ -1368,9 +1419,12 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
         if (!silent) log("positions", `Computing PnL from RPC (${config.pnl.rpcUrl})...`);
         const rpcResult = await computePositions(walletAddress);
         if (useLocalWallet) {
-          syncOpenPositions(rpcResult.positions.map((p) => p.position));
+          const externallyClosed = syncOpenPositions(rpcResult.positions.map((p) => p.position));
           _positionsCache = rpcResult;
           _positionsCacheAt = Date.now();
+          for (const { address, tracked } of externallyClosed) {
+            await backfillExternalClose(address, tracked);
+          }
         }
         return rpcResult;
       } catch (error) {
@@ -1583,9 +1637,12 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
       source: "meteora",
     };
     if (useLocalWallet) {
-      syncOpenPositions(positions.map(p => p.position));
+      const externallyClosed = syncOpenPositions(positions.map(p => p.position));
       _positionsCache = result;
       _positionsCacheAt = Date.now();
+      for (const { address, tracked } of externallyClosed) {
+        await backfillExternalClose(address, tracked);
+      }
     }
     return result;
   } catch (error) {

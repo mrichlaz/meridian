@@ -104,6 +104,15 @@ function buildSignalSnapshot(perf) {
 export async function recordPerformance(perf) {
   const data = load();
 
+  // One performance record per position: the external-close backfill (state
+  // sync in getMyPositions) and a later close_position call on the same
+  // vanished position would otherwise both record, double-counting the
+  // deploy in pool-memory cooldown/win-rate math.
+  if (perf.position && data.performance.some((p) => p.position === perf.position)) {
+    log("lessons", `Performance for position ${String(perf.position).slice(0, 12)} already recorded — skipping duplicate`);
+    return;
+  }
+
   // ── Validate before doing any computation that could be polluted by
   //    bad data. Bad records go to a quarantine log, not into lessons.
   const validation = validatePerformanceRecord(perf);
