@@ -807,14 +807,14 @@ export async function runScreeningCycle({ silent = false } = {}) {
 
     if (passing.length === 0) {
       const combined = filteredOut.length > 0 ? filteredOut : earlyFilteredExamples;
-      const combinedExamples = combined.slice(0, 5)
+      const combinedExamples = combined.slice(0, 3)
         .map((entry) => `- ${entry.name}: ${entry.reason}`)
         .join("\n");
       // Per-reason kill counts across the whole funnel — the examples alone
       // can't show which filter is doing most of the rejecting.
       const rejectCounts = topCandidates?.reject_summary && Object.keys(topCandidates.reject_summary).length
         ? "Reject counts:\n" + Object.entries(topCandidates.reject_summary)
-            .sort((a, b) => b[1] - a[1]).slice(0, 6)
+            .sort((a, b) => b[1] - a[1]).slice(0, 4)
             .map(([reason, count]) => `- ${count}× ${reason}`).join("\n")
         : null;
       const funnelBlock = buildGmgnFunnelReport(gmgnStageCounts, gmgnAllFiltered, { fromStage: 2 });
@@ -822,7 +822,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
       screenReport = [
         "No candidates available.",
         funnelBlock,
-        rejectCounts,
+        !funnelBlock ? rejectCounts : null,
         !funnelBlock && combinedExamples ? `Filtered examples:\n${combinedExamples}` : null,
         !funnelBlock && !combinedExamples && !rejectCounts ? thresholds : null,
       ].filter(Boolean).join("\n\n");
@@ -3578,13 +3578,22 @@ function buildGmgnFunnelReport(stageCounts, allFiltered = [], { fromStage = 1 } 
     if (f.stage < fromStage) continue;
     const key = `s${f.stage}`;
     if (!byStage[key]) byStage[key] = [];
-    byStage[key].push(`${f.name}: ${f.reason}`);
+    byStage[key].push({ name: f.name, reason: f.reason });
   }
-  const stageLabels = { s2: "S2 info", s3: "S3 pool", s4: "S4 indicators", s5: "S5 pick" };
-  const details = Object.entries(byStage)
-    .map(([key, items]) => `${stageLabels[key] || key}:\n${items.map(r => `  • ${r}`).join("\n")}`)
-    .join("\n");
-  return details ? `${funnel}\n\n${details}` : funnel;
+
+  // Per-stage: pick at most 2 examples and summarise the rest as a count
+  const stageLabels = { s2: "S2", s3: "S3", s4: "S4", s5: "S5" };
+  const lines = [];
+  for (const [key, items] of Object.entries(byStage)) {
+    const label = stageLabels[key] || key;
+    if (items.length === 0) continue;
+    // Pick 2 representative examples
+    const top = items.slice(0, 2);
+    const summary = top.map(r => `${r.name}: ${r.reason}`);
+    if (items.length > 2) summary.push(`+${items.length - 2} more`);
+    lines.push(`${label}: ${summary.join(" | ")}`);
+  }
+  return lines.length > 0 ? `${funnel}\n${lines.join("\n")}` : funnel;
 }
 
 // Data-anchored verdict for a single candidate. Used to surface the real
