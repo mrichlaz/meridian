@@ -96,8 +96,11 @@ export function onPositionClosed(perf, { performanceHistory } = {}) {
   // re-recorded one close every management cycle, producing streaks like
   // "49x loss" from a single losing position), and a poisoned incremental
   // count never heals on its own.
-  if (Array.isArray(performanceHistory) && performanceHistory.length > 0) {
-    state.streak = computeStreakFromHistory(performanceHistory);
+  const closeHistory = Array.isArray(performanceHistory) && performanceHistory.length > 0
+    ? performanceHistory
+    : readPerformanceHistory();
+  if (closeHistory.length > 0) {
+    state.streak = computeStreakFromHistory(closeHistory);
   } else if (pnlPct > 0) {
     state.streak.wins++;
     state.streak.losses = 0;
@@ -285,11 +288,12 @@ export function getEmotionPrompt() {
   // Numeric state
   lines.push(`EMOTION: confidence=${fmt(confidence)} risk=${fmt(riskAppetite)} boredom=${fmt(boredom)} curiosity=${fmt(curiosity)} satisfaction=${fmt(satisfaction)}`);
 
-  // Streak
-  if (state.streak.current === "win" && state.streak.wins >= 2) {
-    lines.push(`STREAK: ${state.streak.wins} consecutive wins`);
-  } else if (state.streak.current === "loss" && state.streak.losses >= 2) {
-    lines.push(`STREAK: ${state.streak.losses} consecutive losses`);
+  // Streak (always derived from the deduped close history, never the counter)
+  const streak = derivedStreak(state);
+  if (streak.current === "win" && streak.wins >= 2) {
+    lines.push(`STREAK: ${streak.wins} consecutive wins`);
+  } else if (streak.current === "loss" && streak.losses >= 2) {
+    lines.push(`STREAK: ${streak.losses} consecutive losses`);
   }
 
   return lines.join("\n");
@@ -333,7 +337,7 @@ export function getCurrentState() {
     riskAppetite: s.riskAppetite,
     curiosity: s.curiosity,
     satisfaction: s.satisfaction,
-    streak: { ...s.streak },
+    streak: derivedStreak(s),
     cycles: { ...s.cycles },
   };
 }
@@ -394,24 +398,53 @@ function clamp(value, lo, hi) {
 }
 
 /**
- * Derive the win/loss streak from the tail of the (deduped, one record per
- * position) performance history — the source of truth for closes.
+ * Derive the win/loss streak from the tail of the performance history — the
+ * source of truth for closes. Records sharing a position address count once:
+ * the pre-dedup backfill left dozens of duplicates of the same close in
+ * history, and those must not inflate the streak.
  */
 function computeStreakFromHistory(perfList) {
   const streak = { wins: 0, losses: 0, current: "" };
-  const last = perfList[perfList.length - 1];
-  if (!last) return streak;
-  const dir = (last.pnl_pct || 0) > 0 ? "win" : "loss";
-  let count = 0;
+  const seen = new Set();
+  let dir = "";
   for (let i = perfList.length - 1; i >= 0; i--) {
-    const isWin = (perfList[i].pnl_pct || 0) > 0;
-    if ((isWin ? "win" : "loss") !== dir) break;
-    count++;
+    const rec = perfList[i];
+    const key = rec.position || `idx:${i}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const recDir = (rec.pnl_pct || 0) > 0 ? "win" : "loss";
+    if (!dir) dir = recDir;
+    if (recDir !== dir) break;
+    if (dir === "win") streak.wins++;
+    else streak.losses++;
   }
   streak.current = dir;
-  if (dir === "win") streak.wins = count;
-  else streak.losses = count;
   return streak;
+}
+
+/**
+ * Read the persisted close history directly (plain file read — importing
+ * lessons.js from here would be a heavy circular dependency).
+ */
+function readPerformanceHistory() {
+  try {
+    const raw = JSON.parse(readFileSync(PATHS.lessons, "utf8"));
+    return Array.isArray(raw.performance) ? raw.performance : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The streak shown anywhere (status CLI, prompt) is always derived from the
+ * close history, never trusted from the persisted counter — a counter
+ * poisoned by duplicate recordings would otherwise display until the next
+ * close happens to overwrite it.
+ */
+function derivedStreak(state) {
+  const history = readPerformanceHistory();
+  if (history.length > 0) return computeStreakFromHistory(history);
+  return { ...state.streak };
 }
 
 /**
