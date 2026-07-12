@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { scaleDeployAmount } from "../config.js";
+import { derivePerformanceLesson } from "../lessons.js";
+import { hasRecentMaterialLoss, isMaterialLosingDeploy } from "../pool-memory.js";
 import { checkCircuitBreaker, LOSS_PAUSE_MS, scoreCandidate } from "../policy-engine.js";
 import {
   applyLearnedRangePreference,
@@ -131,6 +133,37 @@ test("one portfolio tail loss pauses new deployment", () => {
   const result = checkCircuitBreaker({ recentPerformance: recent, now });
   assert.equal(result.blocked, true);
   assert.match(result.reason, /tail loss/);
+});
+
+test("moderate losing closes generate a performance lesson", () => {
+  const lesson = derivePerformanceLesson({
+    pool_name: "LOSS-SOL",
+    strategy: "spot",
+    bin_step: 100,
+    volatility: 2,
+    fee_tvl_ratio: 0.1,
+    organic_score: 75,
+    bin_range: { bins_below: 50 },
+    initial_value_usd: 500,
+    fees_earned_usd: 1,
+    pnl_pct: -2.5,
+    range_efficiency: 70,
+    close_reason: "agent decision",
+  });
+  assert.equal(lesson.outcome, "poor");
+  assert.match(lesson.rule, /^UNDERPERFORMED:/);
+  assert.ok(lesson.tags.includes("underperformed"));
+});
+
+test("material losses trigger deterministic token cooldown eligibility", () => {
+  assert.equal(isMaterialLosingDeploy({ pnl_pct: -2, close_reason: "agent decision" }), true);
+  assert.equal(isMaterialLosingDeploy({ pnl_pct: -0.5, close_reason: "stop loss" }), true);
+  assert.equal(isMaterialLosingDeploy({ pnl_pct: -0.5, close_reason: "low yield" }), false);
+  assert.equal(isMaterialLosingDeploy({ pnl_pct: 1, close_reason: "take profit" }), false);
+  const now = Date.parse("2026-07-12T12:00:00Z");
+  const entry = { deploys: [{ pnl_pct: -2.5, closed_at: "2026-07-12T11:00:00Z" }] };
+  assert.equal(hasRecentMaterialLoss(entry, { now }), true);
+  assert.equal(hasRecentMaterialLoss(entry, { now: now + 6 * 60 * 60 * 1000 }), false);
 });
 
 test("deploy learning metadata preserves the full entry snapshot", () => {

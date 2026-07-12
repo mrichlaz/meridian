@@ -143,7 +143,7 @@ export async function recordPerformance(perf) {
   data.performance.push(entry);
 
   // Derive and store a lesson
-  const lesson = derivLesson(entry);
+  const lesson = derivePerformanceLesson(entry);
   if (lesson) {
     data.lessons.push(lesson);
     log("lessons", `New lesson: ${lesson.rule}`);
@@ -413,7 +413,7 @@ export function clearPerformanceRejects() {
  * Derive a lesson from a closed position's performance.
  * Only generates a lesson if the outcome was clearly good or bad.
  */
-function derivLesson(perf) {
+export function derivePerformanceLesson(perf) {
   const tags = [];
   const feeYieldPct = perf.initial_value_usd > 0
     ? ((perf.fees_earned_usd || 0) / perf.initial_value_usd) * 100
@@ -460,6 +460,9 @@ function derivLesson(perf) {
       rule = `FAILED: ${context} → PnL ${perf.pnl_pct}%, range efficiency ${perf.range_efficiency}%. Reason: ${perf.close_reason}.`;
       tags.push("failed");
     }
+  } else if (outcome === "poor") {
+    rule = `UNDERPERFORMED: ${context} → PnL ${perf.pnl_pct}%, range efficiency ${perf.range_efficiency}%. Reason: ${perf.close_reason}.`;
+    tags.push("underperformed", perf.strategy);
   }
 
   if (!rule) return null;
@@ -986,17 +989,31 @@ export function addLesson(rule, tags = [], { pinned = false, role = null } = {})
   const safeRule = sanitizeLessonText(rule);
   if (!safeRule) return;
   const data = load();
+  const isConfigChange = tags.includes("self_tune") || tags.includes("config_change");
   const lesson = {
     id: Date.now(),
     rule: safeRule,
     tags,
     outcome: "manual",
-    sourceType: tags.includes("self_tune") || tags.includes("config_change") ? "config_change" : "manual",
+    sourceType: isConfigChange ? "config_change" : "manual",
     pinned: !!pinned,
     role: role || null,
     created_at: new Date().toISOString(),
   };
-  data.lessons.push(lesson);
+  if (isConfigChange) {
+    // Telegram +/- buttons can emit ten updates in seconds. Keep only the
+    // latest audit entry per setting instead of flooding the learning feed
+    // with intermediate values that are no longer active.
+    const changedKey = safeRule.match(/^\[SELF-TUNED\]\s+Changed\s+([^=,\s]+)/i)?.[1]?.toLowerCase();
+    const previousIndex = changedKey
+      ? data.lessons.findLastIndex((item) => item.sourceType === "config_change"
+        && item.rule?.match(/^\[SELF-TUNED\]\s+Changed\s+([^=,\s]+)/i)?.[1]?.toLowerCase() === changedKey)
+      : -1;
+    if (previousIndex >= 0) data.lessons[previousIndex] = lesson;
+    else data.lessons.push(lesson);
+  } else {
+    data.lessons.push(lesson);
+  }
   save(data);
   log("lessons", `Manual lesson added${pinned ? " [PINNED]" : ""}${role ? ` [${role}]` : ""}: ${safeRule}`);
   void pushHiveLesson(lesson);
@@ -1030,10 +1047,11 @@ export function unpinLesson(id) {
 /**
  * List lessons with optional filters — for agent browsing via Telegram.
  */
-export function listLessons({ role = null, pinned = null, tag = null, limit = 30 } = {}) {
+export function listLessons({ role = null, pinned = null, tag = null, limit = 30, includeConfigChanges = false } = {}) {
   const data = load();
   let lessons = [...data.lessons];
 
+  if (!includeConfigChanges && tag !== "config_change") lessons = lessons.filter((l) => l.sourceType !== "config_change");
   if (pinned !== null) lessons = lessons.filter((l) => !!l.pinned === pinned);
   if (role)            lessons = lessons.filter((l) => !l.role || l.role === role);
   if (tag)             lessons = lessons.filter((l) => l.tags?.includes(tag));
@@ -1113,7 +1131,8 @@ export function getLessonsForPrompt(opts = {}) {
   const { agentType = "GENERAL", maxLessons } = opts;
 
   const data = load();
-  if (data.lessons.length === 0) return null;
+  const learningLessons = data.lessons.filter((lesson) => lesson.sourceType !== "config_change");
+  if (learningLessons.length === 0) return null;
 
   // Smaller caps for automated cycles — they don't need the full lesson history
   const isAutoCycle = agentType === "SCREENER" || agentType === "MANAGER";
@@ -1126,7 +1145,7 @@ export function getLessonsForPrompt(opts = {}) {
 
   // ── Tier 1: Pinned ──────────────────────────────────────────────
   // Respect role even for pinned lessons — a pinned SCREENER lesson shouldn't pollute MANAGER
-  const pinned = data.lessons
+  const pinned = learningLessons
     .filter((l) => l.pinned && (!l.role || l.role === agentType || agentType === "GENERAL"))
     .sort(byPriority)
     .slice(0, PINNED_CAP);
@@ -1135,7 +1154,7 @@ export function getLessonsForPrompt(opts = {}) {
 
   // ── Tier 2: Role-matched ────────────────────────────────────────
   const roleTags = ROLE_TAGS[agentType] || [];
-  const roleMatched = data.lessons
+  const roleMatched = learningLessons
     .filter((l) => {
       if (usedIds.has(l.id)) return false;
       // Include if: lesson has no role restriction OR matches this role
@@ -1152,7 +1171,7 @@ export function getLessonsForPrompt(opts = {}) {
   // ── Tier 3: Recent fill ─────────────────────────────────────────
   const remainingBudget = RECENT_CAP - pinned.length - roleMatched.length;
   const recent = remainingBudget > 0
-    ? data.lessons
+    ? learningLessons
         .filter((l) => !usedIds.has(l.id))
         .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""))
         .slice(0, remainingBudget)

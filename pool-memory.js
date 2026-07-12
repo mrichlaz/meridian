@@ -8,6 +8,8 @@
 import fs from "fs";
 import { log } from "./logger.js";
 import { config } from "./config.js";
+
+const MATERIAL_LOSS_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 import { PATHS } from "./utils/paths.js";
 
 const POOL_MEMORY_FILE = PATHS.poolMemory;
@@ -87,6 +89,23 @@ function isFeeGeneratingDeploy(deploy) {
   const hasFees = (Number.isFinite(feesUsd) && feesUsd > 0) || (Number.isFinite(feesSol) && feesSol > 0);
   if (!hasFees) return false;
   return Number.isFinite(feeEarnedPct) && feeEarnedPct >= minFeeEarnedPct;
+}
+
+export function isMaterialLosingDeploy(deploy) {
+  const pnlPct = Number(deploy?.pnl_pct);
+  const reason = String(deploy?.close_reason || "").toLowerCase();
+  return (Number.isFinite(pnlPct) && pnlPct <= -2)
+    || reason.includes("stop loss")
+    || reason.includes("stop-loss")
+    || reason.includes("loss cut");
+}
+
+export function hasRecentMaterialLoss(entry, { now = Date.now() } = {}) {
+  return (entry?.deploys || []).some((deploy) => {
+    if (!isMaterialLosingDeploy(deploy)) return false;
+    const closedAt = Date.parse(deploy.closed_at || deploy.deployed_at || "");
+    return Number.isFinite(closedAt) && now - closedAt >= 0 && now - closedAt < MATERIAL_LOSS_COOLDOWN_MS;
+  });
 }
 
 function setPoolCooldown(entry, hours, reason) {
@@ -219,6 +238,20 @@ export function recordPoolDeploy(poolAddress, deployData) {
     log("pool-memory", `Cooldown set for ${entry.name} until ${cooldownUntil} (low yield close)`);
   }
 
+  // Lessons influence future ranking, but they must not be the only defense
+  // against immediately re-entering the token that just produced a material
+  // loss. Pause both this pool and every pool for the same base mint.
+  if (isMaterialLosingDeploy(deploy)) {
+    const lossCooldownHours = 6;
+    const reason = `material losing close (${Number(deploy.pnl_pct).toFixed(2)}%)`;
+    const poolCooldownUntil = setPoolCooldown(entry, lossCooldownHours, reason);
+    const mintCooldownUntil = setBaseMintCooldown(db, entry.base_mint, lossCooldownHours, reason);
+    log("pool-memory", `Cooldown set for ${entry.name} until ${poolCooldownUntil} (${reason})`);
+    if (entry.base_mint && mintCooldownUntil) {
+      log("pool-memory", `Base mint cooldown set for ${entry.base_mint.slice(0, 8)} until ${mintCooldownUntil} (${reason})`);
+    }
+  }
+
   const oorTriggerCount = config.management.oorCooldownTriggerCount ?? 3;
   const oorCooldownHours = config.management.oorCooldownHours ?? 12;
   const recentDeploys = entry.deploys.slice(-oorTriggerCount);
@@ -270,8 +303,9 @@ export function isPoolOnCooldown(poolAddress) {
   if (!poolAddress) return false;
   const db = load();
   const entry = db[poolAddress];
-  if (!entry?.cooldown_until) return false;
-  return new Date(entry.cooldown_until) > new Date();
+  if (!entry) return false;
+  return (entry.cooldown_until && new Date(entry.cooldown_until) > new Date())
+    || hasRecentMaterialLoss(entry);
 }
 
 export function isBaseMintOnCooldown(baseMint) {
@@ -279,9 +313,10 @@ export function isBaseMintOnCooldown(baseMint) {
   const db = load();
   const now = new Date();
   return Object.values(db).some((entry) =>
-    entry?.base_mint === baseMint &&
-    entry?.base_mint_cooldown_until &&
-    new Date(entry.base_mint_cooldown_until) > now
+    entry?.base_mint === baseMint && (
+      (entry?.base_mint_cooldown_until && new Date(entry.base_mint_cooldown_until) > now)
+      || hasRecentMaterialLoss(entry, { now: now.getTime() })
+    )
   );
 }
 
