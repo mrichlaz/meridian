@@ -18,6 +18,7 @@ import { stageMlFeatures, getAndClearStagedMlFeatures } from "../signal-tracker.
 import { getEffectiveWindowThresholds } from "../screening-scales.js";
 import { mergeCandidatePools } from "../tools/screening.js";
 import { condenseGmgnCandidate } from "../tools/gmgn.js";
+import { fetchHeliusWalletBalancesWithFailover } from "../tools/wallet.js";
 import {
   authorizeRiskSizedDeploy,
   checkDeployAmountFloor,
@@ -69,6 +70,24 @@ test("only the exact staged automated risk size can pass below the manual floor"
   assert.equal(checkDeployAmountFloor("pool-risk-size", 1.85, 3.5, { now }).allowed, false);
   assert.equal(isRiskSizedDeployAuthorized("pool-risk-size", 1.84, { now: now + 60_001 }), false);
   clearRiskSizedDeployAuthorizations();
+});
+
+test("wallet lookup fails over to another Helius key on gateway errors", async () => {
+  const seen = [];
+  const fetchFn = async (url) => {
+    seen.push(url);
+    if (seen.length === 1) return { ok: false, status: 502, statusText: "Bad Gateway" };
+    return { ok: true, json: async () => ({ balances: [{ symbol: "SOL", balance: 10 }] }) };
+  };
+  const result = await fetchHeliusWalletBalancesWithFailover({
+    walletAddress: "wallet-test",
+    keys: ["key-one", "key-two"],
+    fetchFn,
+  });
+  assert.equal(result.error, null);
+  assert.equal(result.attempts, 2);
+  assert.equal(result.data.balances[0].balance, 10);
+  assert.equal(seen.length, 2);
 });
 
 test("fee/active-TVL baseline scales consistently across discovery timeframes", () => {
