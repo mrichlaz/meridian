@@ -625,7 +625,15 @@ export function syncOpenPositions(active_addresses) {
 
   for (const posId in state.positions) {
     const pos = state.positions[posId];
-    if (pos.closed || activeSet.has(posId)) continue;
+    if (pos.closed) continue;
+    if (activeSet.has(posId)) {
+      if (pos.missing_since) {
+        pos.missing_since = null;
+        changed = true;
+        log("state", `Position ${posId} reappeared on-chain — cancelling auto-close window`);
+      }
+      continue;
+    }
 
     // Grace period: newly deployed positions may not be indexed yet
     const deployedAt = pos.deployed_at ? new Date(pos.deployed_at).getTime() : 0;
@@ -633,6 +641,21 @@ export function syncOpenPositions(active_addresses) {
       log("state", `Position ${posId} not on-chain yet — within grace period, skipping auto-close`);
       continue;
     }
+
+    // Confirmation window anchored to when the position FIRST went missing —
+    // not to deploy time. An agent-initiated close makes the position vanish
+    // on-chain seconds before closePosition finishes its own bookkeeping;
+    // auto-closing on the first missing tick backfills a zero-value
+    // "external close" record that dedup-blocks the real one. A transient
+    // RPC gap also can't mass-close positions: they reappear and the window
+    // resets above.
+    if (!pos.missing_since) {
+      pos.missing_since = new Date().toISOString();
+      changed = true;
+      log("state", `Position ${posId} missing from on-chain data — auto-close in ${Math.round(SYNC_GRACE_MS / 60000)}m unless it reappears`);
+      continue;
+    }
+    if (Date.now() - new Date(pos.missing_since).getTime() < SYNC_GRACE_MS) continue;
 
     pos.closed = true;
     pos.closed_at = new Date().toISOString();

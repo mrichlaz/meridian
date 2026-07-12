@@ -410,6 +410,9 @@ function computeStreakFromHistory(perfList) {
     const key = rec.position || `idx:${i}`;
     if (seen.has(key)) continue;
     seen.add(key);
+    // Flat/unpriced closes are excluded from win rate — exclude them from
+    // the streak too instead of counting them as losses.
+    if (!(Number(rec.pnl_usd) || Number(rec.pnl_pct))) continue;
     const recDir = (rec.pnl_pct || 0) > 0 ? "win" : "loss";
     if (!dir) dir = recDir;
     if (recDir !== dir) break;
