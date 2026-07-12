@@ -292,6 +292,23 @@ export function resolvePendingPeak(position_address, currentPnlPct, toleranceRat
     return { confirmed: true, peak: pos.peak_pnl_pct };
   }
 
+  // Spike-and-fade: the candidate didn't hold, but the lower of the two ticks
+  // is a level BOTH real ticks printed at or above — corroborated, so ratchet
+  // the confirmed peak to it. A phantom tick can't exploit this: its recheck
+  // reads the true PnL, which won't exceed the existing confirmed peak.
+  // (Jul 12: a real +3.54% run-up faded to +2.22% within the 15s recheck; the
+  // all-or-nothing reject kept peak near 0, trailing TP never armed, and the
+  // position round-tripped the entire move.)
+  if (currentPnlPct != null) {
+    const corroborated = Math.min(pendingPeak, currentPnlPct);
+    if (corroborated > (pos.peak_pnl_pct ?? 0)) {
+      pos.peak_pnl_pct = corroborated;
+      save(state);
+      log("state", `Position ${position_address} pending peak ${pendingPeak.toFixed(2)}% faded to ${currentPnlPct.toFixed(2)}% — confirmed corroborated peak ${corroborated.toFixed(2)}%`);
+      return { confirmed: true, peak: corroborated, faded: true };
+    }
+  }
+
   save(state);
   log("state", `Position ${position_address} rejected pending peak ${pendingPeak.toFixed(2)}% after 15s recheck (current: ${currentPnlPct ?? "?"}%)`);
   return { confirmed: false, rejected: true, pendingPeak };
