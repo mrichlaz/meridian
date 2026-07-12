@@ -33,6 +33,45 @@ import { normalizeTimeframe, getEffectiveWindowThresholds } from "../screening-s
 import { PATHS } from "../utils/paths.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+const RISK_SIZED_DEPLOY_TTL_MS = 15 * 60 * 1000;
+const riskSizedDeployAuthorizations = new Map();
+
+/**
+ * Authorize one exact automated pool/amount pair to deploy below the user's
+ * normal manual floor. This is staged by the deterministic screener, not by
+ * the LLM, and expires automatically.
+ */
+export function authorizeRiskSizedDeploy(poolAddress, amountSol, { now = Date.now(), ttlMs = RISK_SIZED_DEPLOY_TTL_MS } = {}) {
+  const pool = String(poolAddress || "").trim();
+  const amount = Number(amountSol);
+  if (!pool || !Number.isFinite(amount) || amount < 0.1) return false;
+  riskSizedDeployAuthorizations.set(pool, { amount, expiresAt: now + ttlMs });
+  return true;
+}
+
+export function isRiskSizedDeployAuthorized(poolAddress, amountSol, { now = Date.now() } = {}) {
+  const pool = String(poolAddress || "").trim();
+  const amount = Number(amountSol);
+  const authorization = riskSizedDeployAuthorizations.get(pool);
+  if (!authorization) return false;
+  if (authorization.expiresAt < now) {
+    riskSizedDeployAuthorizations.delete(pool);
+    return false;
+  }
+  return Number.isFinite(amount) && Math.abs(authorization.amount - amount) < 1e-6;
+}
+
+export function clearRiskSizedDeployAuthorizations() {
+  riskSizedDeployAuthorizations.clear();
+}
+
+export function checkDeployAmountFloor(poolAddress, amountSol, configuredFloor, { now = Date.now() } = {}) {
+  const amount = Number(amountSol);
+  const floor = Math.max(0.1, Number(configuredFloor) || 0);
+  const riskSized = isRiskSizedDeployAuthorized(poolAddress, amount, { now });
+  return { allowed: amount >= floor || riskSized, floor, riskSized };
+}
 const USER_CONFIG_PATH = PATHS.userConfig;
 const POOL_DISCOVERY_BASE = "https://pool-discovery-api.datapi.meteora.ag";
 const MIN_VOLATILITY_TIMEFRAME = "30m";
@@ -1013,7 +1052,8 @@ export async function executeTool(name, args) {
     ) {
       const originalAmount = Number(args.amount_y ?? args.amount_sol ?? 0);
       const retryAmount = Number((originalAmount * Number(config.policy?.shrinkRetryPct ?? 0.8)).toFixed(4));
-      const minDeploy = Math.max(0.1, config.management.deployAmountSol);
+      const exactRiskSizeAuthorized = isRiskSizedDeployAuthorized(args.pool_address, originalAmount);
+      const minDeploy = exactRiskSizeAuthorized ? 0.1 : Math.max(0.1, config.management.deployAmountSol);
       if (Number.isFinite(retryAmount) && retryAmount >= minDeploy && retryAmount < originalAmount) {
         log("deploy_retry", `Retrying deploy at 80% size after insufficient-funds simulation: ${originalAmount} → ${retryAmount} SOL`);
         result = await fn({ ...args, amount_y: retryAmount, amount_sol: undefined, retry_of_amount_y: originalAmount });
@@ -1274,12 +1314,16 @@ async function runSafetyChecks(name, args) {
         };
       }
 
-      const minDeploy = Math.max(0.1, config.management.deployAmountSol);
-      if (amountY < minDeploy) {
+      const floorDecision = checkDeployAmountFloor(args.pool_address, amountY, config.management.deployAmountSol);
+      const minDeploy = floorDecision.floor;
+      if (!floorDecision.allowed) {
         return {
           pass: false,
           reason: `Amount ${amountY} SOL is below the minimum deploy amount (${minDeploy} SOL). Use at least ${minDeploy} SOL.`,
         };
+      }
+      if (floorDecision.riskSized) {
+        log("safety", `Authorized deterministic risk size ${amountY} SOL below configured manual floor ${minDeploy} SOL for ${String(args.pool_address).slice(0, 12)}`);
       }
       if (amountY > config.risk.maxDeployAmount) {
         return {

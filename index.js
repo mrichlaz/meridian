@@ -24,7 +24,7 @@ import { config, reloadScreeningThresholds, computeDeployAmount, scaleDeployAmou
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { checkCircuitBreaker, getMarketRegime, rankCandidates, sizeMultiplierForScore, scoreCandidate } from "./policy-engine.js";
 import { applyLearnedRangePreference } from "./adaptive-preferences.js";
-import { executeTool, registerCronRestarter } from "./tools/executor.js";
+import { authorizeRiskSizedDeploy, executeTool, registerCronRestarter } from "./tools/executor.js";
 import {
   startPolling,
   stopPolling,
@@ -855,6 +855,12 @@ export async function runScreeningCycle({ silent = false } = {}) {
       "screening",
       `Risk-sized deploy: base ${deployAmount} SOL → ${screeningRecommendedDeployAmount} SOL (${regime.regime}, score ${topSizingScore})`,
     );
+    // The executor normally treats deployAmountSol as a manual floor. Stage
+    // the exact deterministic amount for every survivor so the LLM can obey
+    // risk sizing below that floor without receiving a general bypass flag.
+    for (const entry of passing) {
+      authorizeRiskSizedDeploy(entry.pool?.pool, screeningRecommendedDeployAmount);
+    }
 
     if (passing.length <= 1 && gmgnStageCounts) {
       const funnelBlock = buildGmgnFunnelReport(gmgnStageCounts, gmgnAllFiltered, { fromStage: 2 });

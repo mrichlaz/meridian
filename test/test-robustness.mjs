@@ -16,6 +16,12 @@ import { getEffectiveWindowThresholds } from "../screening-scales.js";
 import { mergeCandidatePools } from "../tools/screening.js";
 import { condenseGmgnCandidate } from "../tools/gmgn.js";
 import {
+  authorizeRiskSizedDeploy,
+  checkDeployAmountFloor,
+  clearRiskSizedDeployAuthorizations,
+  isRiskSizedDeployAuthorized,
+} from "../tools/executor.js";
+import {
   assertSafeSingleSideCoverage,
   deployLearningMetadata,
   maxBinsForDownsideCoverage,
@@ -43,6 +49,23 @@ test("automated risk sizing scales with any configured base amount", () => {
     const large = scaleDeployAmount(8, profile, score);
     assert.equal(large / small, 4);
   }
+});
+
+test("only the exact staged automated risk size can pass below the manual floor", () => {
+  clearRiskSizedDeployAuthorizations();
+  const now = Date.parse("2026-07-12T12:00:00Z");
+  assert.equal(authorizeRiskSizedDeploy("pool-risk-size", 1.84, { now, ttlMs: 60_000 }), true);
+  assert.equal(isRiskSizedDeployAuthorized("pool-risk-size", 1.84, { now }), true);
+  assert.equal(isRiskSizedDeployAuthorized("pool-risk-size", 1.85, { now }), false);
+  assert.equal(isRiskSizedDeployAuthorized("other-pool", 1.84, { now }), false);
+  assert.deepEqual(checkDeployAmountFloor("pool-risk-size", 1.84, 3.5, { now }), {
+    allowed: true,
+    floor: 3.5,
+    riskSized: true,
+  });
+  assert.equal(checkDeployAmountFloor("pool-risk-size", 1.85, 3.5, { now }).allowed, false);
+  assert.equal(isRiskSizedDeployAuthorized("pool-risk-size", 1.84, { now: now + 60_001 }), false);
+  clearRiskSizedDeployAuthorizations();
 });
 
 test("fee/active-TVL baseline scales consistently across discovery timeframes", () => {
