@@ -20,7 +20,7 @@ import { getWalletBalances } from "./tools/wallet.js";
 import { normalizeMint } from "./tools/wallet.js";
 import { getTopCandidates, chooseAdaptiveDeployProfile } from "./tools/screening.js";
 import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
-import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
+import { config, reloadScreeningThresholds, computeDeployAmount, scaleDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { checkCircuitBreaker, getMarketRegime, rankCandidates, sizeMultiplierForScore, scoreCandidate } from "./policy-engine.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
@@ -168,7 +168,7 @@ function computeFinalDeployAmount({
   const profileMult = Number(profile?.sizeMultiplier) || 1;
   // sizeMultiplierForScore requires regime; if not supplied use NEUTRAL.
   const scoreMult = Number(sizeMultiplierForScore(Number(score) || 0, regime)) || 1;
-  const multiplied = base * profileMult * scoreMult;
+  const multiplied = scaleDeployAmount(base, profileMult, scoreMult) ?? base;
   const { final, clamped } = applyDeployAmountClamp(multiplied, { walletSol, allowBelowFloor });
   return { final, base, multiplied: Number(multiplied.toFixed(2)), profileMult, scoreMult, clamped };
 }
@@ -731,6 +731,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
   let deployPoolName = null;
   let screeningBalance = preBalance;
   let screeningDeployAmount = 0;
+  let screeningRecommendedDeployAmount = 0;
   let passingForFallback = [];
   try {
     // Reuse pre-fetched balance — no extra RPC call needed
@@ -838,6 +839,21 @@ export async function runScreeningCycle({ silent = false } = {}) {
       });
       return screenReport;
     }
+
+    const topSizingProfile = chooseAdaptiveDeployProfile(passing[0].pool, config.strategy);
+    const topSizingScore = passing[0]?.policy?.finalScore ?? passing[0]?.policy?.score ?? 66;
+    screeningRecommendedDeployAmount = computeFinalDeployAmount({
+      walletSol: currentBalance.sol,
+      baseDeployAmount: deployAmount,
+      profile: topSizingProfile,
+      score: topSizingScore,
+      regime,
+      allowBelowFloor: true,
+    }).final;
+    log(
+      "screening",
+      `Risk-sized deploy: base ${deployAmount} SOL → ${screeningRecommendedDeployAmount} SOL (${regime.regime}, score ${topSizingScore})`,
+    );
 
     if (passing.length <= 1 && gmgnStageCounts) {
       const funnelBlock = buildGmgnFunnelReport(gmgnStageCounts, gmgnAllFiltered, { fromStage: 2 });
@@ -1059,7 +1075,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     const { content } = await agentLoop(`
 SCREENING CYCLE
 ${strategyBlock}
-Positions: ${prePositions.total_positions}/${config.risk.maxPositions} | SOL: ${currentBalance.sol.toFixed(3)} | Deploy: ${deployAmount} SOL
+Positions: ${prePositions.total_positions}/${config.risk.maxPositions} | SOL: ${currentBalance.sol.toFixed(3)} | Deploy: ${screeningRecommendedDeployAmount} SOL
 ${mlEmotionContext ? "\n" + mlEmotionContext + "\n" : ""}
 ${configBlock}
 
@@ -1080,6 +1096,7 @@ RULES — read carefully:
 STEPS:
 1. If passing.length >= 1, deploy the top survivor (the one with the highest fee/aTVL × organic × smart-wallet score). If you have a strong data-grounded reason to skip it, name the pool and cite the specific qualitative or comparative data point exactly as shown.
 2. Call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
+   Set amount_y=${screeningRecommendedDeployAmount} exactly. This is the deterministic risk-sized amount for the current score and regime.
    bins_below = round(${config.strategy.minBinsBelow} + (candidate volatility/5)*(${config.strategy.maxBinsBelow - config.strategy.minBinsBelow})) clamped to [${config.strategy.minBinsBelow},${config.strategy.maxBinsBelow}].
    pass deploy_position.volatility = the candidate volatility value.
    pass deploy_position.discovery_timeframe = the candidate discovery_timeframe value exactly as shown.
@@ -1225,6 +1242,7 @@ IMPORTANT:
                 profile: deployProfile,
                 score: passing[0]?.policy?.score || 66,
                 regime,
+                allowBelowFloor: true,
               });
               const initialValueUsd = currentBalance.sol_price ? deployAmountOverride * currentBalance.sol_price : null;
               const binsBelow = Math.max(config.minSafeBinsBelow, Math.round(computeBinsBelow(topSurvivor.volatility) * (deployProfile.binsMultiplier || 1)));
@@ -1276,7 +1294,7 @@ IMPORTANT:
         metrics: {
           passing_candidates: passing.length,
           positions_open: prePositions.total_positions,
-          deploy_amount_sol: deployAmount,
+          deploy_amount_sol: screeningRecommendedDeployAmount || deployAmount,
         },
       });
     } else if (!deploySucceeded) {
@@ -1311,6 +1329,8 @@ IMPORTANT:
               baseDeployAmount: screeningDeployAmount,
               profile: deployProfile,
               score: passingForFallback[0]?.policy?.score || 66,
+              regime: getMarketRegime(),
+              allowBelowFloor: true,
             });
             const initialValueUsd = screeningBalance?.sol_price ? deployAmountOverride * screeningBalance.sol_price : null;
             const binsBelow = Math.max(config.minSafeBinsBelow, Math.round(computeBinsBelow(topSurvivor.volatility) * (deployProfile.binsMultiplier || 1)));

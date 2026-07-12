@@ -510,6 +510,19 @@ export function computeDeployAmount(walletSol) {
 }
 
 /**
+ * Apply dimensionless policy/profile multipliers to the current base amount.
+ * Kept pure so automated sizing always scales with runtime deployAmountSol
+ * changes instead of drifting toward a historical hardcoded amount.
+ */
+export function scaleDeployAmount(baseAmount, profileMultiplier = 1, scoreMultiplier = 1) {
+  const base = Number(baseAmount);
+  const profile = Number(profileMultiplier);
+  const score = Number(scoreMultiplier);
+  if (![base, profile, score].every(Number.isFinite)) return null;
+  return base * profile * score;
+}
+
+/**
  * Centralized threshold schema used by `evolveThresholds()`.
  * Each entry maps a persisted user-config key to:
  *  - section: where the live value lives

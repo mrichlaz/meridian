@@ -57,6 +57,7 @@ export function scoreCandidate(pool = {}, context = {}) {
   const volume = n(pool.volume_window ?? pool.volume_30m ?? pool.volume_1h ?? pool.volume_24h);
   const holders = n(pool.holders ?? pool.base?.holder_count);
   const volatility = n(pool.volatility);
+  const binStep = n(pool.bin_step ?? pool.dlmm_params?.bin_step);
   const age = n(pool.token_age_hours, 24);
   const top10 = n(pool.top10_pct ?? pool.holder_top10_pct ?? context.audit?.top_holders_pct);
   const bots = n(pool.bot_holders_pct ?? context.audit?.bot_holders_pct);
@@ -79,6 +80,10 @@ export function scoreCandidate(pool = {}, context = {}) {
   score -= clamp((bundle - 15) / 20, 0, 2) * 8;
   if (flow.toxic) score -= n(config.policy?.toxicFlowPenalty, 22);
   if (pool.is_pvp) score -= 15;
+  // 30d wallet export: 125bp single-down pools lost $34.48 across 124 closes,
+  // versus positive aggregate PnL at 80bp and 100bp. Keep them eligible, but
+  // require materially stronger evidence rather than adding another setting.
+  if (binStep > 100) score -= 12;
 
   const reasons = [...flow.toxicReasons];
   if (fee < 0.03) reasons.push("weak fee/active-TVL");
@@ -89,6 +94,7 @@ export function scoreCandidate(pool = {}, context = {}) {
   if (volatility <= 0) reasons.push("unusable volatility");
   if (top10 > 55) reasons.push("high top-10 concentration");
   if (bots > 35) reasons.push("high bot-holder concentration");
+  if (binStep > 100) reasons.push(`bin step ${binStep} has elevated adverse-selection risk`);
 
   return { score: Math.round(clamp(score, 0, 100)), reasons, flow };
 }
@@ -123,6 +129,28 @@ export function checkCircuitBreaker({
   const latestCloseAt = closeTimestamp(recent.at(-1));
   const lossPauseActive = latestCloseAt > 0 && now - latestCloseAt < LOSS_PAUSE_MS;
   const remainingMinutes = Math.max(1, Math.ceil((LOSS_PAUSE_MS - (now - latestCloseAt)) / 60000));
+  const last6 = recent.slice(-6);
+  const recentPnlUsd = last6.reduce((sum, record) => sum + n(record.pnl_usd), 0);
+  const worstRecentPnlUsd = last6.reduce((worst, record) => Math.min(worst, n(record.pnl_usd)), 0);
+  const recentCapitalUsd = last6.reduce((sum, record) => {
+    const initialValue = Number(record.initial_value_usd);
+    return sum + (Number.isFinite(initialValue) && initialValue > 0 ? initialValue : 0);
+  }, 0);
+  const recentReturnPct = recentCapitalUsd > 0 ? (recentPnlUsd / recentCapitalUsd) * 100 : null;
+  const worstRecentPnlPct = last6.reduce((worst, record) => {
+    const pnlPct = Number(record.pnl_pct);
+    return Number.isFinite(pnlPct) ? Math.min(worst, pnlPct) : worst;
+  }, 0);
+  const normalizedTailLoss = worstRecentPnlPct <= -5 || (recentReturnPct != null && recentReturnPct <= -2);
+  const legacyTailLoss = recentCapitalUsd === 0 && (recentPnlUsd <= -25 || worstRecentPnlUsd <= -20);
+  // A single left-tail close can erase many normal fee wins. Pause before the
+  // next screening cycle compounds the drawdown; the pause recovers on its own.
+  if (lossPauseActive && last6.length > 0 && (normalizedTailLoss || legacyTailLoss)) {
+    return {
+      blocked: true,
+      reason: `recent tail loss ${recentReturnPct == null ? "" : `${recentReturnPct.toFixed(1)}% / `}$${recentPnlUsd.toFixed(2)} across ${last6.length} closes (worst ${worstRecentPnlPct.toFixed(1)}% / $${worstRecentPnlUsd.toFixed(2)}) — cooling down for ${remainingMinutes}m`,
+    };
+  }
   const last3 = recent.slice(-3);
   if (lossPauseActive && last3.length === 3 && last3.every((p) => n(p.pnl_usd) < 0)) {
     return { blocked: true, reason: `3 consecutive losing closes — cooling down for ${remainingMinutes}m` };
