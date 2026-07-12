@@ -242,7 +242,7 @@ export async function recordPerformance(perf) {
   // Update emotions on position close
   try {
     const { onPositionClosed } = await import("./ml/emotions.js");
-    onPositionClosed(entry);
+    onPositionClosed(entry, { performanceHistory: data.performance });
   } catch {}
 
   void pushHivePerformanceEvent({

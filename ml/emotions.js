@@ -83,15 +83,22 @@ function save(state) {
  * Called after the agent closes a position.
  * Adjusts confidence, satisfaction, and risk appetite based on outcome.
  */
-export function onPositionClosed(perf) {
+export function onPositionClosed(perf, { performanceHistory } = {}) {
   const state = load();
   state.cycles.closed++;
 
   const pnlPct = perf.pnl_pct || 0;
   const efficiency = perf.range_efficiency || 50;
 
-  // Update streak
-  if (pnlPct > 0) {
+  // Update streak. Recompute from the deduped performance history when the
+  // caller provides it — incremental counting double-counts whenever the same
+  // close gets recorded more than once (the pre-dedup already-closed backfill
+  // re-recorded one close every management cycle, producing streaks like
+  // "49x loss" from a single losing position), and a poisoned incremental
+  // count never heals on its own.
+  if (Array.isArray(performanceHistory) && performanceHistory.length > 0) {
+    state.streak = computeStreakFromHistory(performanceHistory);
+  } else if (pnlPct > 0) {
     state.streak.wins++;
     state.streak.losses = 0;
     state.streak.current = "win";
@@ -384,6 +391,27 @@ export function getEmotionTrend(cycles = 20) {
 
 function clamp(value, lo, hi) {
   return Math.max(lo, Math.min(hi, value));
+}
+
+/**
+ * Derive the win/loss streak from the tail of the (deduped, one record per
+ * position) performance history — the source of truth for closes.
+ */
+function computeStreakFromHistory(perfList) {
+  const streak = { wins: 0, losses: 0, current: "" };
+  const last = perfList[perfList.length - 1];
+  if (!last) return streak;
+  const dir = (last.pnl_pct || 0) > 0 ? "win" : "loss";
+  let count = 0;
+  for (let i = perfList.length - 1; i >= 0; i--) {
+    const isWin = (perfList[i].pnl_pct || 0) > 0;
+    if ((isWin ? "win" : "loss") !== dir) break;
+    count++;
+  }
+  streak.current = dir;
+  if (dir === "win") streak.wins = count;
+  else streak.losses = count;
+  return streak;
 }
 
 /**
