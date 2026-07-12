@@ -3,6 +3,11 @@ import assert from "node:assert/strict";
 
 import { scaleDeployAmount } from "../config.js";
 import { checkCircuitBreaker, LOSS_PAUSE_MS, scoreCandidate } from "../policy-engine.js";
+import {
+  applyLearnedRangePreference,
+  buildAdaptivePreferenceProfile,
+  candidatePreferenceAdjustment,
+} from "../adaptive-preferences.js";
 import { LogisticRegression } from "../ml/model.js";
 import { onlineUpdate } from "../ml/trainer.js";
 import { actionForLift, computeNumericLift } from "../signal-weights.js";
@@ -94,21 +99,73 @@ test("single-sided range caps adapt to bin step", () => {
   assert.throws(() => assertSafeSingleSideCoverage(45.1), /Unsafe single-side range/);
 });
 
-test("125 bp pools receive an adverse-selection score penalty", () => {
+test("125 bp pools use a conservative prior before adaptive evidence is ready", () => {
   const candidate = {
-    fee_active_tvl_ratio: 0.1,
-    organic_score: 85,
-    volume_window: 50_000,
-    holders: 2_000,
+    fee_active_tvl_ratio: 0.05,
+    organic_score: 75,
+    volume_window: 5_000,
+    holders: 700,
     volatility: 5,
     token_age_hours: 24,
-    volume_5m: 2_000,
-    volume_30m: 8_000,
+    volume_5m: 1_000,
+    volume_30m: 3_000,
   };
-  const result100 = scoreCandidate({ ...candidate, bin_step: 100 });
-  const result125 = scoreCandidate({ ...candidate, bin_step: 125 });
+  const coldStart = buildAdaptivePreferenceProfile([]);
+  const result100 = scoreCandidate({ ...candidate, bin_step: 100 }, { preferenceProfile: coldStart });
+  const result125 = scoreCandidate({ ...candidate, bin_step: 125 }, { preferenceProfile: coldStart });
   assert.ok(result125.score < result100.score);
-  assert.ok(result125.reasons.some((reason) => reason.includes("adverse-selection")));
+  assert.ok(result125.reasons.some((reason) => reason.includes("conservative prior")));
+});
+
+function preferenceRecords({ count = 240, highStepReturn = -2, lowStepReturn = 2, amountSol = 4.4 } = {}) {
+  const start = Date.parse("2026-07-01T00:00:00Z");
+  return Array.from({ length: count }, (_, index) => {
+    const highStep = index % 2 === 1;
+    return {
+      position: `preference-${index}`,
+      base_mint: `mint-${index % 40}`,
+      bin_step: highStep ? 125 : 100,
+      entry_mcap: highStep ? 700_000 : 2_000_000,
+      bin_range: { bins_below: highStep ? 35 : 35 },
+      amount_sol: amountSol,
+      initial_value_usd: amountSol * 150,
+      pnl_pct: highStep ? highStepReturn : lowStepReturn,
+      deployed_at: new Date(start + index * 60 * 60 * 1000).toISOString(),
+      recorded_at: new Date(start + (index + 1) * 60 * 60 * 1000).toISOString(),
+    };
+  });
+}
+
+test("adaptive preferences penalize negative expectancy without boosting the winner", () => {
+  const profile = buildAdaptivePreferenceProfile(preferenceRecords(), { now: Date.parse("2026-07-20T00:00:00Z") });
+  const high = candidatePreferenceAdjustment({ bin_step: 125, mcap: 700_000 }, profile);
+  const low = candidatePreferenceAdjustment({ bin_step: 100, mcap: 2_000_000 }, profile);
+  assert.equal(profile.ready, true);
+  assert.ok(high.scoreAdjustment < 0);
+  assert.equal(low.scoreAdjustment, 0);
+});
+
+test("adaptive preference changes when the rolling evidence reverses", () => {
+  const oldProfile = buildAdaptivePreferenceProfile(preferenceRecords());
+  const newProfile = buildAdaptivePreferenceProfile(preferenceRecords({ count: 500, highStepReturn: 3, lowStepReturn: -2 }));
+  assert.ok(candidatePreferenceAdjustment({ bin_step: 125, mcap: 700_000 }, oldProfile).scoreAdjustment < 0);
+  assert.equal(candidatePreferenceAdjustment({ bin_step: 125, mcap: 700_000 }, newProfile).scoreAdjustment, 0);
+  assert.ok(candidatePreferenceAdjustment({ bin_step: 100, mcap: 2_000_000 }, newProfile).scoreAdjustment < 0);
+});
+
+test("adaptive learning is invariant to configured SOL deploy size", () => {
+  const small = buildAdaptivePreferenceProfile(preferenceRecords({ amountSol: 2 }));
+  const large = buildAdaptivePreferenceProfile(preferenceRecords({ amountSol: 8 }));
+  assert.equal(
+    candidatePreferenceAdjustment({ bin_step: 125, mcap: 700_000 }, small).scoreAdjustment,
+    candidatePreferenceAdjustment({ bin_step: 125, mcap: 700_000 }, large).scoreAdjustment,
+  );
+});
+
+test("learned range movement is bounded to ten percent per decision", () => {
+  assert.equal(applyLearnedRangePreference(60, 100, 25), 54);
+  assert.equal(applyLearnedRangePreference(40, 100, 45), 44);
+  assert.equal(applyLearnedRangePreference(60, 100, null), 60);
 });
 
 test("Darwin lift keeps direction and ignores noisy quartiles", () => {

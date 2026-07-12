@@ -23,6 +23,7 @@ import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
 import { config, reloadScreeningThresholds, computeDeployAmount, scaleDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { checkCircuitBreaker, getMarketRegime, rankCandidates, sizeMultiplierForScore, scoreCandidate } from "./policy-engine.js";
+import { applyLearnedRangePreference } from "./adaptive-preferences.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
 import {
   startPolling,
@@ -978,7 +979,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
       if (pool.gmgn) {
         block = [
           `POOL: ${pool.name} (${pool.pool})`,
-          `  policy: score=${policy?.score ?? "?"}/${policy?.minScore ?? "?"}, final=${policy?.finalScore ?? policy?.score ?? "?"}, regime=${policy?.regime ?? "NEUTRAL"}, fee/vol=${policy?.flow?.feeVolatilityRatio?.toFixed?.(4) ?? "?"}, volume_persist=${policy?.flow?.volumePersistenceRatio?.toFixed?.(2) ?? "?"}${policy?.ml ? `, ml=${policy.ml.mlScore} (${policy.mlVerdict})` : ""}${policy?.flow?.toxic ? `, toxic=${policy.flow.toxicReasons.join("; ")}` : ""}`,
+          `  policy: score=${policy?.score ?? "?"}/${policy?.minScore ?? "?"}, final=${policy?.finalScore ?? policy?.score ?? "?"}, regime=${policy?.regime ?? "NEUTRAL"}, learned_penalty=${policy?.learned?.scoreAdjustment ?? 0}, learned_bins=${policy?.learned?.recommendedBinsBelow ?? "?"}, fee/vol=${policy?.flow?.feeVolatilityRatio?.toFixed?.(4) ?? "?"}, volume_persist=${policy?.flow?.volumePersistenceRatio?.toFixed?.(2) ?? "?"}${policy?.ml ? `, ml=${policy.ml.mlScore} (${policy.mlVerdict})` : ""}${policy?.flow?.toxic ? `, toxic=${policy.flow.toxicReasons.join("; ")}` : ""}`,
           formatGmgnCandidateForPrompt(pool),
           pvpLine,
           `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
@@ -992,7 +993,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
           : null;
         block = [
           `POOL: ${pool.name} (${pool.pool})`,
-          `  policy: score=${policy?.score ?? "?"}/${policy?.minScore ?? "?"}, final=${policy?.finalScore ?? policy?.score ?? "?"}, regime=${policy?.regime ?? "NEUTRAL"}, fee/vol=${policy?.flow?.feeVolatilityRatio?.toFixed?.(4) ?? "?"}, volume_persist=${policy?.flow?.volumePersistenceRatio?.toFixed?.(2) ?? "?"}${policy?.ml ? `, ml=${policy.ml.mlScore} (${policy.mlVerdict})` : ""}${policy?.flow?.toxic ? `, toxic=${policy.flow.toxicReasons.join("; ")}` : ""}`,
+          `  policy: score=${policy?.score ?? "?"}/${policy?.minScore ?? "?"}, final=${policy?.finalScore ?? policy?.score ?? "?"}, regime=${policy?.regime ?? "NEUTRAL"}, learned_penalty=${policy?.learned?.scoreAdjustment ?? 0}, learned_bins=${policy?.learned?.recommendedBinsBelow ?? "?"}, fee/vol=${policy?.flow?.feeVolatilityRatio?.toFixed?.(4) ?? "?"}, volume_persist=${policy?.flow?.volumePersistenceRatio?.toFixed?.(2) ?? "?"}${policy?.ml ? `, ml=${policy.ml.mlScore} (${policy.mlVerdict})` : ""}${policy?.flow?.toxic ? `, toxic=${policy.flow.toxicReasons.join("; ")}` : ""}`,
           `  metrics: bin_step=${pool.bin_step}, fee_pct=${pool.fee_pct}%, fee_tvl=${pool.fee_active_tvl_ratio}, vol=$${pool.volume_window}, tvl=$${pool.tvl ?? pool.active_tvl}, volatility_${pool.volatility_timeframe || "30m"}=${pool.volatility}, mcap=$${pool.mcap}, organic=${pool.organic_score}${pool.token_age_hours != null ? `, age=${pool.token_age_hours}h` : ""}`,
           `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
           gmgnPriceLine,
@@ -1097,7 +1098,7 @@ STEPS:
 1. If passing.length >= 1, deploy the top survivor (the one with the highest fee/aTVL × organic × smart-wallet score). If you have a strong data-grounded reason to skip it, name the pool and cite the specific qualitative or comparative data point exactly as shown.
 2. Call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
    Set amount_y=${screeningRecommendedDeployAmount} exactly. This is the deterministic risk-sized amount for the current score and regime.
-   bins_below = round(${config.strategy.minBinsBelow} + (candidate volatility/5)*(${config.strategy.maxBinsBelow - config.strategy.minBinsBelow})) clamped to [${config.strategy.minBinsBelow},${config.strategy.maxBinsBelow}].
+   Set bins_below to the candidate's exact policy learned_bins value. It is the volatility range adjusted by validated rolling outcomes and bounded to a 10% move. If learned_bins is unavailable, use round(${config.strategy.minBinsBelow} + (candidate volatility/5)*(${config.strategy.maxBinsBelow - config.strategy.minBinsBelow})) clamped to [${config.strategy.minBinsBelow},${config.strategy.maxBinsBelow}].
    pass deploy_position.volatility = the candidate volatility value.
    pass deploy_position.discovery_timeframe = the candidate discovery_timeframe value exactly as shown.
    For single-side SOL deploys, do not invent upside:
@@ -1245,7 +1246,7 @@ IMPORTANT:
                 allowBelowFloor: true,
               });
               const initialValueUsd = currentBalance.sol_price ? deployAmountOverride * currentBalance.sol_price : null;
-              const binsBelow = Math.max(config.minSafeBinsBelow, Math.round(computeBinsBelow(topSurvivor.volatility) * (deployProfile.binsMultiplier || 1)));
+              const binsBelow = Math.max(config.minSafeBinsBelow, Math.round(computeBinsBelow(topSurvivor.volatility, topSurvivor, passing[0]?.policy) * (deployProfile.binsMultiplier || 1)));
               const fallbackResult = await executeTool("deploy_position", {
                 pool_address: topSurvivor.pool,
                 amount_y: deployAmountOverride,
@@ -1333,7 +1334,7 @@ IMPORTANT:
               allowBelowFloor: true,
             });
             const initialValueUsd = screeningBalance?.sol_price ? deployAmountOverride * screeningBalance.sol_price : null;
-            const binsBelow = Math.max(config.minSafeBinsBelow, Math.round(computeBinsBelow(topSurvivor.volatility) * (deployProfile.binsMultiplier || 1)));
+            const binsBelow = Math.max(config.minSafeBinsBelow, Math.round(computeBinsBelow(topSurvivor.volatility, topSurvivor, passingForFallback[0]?.policy) * (deployProfile.binsMultiplier || 1)));
             const fallbackResult = await executeTool("deploy_position", {
               pool_address: topSurvivor.pool,
               amount_y: deployAmountOverride,
@@ -2595,7 +2596,7 @@ async function deployLatestCandidate(index, { manual = false } = {}) {
     score: manualPolicy.score,
   });
   const initialValueUsd = wallet.sol_price ? deployAmount * wallet.sol_price : null;
-  const binsBelow = Math.max(config.minSafeBinsBelow, Math.round(computeBinsBelow(candidate.volatility) * (deployProfile.binsMultiplier || 1)));
+  const binsBelow = Math.max(config.minSafeBinsBelow, Math.round(computeBinsBelow(candidate.volatility, candidate, { learned: manualPolicy.learned }) * (deployProfile.binsMultiplier || 1)));
   const result = await executeTool("deploy_position", {
     pool_address: candidate.pool,
     amount_y: deployAmount,
@@ -3687,7 +3688,7 @@ function getLoneCandidateSkipReason({ pool, sw, n, ti } = {}) {
   return null;
 }
 
-function computeBinsBelow(volatility) {
+function computeBinsBelow(volatility, candidate = null, policy = null) {
   const parsedVolatility = Number(volatility);
   const lo = config.strategy.minBinsBelow;
   const hi = config.strategy.maxBinsBelow;
@@ -3698,9 +3699,13 @@ function computeBinsBelow(volatility) {
   // count, and the position can be re-tuned if volatility becomes available
   // on a later refresh.
   if (!Number.isFinite(parsedVolatility) || parsedVolatility <= 0) {
-    return Math.max(lo, Math.min(hi, defaultBins));
+    const fallback = Math.max(lo, Math.min(hi, defaultBins));
+    if (Number.isFinite(Number(policy?.learned?.recommendedBinsBelow))) return Number(policy.learned.recommendedBinsBelow);
+    return candidate ? applyLearnedRangePreference(fallback, candidate.bin_step, policy?.learned?.rangeTargetPct) : fallback;
   }
-  return Math.max(lo, Math.min(hi, Math.round(lo + (parsedVolatility / 5) * (hi - lo))));
+  const volatilityBins = Math.max(lo, Math.min(hi, Math.round(lo + (parsedVolatility / 5) * (hi - lo))));
+  if (Number.isFinite(Number(policy?.learned?.recommendedBinsBelow))) return Number(policy.learned.recommendedBinsBelow);
+  return candidate ? applyLearnedRangePreference(volatilityBins, candidate.bin_step, policy?.learned?.rangeTargetPct) : volatilityBins;
 }
 
 async function syncMlPersonalityFromConfig() {

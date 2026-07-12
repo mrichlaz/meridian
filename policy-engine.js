@@ -1,5 +1,6 @@
 import { config } from "./config.js";
 import { getPerformanceSummary, getPerformanceHistory } from "./lessons.js";
+import { applyLearnedRangePreference, buildAdaptivePreferenceProfile, candidatePreferenceAdjustment } from "./adaptive-preferences.js";
 
 const LOSS_PAUSE_MS = 6 * 60 * 60 * 1000;
 
@@ -64,6 +65,16 @@ export function scoreCandidate(pool = {}, context = {}) {
   const bundle = n(pool.bundle_pct ?? pool.gmgn_bundler_pct);
   const smart = pool.smart_money_buy || context.smartWallets?.smart_money_buy ? 8 : 0;
   const flow = getFlowQuality(pool, context);
+  const preferenceProfile = context.preferenceProfile
+    || buildAdaptivePreferenceProfile(getPerformanceHistory({ limit: 500 })?.records || []);
+  const learned = candidatePreferenceAdjustment(pool, preferenceProfile);
+  const rangeLo = n(config.strategy?.minBinsBelow, n(config.minSafeBinsBelow, 35));
+  const rangeHi = Math.max(rangeLo, n(config.strategy?.maxBinsBelow, rangeLo));
+  const rangeDefault = clamp(n(config.strategy?.defaultBinsBelow, Math.round((rangeLo + rangeHi) / 2)), rangeLo, rangeHi);
+  const baseBins = volatility > 0
+    ? Math.round(clamp(rangeLo + (volatility / 5) * (rangeHi - rangeLo), rangeLo, rangeHi))
+    : rangeDefault;
+  learned.recommendedBinsBelow = applyLearnedRangePreference(baseBins, binStep, learned.rangeTargetPct);
 
   let score = 0;
   score += clamp(fee / 0.08, 0, 2) * 20;
@@ -80,10 +91,12 @@ export function scoreCandidate(pool = {}, context = {}) {
   score -= clamp((bundle - 15) / 20, 0, 2) * 8;
   if (flow.toxic) score -= n(config.policy?.toxicFlowPenalty, 22);
   if (pool.is_pvp) score -= 15;
-  // 30d wallet export: 125bp single-down pools lost $34.48 across 124 closes,
-  // versus positive aggregate PnL at 80bp and 100bp. Keep them eligible, but
-  // require materially stronger evidence rather than adding another setting.
-  if (binStep > 100) score -= 12;
+  // Use a small conservative prior until this deployment has enough labeled
+  // examples. Once qualified, rolling long+recent signed expectancy replaces
+  // the prior, so a market-regime change can reverse the preference.
+  const binStepHasLearnedEvidence = learned.evidence.some((item) => item.name === "bin step");
+  if (binStep > 100 && !binStepHasLearnedEvidence) score -= 6;
+  score += learned.scoreAdjustment;
 
   const reasons = [...flow.toxicReasons];
   if (fee < 0.03) reasons.push("weak fee/active-TVL");
@@ -94,9 +107,12 @@ export function scoreCandidate(pool = {}, context = {}) {
   if (volatility <= 0) reasons.push("unusable volatility");
   if (top10 > 55) reasons.push("high top-10 concentration");
   if (bots > 35) reasons.push("high bot-holder concentration");
-  if (binStep > 100) reasons.push(`bin step ${binStep} has elevated adverse-selection risk`);
+  if (binStep > 100 && !binStepHasLearnedEvidence) reasons.push(`bin step ${binStep} uses a conservative prior pending enough recent outcomes`);
+  for (const item of learned.evidence.filter((evidence) => evidence.adjustment < 0)) {
+    reasons.push(`learned ${item.name} expectancy is weaker (${item.longLift}% long / ${item.recentLift}% recent lift)`);
+  }
 
-  return { score: Math.round(clamp(score, 0, 100)), reasons, flow };
+  return { score: Math.round(clamp(score, 0, 100)), reasons, flow, learned };
 }
 
 export function getMarketRegime({ performanceSummary = getPerformanceSummary(), recentPerformance = null } = {}) {
@@ -171,9 +187,10 @@ export function rankCandidates(entries = [], { regime = getMarketRegime() } = {}
     return entries.map((entry) => ({ ...entry, policy: { score: 100, reasons: [], flow: getFlowQuality(entry.pool, { audit: entry.ti?.audit, smartWallets: entry.sw }), regime: regime.regime, minScore: 0, disabled: true } }));
   }
   const minFeeVol = n(config.policy?.minFeeVolatilityRatio, 0.01);
+  const preferenceProfile = buildAdaptivePreferenceProfile(getPerformanceHistory({ limit: 500 })?.records || []);
   return entries
     .map((entry) => {
-      const scored = scoreCandidate(entry.pool, { audit: entry.ti?.audit, smartWallets: entry.sw });
+      const scored = scoreCandidate(entry.pool, { audit: entry.ti?.audit, smartWallets: entry.sw, preferenceProfile });
       // Hard EV gate: fee revenue must compensate volatility (adverse-selection
       // proxy). A soft score penalty let high-volume-but-toxic pools through —
       // exactly the trades that produced the left tail. Zero the score so the
