@@ -12,6 +12,7 @@ import { LogisticRegression } from "../ml/model.js";
 import { onlineUpdate } from "../ml/trainer.js";
 import { actionForLift, computeNumericLift } from "../signal-weights.js";
 import { stageMlFeatures, getAndClearStagedMlFeatures } from "../signal-tracker.js";
+import { getEffectiveWindowThresholds } from "../screening-scales.js";
 import {
   assertSafeSingleSideCoverage,
   deployLearningMetadata,
@@ -40,6 +41,17 @@ test("automated risk sizing scales with any configured base amount", () => {
     const large = scaleDeployAmount(8, profile, score);
     assert.equal(large / small, 4);
   }
+});
+
+test("fee/active-TVL baseline scales consistently across discovery timeframes", () => {
+  const baseline = 0.015;
+  const fiveMinute = getEffectiveWindowThresholds({ minFeeActiveTvlRatio: baseline }, "5m").minFeeActiveTvlRatio;
+  const thirtyMinute = getEffectiveWindowThresholds({ minFeeActiveTvlRatio: baseline }, "30m").minFeeActiveTvlRatio;
+  const oneHour = getEffectiveWindowThresholds({ minFeeActiveTvlRatio: baseline }, "1h").minFeeActiveTvlRatio;
+  assert.equal(fiveMinute, baseline);
+  assert.ok(thirtyMinute > fiveMinute);
+  assert.ok(oneHour > thirtyMinute);
+  assert.ok(Math.abs(thirtyMinute - 0.0544954395) < 1e-9);
 });
 
 test("one portfolio tail loss pauses new deployment", () => {

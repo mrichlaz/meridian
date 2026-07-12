@@ -988,12 +988,6 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   const minTvl = Number(config.screening.minTvl ?? 0);
   const maxTvl = config.screening.maxTvl == null ? null : Number(config.screening.maxTvl);
   const tf = config.screening.timeframe || "5m";
-  const effectiveWindowThresholds = getEffectiveWindowThresholds({
-    minFeeActiveTvlRatio: numeric(config.screening.minFeeActiveTvlRatio),
-    minVolume: numeric(config.screening.minVolume),
-  }, discovery.discovery_timeframe || tf);
-  const minFeeActiveTvlRatio = effectiveWindowThresholds.minFeeActiveTvlRatio;
-
   const eligible = pools
     .filter((p) => {
       const tvl = Number(p.tvl ?? p.active_tvl ?? 0);
@@ -1006,9 +1000,18 @@ export async function getTopCandidates({ limit = 10 } = {}) {
         return false;
       }
       const feeActiveTvlRatio = Number(p.fee_active_tvl_ratio);
+      // A merged result can contain 5m, 30m, and longer-window pools in the
+      // same batch. Scale the 5m baseline against this pool's own discovery
+      // window; using the batch's dominant window can over- or under-filter
+      // every pool that arrived through sparse/GMGN/bot-tracker merging.
+      const poolTimeframe = p.discovery_timeframe || discovery.discovery_timeframe || tf;
+      const minFeeActiveTvlRatio = getEffectiveWindowThresholds({
+        minFeeActiveTvlRatio: numeric(config.screening.minFeeActiveTvlRatio),
+        minVolume: numeric(config.screening.minVolume),
+      }, poolTimeframe).minFeeActiveTvlRatio;
       if (Number.isFinite(minFeeActiveTvlRatio) && minFeeActiveTvlRatio > 0 && (!Number.isFinite(feeActiveTvlRatio) || feeActiveTvlRatio < minFeeActiveTvlRatio)) {
         const feeFloor = Number(config.screening.minFeeActiveTvlRatio) !== minFeeActiveTvlRatio
-          ? `${fmtThresholdValue(minFeeActiveTvlRatio, 4)} at ${discovery.discovery_timeframe || tf} (scaled from base ${fmtThresholdValue(config.screening.minFeeActiveTvlRatio, 4)})`
+          ? `${fmtThresholdValue(minFeeActiveTvlRatio, 4)} at ${poolTimeframe} (scaled from base ${fmtThresholdValue(config.screening.minFeeActiveTvlRatio, 4)})`
           : `${fmtThresholdValue(minFeeActiveTvlRatio, 4)}`;
         pushFilteredReason(filteredOut, p, `fee/active-TVL ${fmtThresholdValue(feeActiveTvlRatio, 4)} below minFeeActiveTvlRatio ${feeFloor}`);
         return false;
@@ -1472,7 +1475,10 @@ function categorizeRejectReason(rawReason) {
     { re: /^bin_step .* below minBinStep\b/, label: () => `bin_step below minBinStep (${s.minBinStep ?? "n/a"})` },
     { re: /^bin_step .* above maxBinStep\b/, label: () => `bin_step above maxBinStep (${s.maxBinStep ?? "n/a"})` },
     { re: /^fee\/active-TVL .* below persistence floor\b/, label: () => "fee/active-TVL below persistence floor" },
-    { re: /^fee\/active-TVL .* below minFeeActiveTvlRatio\b/, label: () => `fee/active-TVL below minFeeActiveTvlRatio (${s.minFeeActiveTvlRatio ?? "n/a"}%)` },
+    { re: /^fee\/active-TVL .* below minFeeActiveTvlRatio\s*([\d.]+)?(?:\s+at\s+([\w]+))?/, label: (m) => {
+      const threshold = m[1] ?? s.minFeeActiveTvlRatio ?? "n/a";
+      return `fee/active-TVL below minFeeActiveTvlRatio (${threshold}%${m[2] ? ` at ${m[2]}` : ""})`;
+    } },
     { re: /^volatility .* is unusable\b/, label: () => "volatility unusable" },
     { re: /^base organic .* below minOrganic\b/, label: () => `base organic below minOrganic (${s.minOrganic ?? "n/a"}%)` },
     { re: /^quote organic .* below minQuoteOrganic\b/, label: () => `quote organic below minQuoteOrganic (${s.minQuoteOrganic ?? "n/a"}%)` },
