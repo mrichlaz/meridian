@@ -2,8 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { scaleDeployAmount } from "../config.js";
-import { derivePerformanceLesson } from "../lessons.js";
+import { derivePerformanceLesson, summarizePerformanceRecords } from "../lessons.js";
 import { hasRecentMaterialLoss, isMaterialLosingDeploy } from "../pool-memory.js";
+import { summarizeBriefingActivity } from "../briefing.js";
 import { checkCircuitBreaker, LOSS_PAUSE_MS, scoreCandidate } from "../policy-engine.js";
 import {
   applyLearnedRangePreference,
@@ -153,6 +154,36 @@ test("moderate losing closes generate a performance lesson", () => {
   assert.equal(lesson.outcome, "poor");
   assert.match(lesson.rule, /^UNDERPERFORMED:/);
   assert.ok(lesson.tags.includes("underperformed"));
+});
+
+test("performance math excludes flat or unpriced records from win rate", () => {
+  const summary = summarizePerformanceRecords([
+    { pnl_usd: 10, pnl_pct: 2, fees_earned_usd: 1, range_efficiency: 80 },
+    { pnl_usd: -5, pnl_pct: -1, fees_earned_usd: 0.5, range_efficiency: 60 },
+    { pnl_usd: 0, pnl_pct: 0, fees_earned_usd: 0, range_efficiency: 100 },
+  ]);
+  assert.equal(summary.total_positions_closed, 3);
+  assert.equal(summary.decisive_positions, 2);
+  assert.equal(summary.flat_positions, 1);
+  assert.equal(summary.win_rate_pct, 50);
+  assert.equal(summary.total_pnl_usd, 5);
+  assert.equal(summary.total_fees_usd, 1.5);
+});
+
+test("briefing counts closes from performance storage and deduplicates opens", () => {
+  const now = Date.parse("2026-07-12T12:00:00Z");
+  const state = { positions: {
+    open1: { position: "open1", deployed_at: "2026-07-12T10:00:00Z", closed: false },
+  } };
+  const lessonsData = { performance: [
+    { position: "closed1", deployed_at: "2026-07-12T09:00:00Z", recorded_at: "2026-07-12T11:00:00Z", pnl_usd: 2, pnl_pct: 1 },
+    { position: "old", deployed_at: "2026-07-10T09:00:00Z", recorded_at: "2026-07-10T11:00:00Z", pnl_usd: -1, pnl_pct: -1 },
+  ] };
+  const activity = summarizeBriefingActivity(state, lessonsData, { now });
+  assert.equal(activity.openedLast24h, 2);
+  assert.equal(activity.closedLast24h, 1);
+  assert.equal(activity.openPositions.length, 1);
+  assert.equal(activity.stats.total_pnl_usd, 2);
 });
 
 test("material losses trigger deterministic token cooldown eligibility", () => {

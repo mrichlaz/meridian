@@ -216,7 +216,7 @@ export function recordPoolDeploy(poolAddress, deployData) {
   entry.deploys.push(deploy);
   entry.total_deploys = entry.deploys.length;
   entry.last_deployed_at = deploy.closed_at;
-  entry.last_outcome = (deploy.pnl_pct ?? 0) >= 0 ? "profit" : "loss";
+  entry.last_outcome = (deploy.pnl_pct ?? 0) > 0 ? "profit" : (deploy.pnl_pct ?? 0) < 0 ? "loss" : "flat";
 
   recomputeAggregates(entry);
 

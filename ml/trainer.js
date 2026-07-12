@@ -94,6 +94,10 @@ function loadTrainingData(opts = {}) {
   for (const entry of perfEntries) {
     if (typeof entry.pnl_pct !== "number") continue;
     if (!entry.signal_snapshot && typeof entry.fee_tvl_ratio !== "number") continue;
+    // Exact-zero closes are frequently external/backfilled positions without
+    // a reliable exit mark. Keep them in the audit history, but do not teach
+    // the classifier that missing/flat outcomes are losses.
+    if (Math.abs(entry.pnl_pct) < 0.01 && Math.abs(Number(entry.pnl_usd) || 0) < 0.01) continue;
 
     try {
       const features = extractFromPerformance(entry);

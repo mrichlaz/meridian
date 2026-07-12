@@ -1234,15 +1234,43 @@ export function getPerformanceHistory({ hours = 24, limit = 50 } = {}) {
       closed_at: r.recorded_at,
     }));
 
-  const totalPnl = filtered.reduce((s, r) => s + (r.pnl_usd ?? 0), 0);
-  const wins = filtered.filter((r) => r.pnl_usd > 0).length;
+  const stats = summarizePerformanceRecords(filtered);
 
   return {
     hours,
     count: filtered.length,
-    total_pnl_usd: Math.round(totalPnl * 100) / 100,
-    win_rate_pct: filtered.length > 0 ? Math.round((wins / filtered.length) * 100) : null,
+    total_pnl_usd: stats.total_pnl_usd,
+    win_rate_pct: stats.win_rate_pct,
+    decisive_positions: stats.decisive_positions,
+    flat_positions: stats.flat_positions,
     positions: filtered,
+  };
+}
+
+export function summarizePerformanceRecords(records = []) {
+  const normalized = records.filter((record) => Number.isFinite(Number(record?.pnl_usd)));
+  const totalPnl = normalized.reduce((sum, record) => sum + Number(record.pnl_usd), 0);
+  const totalFees = normalized.reduce((sum, record) => sum + (Number(record.fees_earned_usd) || 0), 0);
+  const wins = normalized.filter((record) => Number(record.pnl_usd) > 0).length;
+  const losses = normalized.filter((record) => Number(record.pnl_usd) < 0).length;
+  const decisive = wins + losses;
+  const pnlPctValues = normalized.map((record) => Number(record.pnl_pct)).filter(Number.isFinite);
+  const rangeValues = normalized.map((record) => Number(record.range_efficiency)).filter(Number.isFinite);
+  return {
+    total_positions_closed: normalized.length,
+    decisive_positions: decisive,
+    flat_positions: normalized.length - decisive,
+    wins,
+    losses,
+    total_pnl_usd: Math.round(totalPnl * 100) / 100,
+    total_fees_usd: Math.round(totalFees * 100) / 100,
+    avg_pnl_pct: pnlPctValues.length
+      ? Math.round((pnlPctValues.reduce((sum, value) => sum + value, 0) / pnlPctValues.length) * 100) / 100
+      : null,
+    avg_range_efficiency_pct: rangeValues.length
+      ? Math.round((rangeValues.reduce((sum, value) => sum + value, 0) / rangeValues.length) * 10) / 10
+      : null,
+    win_rate_pct: decisive > 0 ? Math.round((wins / decisive) * 100) : null,
   };
 }
 
@@ -1255,17 +1283,8 @@ export function getPerformanceSummary() {
 
   if (p.length === 0) return null;
 
-  const totalPnl = p.reduce((s, x) => s + x.pnl_usd, 0);
-  const avgPnlPct = p.reduce((s, x) => s + x.pnl_pct, 0) / p.length;
-  const avgRangeEfficiency = p.reduce((s, x) => s + x.range_efficiency, 0) / p.length;
-  const wins = p.filter((x) => x.pnl_usd > 0).length;
-
   return {
-    total_positions_closed: p.length,
-    total_pnl_usd: Math.round(totalPnl * 100) / 100,
-    avg_pnl_pct: Math.round(avgPnlPct * 100) / 100,
-    avg_range_efficiency_pct: Math.round(avgRangeEfficiency * 10) / 10,
-    win_rate_pct: Math.round((wins / p.length) * 100),
+    ...summarizePerformanceRecords(p),
     total_lessons: data.lessons.length,
   };
 }
