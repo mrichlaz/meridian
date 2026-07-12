@@ -1353,6 +1353,19 @@ async function backfillExternalClose(positionAddress, tracked) {
       log("close_warn", `External close of ${positionAddress.slice(0, 12)} has no initial value snapshot — cooldowns will not arm for this deploy`);
       return;
     }
+    // Without any live economics we'd fabricate final=initial → a phantom
+    // 0.00% "flat" record that dedup-blocks the real numbers if the agent's
+    // own closePosition is mid-flight. Better to record nothing.
+    const hasLiveEconomics = [
+      tracked.last_live_total_value_true_usd,
+      tracked.last_live_total_value_usd,
+      tracked.last_live_pnl_true_usd,
+      tracked.last_live_pnl_usd,
+    ].some((v) => v != null);
+    if (!hasLiveEconomics) {
+      log("close_warn", `External close of ${positionAddress.slice(0, 12)} has no live economics snapshot — skipping performance backfill (cooldowns will not arm)`);
+      return;
+    }
     const feesUsd = Number(tracked.last_live_collected_fees_true_usd ?? 0) + Number(tracked.last_live_unclaimed_fees_true_usd ?? 0);
     let finalValueUsd = Number(tracked.last_live_total_value_true_usd ?? tracked.last_live_total_value_usd ?? 0);
     if (!(finalValueUsd > 0)) {
@@ -1419,6 +1432,20 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
         if (!silent) log("positions", `Computing PnL from RPC (${config.pnl.rpcUrl})...`);
         const rpcResult = await computePositions(walletAddress);
         if (useLocalWallet) {
+          // Persist live economics per tick — the external-close backfill
+          // reads these; without them it can only fabricate final=initial
+          // (a phantom 0.00% "flat" record).
+          for (const p of rpcResult.positions) {
+            updatePositionLiveSnapshot(p.position, {
+              last_live_pnl_usd: p.pnl_usd ?? null,
+              last_live_pnl_true_usd: p.pnl_true_usd ?? null,
+              last_live_pnl_pct: p.pnl_pct ?? null,
+              last_live_total_value_usd: p.total_value_usd ?? null,
+              last_live_total_value_true_usd: p.total_value_true_usd ?? null,
+              last_live_collected_fees_true_usd: p.collected_fees_true_usd ?? null,
+              last_live_unclaimed_fees_true_usd: p.unclaimed_fees_true_usd ?? null,
+            });
+          }
           const externallyClosed = syncOpenPositions(rpcResult.positions.map((p) => p.position));
           _positionsCache = rpcResult;
           _positionsCacheAt = Date.now();
