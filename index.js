@@ -962,7 +962,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
       ].filter(Boolean).join(", ");
       const okxUnavailable = !okxParts && pool.price_vs_ath_pct == null;
 
-      const botLine = pool.bot_traded ? `  bot_traded: true (${pool.bot_trade_count} trades)` : null;
+      const botLine = pool.bot_traded ? `  bot_flow_observed: ${pool.bot_trade_count} events (context only; not automatic confidence)` : null;
 
       const okxTags = [
         pool.smart_money_buy    ? "smart_money_buy"    : null,

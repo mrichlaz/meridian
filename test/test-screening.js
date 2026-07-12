@@ -36,7 +36,7 @@ async function main() {
     const poolAddr = top.pools[0].pool;
     console.log(`\n\nFetching detail for ${poolAddr}...`);
     try {
-      const detail = await getPoolDetail({ pool_address: poolAddr });
+      const detail = await getPoolDetail({ pool_address: poolAddr, timeframe: "24h" });
       console.log("Name:", detail.name);
       console.log("Pool address:", detail.pool_address);
       console.log("Fee/TVL ratio:", detail.fee_active_tvl_ratio);

@@ -42,7 +42,7 @@ function scoreCandidate(pool) {
   const La = Number(pool.active_tvl ?? pool.tvl ?? 0);
   if (!Number.isFinite(La) || La <= 0) return 0;
 
-  const tfMinutes = TIMEFRAME_MINUTES[config.screening.timeframe] || DEGEN_REFERENCE_MINUTES;
+  const tfMinutes = TIMEFRAME_MINUTES[pool.discovery_timeframe || config.screening.timeframe] || DEGEN_REFERENCE_MINUTES;
   const tfScale = DEGEN_REFERENCE_MINUTES / tfMinutes;
 
   const opp = config.opportunity || {};
@@ -400,24 +400,35 @@ async function fetchPoolDiscoveryDetail({ poolAddress, timeframe }) {
 
 async function applyVolatilityTimeframe(rawPools, sourceTimeframe) {
   if (!Array.isArray(rawPools) || rawPools.length === 0) return rawPools;
-  const volatilityTimeframe = getVolatilityTimeframe(sourceTimeframe);
 
-  // Tag primary-timeframe values on every pool before any overwrite
+  // Tag each pool using the window that actually produced it. Sparse merging
+  // can put 30m and 1h rows in the same batch, so a single batch timeframe is
+  // not sufficient provenance.
   for (const pool of rawPools) {
     if (!pool) continue;
-    pool[`volume_${sourceTimeframe}`] = pool.volume ?? null;
-    pool[`volatility_${sourceTimeframe}`] = pool.volatility ?? null;
+    const poolTimeframe = pool.discovery_timeframe || sourceTimeframe;
+    const volatilityTimeframe = getVolatilityTimeframe(poolTimeframe);
+    pool.discovery_timeframe = poolTimeframe;
+    pool[`volume_${poolTimeframe}`] = pool.volume ?? null;
+    pool[`volatility_${poolTimeframe}`] = pool.volatility ?? null;
     pool.volatility_timeframe = volatilityTimeframe;
   }
 
-  if (sourceTimeframe === volatilityTimeframe) return rawPools;
-
-  const uniquePoolAddresses = [...new Set(rawPools.map((pool) => pool?.pool_address).filter(Boolean))];
+  const requests = new Map();
+  for (const pool of rawPools) {
+    if (!pool?.pool_address) continue;
+    const poolTimeframe = pool.discovery_timeframe || sourceTimeframe;
+    const volatilityTimeframe = getVolatilityTimeframe(poolTimeframe);
+    if (poolTimeframe !== volatilityTimeframe) {
+      requests.set(`${pool.pool_address}:${volatilityTimeframe}`, { poolAddress: pool.pool_address, timeframe: volatilityTimeframe });
+    }
+  }
   const longResults = await Promise.allSettled(
-    uniquePoolAddresses.map((poolAddress) =>
-      fetchPoolDiscoveryDetail({ poolAddress, timeframe: volatilityTimeframe })
+    [...requests.values()].map(({ poolAddress, timeframe }) =>
+      fetchPoolDiscoveryDetail({ poolAddress, timeframe })
         .then((pool) => ({
           poolAddress,
+          timeframe,
           volatility: numeric(pool?.volatility),
           volume: numeric(pool?.volume),
           feeActiveTvlRatio: numeric(pool?.fee_active_tvl_ratio),
@@ -428,21 +439,23 @@ async function applyVolatilityTimeframe(rawPools, sourceTimeframe) {
   const metricsByPool = new Map();
   for (const result of longResults) {
     if (result.status !== "fulfilled") continue;
-    metricsByPool.set(result.value.poolAddress, result.value);
+    metricsByPool.set(`${result.value.poolAddress}:${result.value.timeframe}`, result.value);
   }
 
   for (const pool of rawPools) {
     if (!pool?.pool_address) continue;
-    const metrics = metricsByPool.get(pool.pool_address);
+    const poolTimeframe = pool.discovery_timeframe || sourceTimeframe;
+    const volatilityTimeframe = getVolatilityTimeframe(poolTimeframe);
+    const metrics = metricsByPool.get(`${pool.pool_address}:${volatilityTimeframe}`);
     if (!metrics) continue;
 
     pool[`volume_${volatilityTimeframe}`] = metrics.volume;
     pool[`volatility_${volatilityTimeframe}`] = metrics.volatility;
     pool[`fee_active_tvl_ratio_${volatilityTimeframe}`] = metrics.feeActiveTvlRatio;
 
-    // Use longer-timeframe values as the canonical ones for filtering
+    // Volatility requires a 30m+ observation, but canonical volume must remain
+    // in the discovery window because its threshold is scaled to that window.
     if (metrics.volatility != null) pool.volatility = metrics.volatility;
-    if (metrics.volume != null) pool.volume = metrics.volume;
 
     // Opportunistically backfill intermediate timeframes for persistence checks
     if (!pool.volume_30m && volatilityTimeframe === "30m" && metrics.volume != null) pool.volume_30m = metrics.volume;
@@ -598,8 +611,14 @@ async function refreshDiscordOnlyPools(pools, timeframe) {
  */
 export async function discoverPools({
   page_size = 50,
+  timeframe = null,
+  category = null,
 } = {}) {
-  const s = config.screening;
+  const s = {
+    ...config.screening,
+    ...(timeframe ? { timeframe } : {}),
+    ...(category ? { category } : {}),
+  };
   const tf = s.timeframe || "5m";
 
   // Meteora Pool Discovery does not support 15m. Skip unsupported windows in
@@ -794,7 +813,7 @@ export async function discoverPools({
     }
   }
 
-  rawPools = await applyVolatilityTimeframe(rawPools, s.timeframe);
+  rawPools = await applyVolatilityTimeframe(rawPools, usedTimeframe);
   await enrichDiscordSignalLaunchpads(rawPools);
 
   const persistTimeframe = getVolatilityTimeframe(usedTimeframe);
@@ -905,7 +924,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     const botTrackerPromise = buildBotTrackerCandidates({
       existingPools: meteoraDiscovery.pools || [],
       timeframe: meteoraDiscovery.discovery_timeframe || config.screening.timeframe || "30m",
-      limit: 20,
+      limit: Number(config.botTracker?.limit ?? 50),
     }).catch(() => ({ pools: [], filtered_examples: [] }));
     const [gmgnDiscovery, botTrackerDiscovery] = await Promise.all([gmgnPromise, botTrackerPromise]);
     const mergedPools = mergeCandidatePools({
@@ -923,7 +942,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       else if (g && b) acc.gmgn_bot += 1;
       return acc;
     }, { all3: 0, meteora_gmgn: 0, meteora_bot: 0, gmgn_bot: 0 });
-    log("screening", `Merge mode: meteora=${(meteoraDiscovery.pools || []).length}, gmgn=${(gmgnDiscovery.pools || []).length}, bot_tracker=${(botTrackerDiscovery.pools || []).length}, bot_tracker_in=${botTrackerDiscovery.filtered_examples?.length || 0} sql-pass, merged_unique=${mergedPools.length}, overlaps(all3=${overlapCounts.all3}, meteora+gmgn=${overlapCounts.meteora_gmgn}, meteora+bot=${overlapCounts.meteora_bot}, gmgn+bot=${overlapCounts.gmgn_bot})`);
+    log("screening", `Merge mode: meteora=${(meteoraDiscovery.pools || []).length}, gmgn=${(gmgnDiscovery.pools || []).length}, bot_tracker=${(botTrackerDiscovery.pools || []).length}, bot_tracker_in=${botTrackerDiscovery.stage_counts?.tracked || 0}, merged_unique=${mergedPools.length}, overlaps(all3=${overlapCounts.all3}, meteora+gmgn=${overlapCounts.meteora_gmgn}, meteora+bot=${overlapCounts.meteora_bot}, gmgn+bot=${overlapCounts.gmgn_bot})`);
     discovery = {
       total: (meteoraDiscovery.total || 0) + (gmgnDiscovery.total || 0) + (botTrackerDiscovery.pools?.length || 0),
       pools: mergedPools,
@@ -933,6 +952,13 @@ export async function getTopCandidates({ limit = 10 } = {}) {
         ...(Array.isArray(botTrackerDiscovery.filtered_examples) ? botTrackerDiscovery.filtered_examples : []),
       ],
       stage_counts: gmgnDiscovery.stage_counts || null,
+      source_counts: {
+        meteora: (meteoraDiscovery.pools || []).length,
+        gmgn: (gmgnDiscovery.pools || []).length,
+        bot_tracker_tracked: botTrackerDiscovery.stage_counts?.tracked || 0,
+        bot_tracker_resolved: (botTrackerDiscovery.pools || []).length,
+        merged_unique: mergedPools.length,
+      },
       discovery_timeframe: meteoraDiscovery.discovery_timeframe || config.screening.timeframe,
       source_mode: "merge",
     };
@@ -988,7 +1014,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   const minTvl = Number(config.screening.minTvl ?? 0);
   const maxTvl = config.screening.maxTvl == null ? null : Number(config.screening.maxTvl);
   const tf = config.screening.timeframe || "5m";
-  const eligible = pools
+  const eligibleRanked = pools
     .filter((p) => {
       const tvl = Number(p.tvl ?? p.active_tvl ?? 0);
       if (Number.isFinite(minTvl) && minTvl > 0 && tvl < minTvl) {
@@ -1046,8 +1072,23 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       }
       return true;
     })
-    .sort((a, b) => scoreCandidate(b) - scoreCandidate(a))
-    .slice(0, limit);
+    .sort((a, b) => scoreCandidate(b) - scoreCandidate(a));
+
+  // Multiple pools for the same token are alternatives, not independent
+  // opportunities. Keep the highest-ranked executable SOL pool so duplicate
+  // pools cannot consume the shortlist and give a false impression of breadth.
+  const eligible = [];
+  const seenBaseMints = new Set();
+  for (const pool of eligibleRanked) {
+    const mint = pool.base?.mint;
+    if (mint && seenBaseMints.has(mint)) {
+      pushFilteredReason(filteredOut, pool, "lower-ranked duplicate pool for the same base token");
+      continue;
+    }
+    if (mint) seenBaseMints.add(mint);
+    eligible.push(pool);
+    if (eligible.length >= limit) break;
+  }
 
   if (config.screening.avoidPvpSymbols && eligible.length > 0) {
     await enrichPvpRisk(eligible);
@@ -1306,6 +1347,9 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     reject_summary: rejectSummary,
     discovery_timeframe: discovery.discovery_timeframe || config.screening.timeframe,
     bot_tracked_injected: pools.some((p) => p.bot_traded),
+    stage_counts: discovery.stage_counts || null,
+    source_counts: discovery.source_counts || null,
+    all_filtered: filteredOut,
   };
 }
 
@@ -1343,6 +1387,7 @@ function condensePool(p) {
       mint: p.token_y?.address,
     },
     pool_type: p.pool_type,
+    discovery_timeframe: p.discovery_timeframe || config.screening.timeframe || "5m",
     bin_step: p.dlmm_params?.bin_step || null,
     fee_pct: p.fee_pct,
 
@@ -1582,9 +1627,11 @@ function mergePoolCandidate(existing, incoming, sourceName) {
     }
   }
 
-  // Prefer richer fee/TVL + activity fields when the incoming candidate has them.
+  // Pool Discovery is authoritative for executable pool economics. Later
+  // GMGN/bot sources enrich token flow and security, but must not overwrite a
+  // fee/volume value measured in another window while leaving old provenance.
   for (const field of ["fee_active_tvl_ratio", "volume_window", "volume", "tvl", "active_tvl", "volatility", "holders", "mcap", "launchpad"]) {
-    if (incoming?.[field] != null) merged[field] = incoming[field];
+    if (merged[field] == null && incoming?.[field] != null) merged[field] = incoming[field];
   }
 
   merged.sources = {
@@ -1596,7 +1643,7 @@ function mergePoolCandidate(existing, incoming, sourceName) {
   return merged;
 }
 
-function mergeCandidatePools({ meteoraPools = [], gmgnPools = [], botTrackerPools = [] } = {}) {
+export function mergeCandidatePools({ meteoraPools = [], gmgnPools = [], botTrackerPools = [] } = {}) {
   const byKey = new Map();
   const add = (pool, sourceName) => {
     if (!pool) return;
@@ -1632,6 +1679,7 @@ function mergeCandidatePools({ meteoraPools = [], gmgnPools = [], botTrackerPool
 export async function buildBotTrackerCandidates({ existingPools = [], timeframe, limit } = {}) {
   const injectedPools = [];
   const filteredExamples = [];
+  const stageCounts = { tracked: 0, resolved: 0 };
   try {
     const { getCryptoBotTokens } = await import("./crypto-signals.js");
     // The funnel is configured under config.botTracker. Each token costs a
@@ -1645,10 +1693,14 @@ export async function buildBotTrackerCandidates({ existingPools = [], timeframe,
       maxAgeMinutes: Number(botConfig.maxAgeMinutes ?? 1440),
       minLiquidityUsd: Number(botConfig.minLiquidityUsd ?? 5000),
       minVolume24h: Number(botConfig.minVolume24h ?? 50000),
+      // Do not spend one public Meteora lookup per stale/unenriched token.
+      // Missing liquidity/volume is absence of evidence, not a free pass.
+      requireDexData: true,
     });
     if (!botData.success || botData.tokens.length === 0) {
-      return { pools: injectedPools, filtered_examples: filteredExamples };
+      return { pools: injectedPools, filtered_examples: filteredExamples, stage_counts: stageCounts, error: botData.error || null };
     }
+    stageCounts.tracked = botData.tokens.length;
 
     const botMintSet = new Set(botData.tokens.map((t) => t.mint));
     const botTradeCount = new Map(botData.tokens.map((t) => [t.mint, t.trade_count]));
@@ -1717,7 +1769,7 @@ export async function buildBotTrackerCandidates({ existingPools = [], timeframe,
         }
       } catch {}
 
-      return condensePool({
+      const condensed = condensePool({
         pool_address: raw.address,
         name: raw.name,
         token_x: { ...raw.token_x, symbol: raw.token_x?.symbol || t.symbol, address: raw.token_x?.address || t.mint, market_cap: detailMcap ?? raw.token_x?.market_cap },
@@ -1745,14 +1797,20 @@ export async function buildBotTrackerCandidates({ existingPools = [], timeframe,
         open_positions: null,
         bot_traded: true,
         bot_trade_count: t.trade_count,
+        discovery_timeframe: timeframe,
       });
+      condensed.discovery_timeframe = timeframe;
+      return condensed;
     }));
 
     for (const r of results) {
       if (r.status === "fulfilled" && r.value) injectedPools.push(r.value);
     }
-  } catch {}
-  return { pools: injectedPools, filtered_examples: filteredExamples };
+    stageCounts.resolved = injectedPools.length;
+  } catch (error) {
+    return { pools: injectedPools, filtered_examples: filteredExamples, stage_counts: stageCounts, error: error.message };
+  }
+  return { pools: injectedPools, filtered_examples: filteredExamples, stage_counts: stageCounts, error: null };
 }
 
 // ─── Risk bucket + volume profile labels (1A, 1B) ───────────────────

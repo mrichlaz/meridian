@@ -13,6 +13,8 @@ import { onlineUpdate } from "../ml/trainer.js";
 import { actionForLift, computeNumericLift } from "../signal-weights.js";
 import { stageMlFeatures, getAndClearStagedMlFeatures } from "../signal-tracker.js";
 import { getEffectiveWindowThresholds } from "../screening-scales.js";
+import { mergeCandidatePools } from "../tools/screening.js";
+import { condenseGmgnCandidate } from "../tools/gmgn.js";
 import {
   assertSafeSingleSideCoverage,
   deployLearningMetadata,
@@ -52,6 +54,47 @@ test("fee/active-TVL baseline scales consistently across discovery timeframes", 
   assert.ok(thirtyMinute > fiveMinute);
   assert.ok(oneHour > thirtyMinute);
   assert.ok(Math.abs(thirtyMinute - 0.0544954395) < 1e-9);
+});
+
+test("three-source merge preserves authoritative pool metric provenance", () => {
+  const base = { symbol: "TEST", mint: "mint-test" };
+  const merged = mergeCandidatePools({
+    meteoraPools: [{ pool: "pool-test", base, discovery_timeframe: "1h", fee_active_tvl_ratio: 0.2, volume_window: 10_000 }],
+    gmgnPools: [{ pool: "pool-test", base, discovery_timeframe: "30m", fee_active_tvl_ratio: 0.01, volume_window: 500, gmgn_smart_wallets: 2 }],
+    botTrackerPools: [{ pool: "pool-test", base, discovery_timeframe: "5m", fee_active_tvl_ratio: 0.9, bot_traded: true, bot_trade_count: 4 }],
+  });
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].discovery_timeframe, "1h");
+  assert.equal(merged[0].fee_active_tvl_ratio, 0.2);
+  assert.equal(merged[0].volume_window, 10_000);
+  assert.equal(merged[0].gmgn_smart_wallets, 2);
+  assert.deepEqual(merged[0].sources, { meteora: true, gmgn: true, bot_tracker: true });
+});
+
+test("pure GMGN candidates carry complete timeframe-aligned screening fields", () => {
+  const candidate = condenseGmgnCandidate({
+    token: { symbol: "TEST", address: "mint-test", holder_count: 500, market_cap: 1_000_000, volume: 999 },
+    pool: { address: "pool-test", name: "TEST-SOL", pool_config: { bin_step: 100 }, token_x: {}, token_y: {} },
+    poolDetail: {
+      tvl: 50_000,
+      active_tvl: 40_000,
+      fee_active_tvl_ratio: 0.08,
+      volume: 12_000,
+      volatility: 2.5,
+      base_token_holders: 750,
+      token_x: { organic_score: 82 },
+    },
+    security: {},
+    info: {},
+    infoAnalysis: {},
+    holdersAnalysis: { kolHolding: 0, smartHolding: 0, smartAccumulating: 0 },
+    indicatorSignal: null,
+    discoveryTimeframe: "30m",
+  });
+  assert.equal(candidate.discovery_timeframe, "30m");
+  assert.equal(candidate.volume_window, 12_000);
+  assert.equal(candidate.organic_score, 82);
+  assert.equal(candidate.holders, 750);
 });
 
 test("one portfolio tail loss pauses new deployment", () => {

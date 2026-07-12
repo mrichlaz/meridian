@@ -324,21 +324,21 @@ async function fetchTopMeteoraDlmmPoolsForMint(mint, minTvl = 0, limit = 2) {
     .slice(0, limit);
 }
 
-async function fetchPoolDetailDirect(poolAddress) {
+async function fetchPoolDetailDirect(poolAddress, timeframe = "30m") {
   // Always use Meteora's public Pool Discovery API — the server-side endpoint
   // (api.agentmeridian.xyz) returns stale/fee=0 data for some pools.
   const discoveryBase = "https://pool-discovery-api.datapi.meteora.ag";
-  const url = `${discoveryBase}/pools?page_size=1&filter_by=${encodeURIComponent(`pool_address=${poolAddress}`)}&timeframe=5m`;
+  const url = `${discoveryBase}/pools?page_size=1&filter_by=${encodeURIComponent(`pool_address=${poolAddress}`)}&timeframe=${encodeURIComponent(timeframe)}`;
   const res = await fetch(url);
   if (!res.ok) return null;
   const data = await res.json();
   return (data?.data || [])[0] ?? null;
 }
 
-async function pickBestPool(pools) {
+async function pickBestPool(pools, timeframe) {
   const details = await Promise.all(
     pools.map((pool) =>
-      fetchPoolDetailDirect(pool.address || pool.pool_address).catch(() => null)
+      fetchPoolDetailDirect(pool.address || pool.pool_address, timeframe).catch(() => null)
     )
   );
   if (pools.length <= 1) return { pool: pools[0] ?? null, detail: details[0] ?? null };
@@ -354,7 +354,7 @@ async function pickBestPool(pools) {
   return { pool: scored[0].pool, detail: scored[0].detail };
 }
 
-function condenseGmgnCandidate({ token, pool, poolDetail, security, info, infoAnalysis, holdersAnalysis, indicatorSignal }) {
+export function condenseGmgnCandidate({ token, pool, poolDetail, security, info, infoAnalysis, holdersAnalysis, indicatorSignal, discoveryTimeframe = "30m" }) {
   const poolAddress = pool.address || pool.pool_address;
   // Stage 5 Pool Discovery provides active_tvl and fee_active_tvl_ratio
   // Stage 3 Meteora search provides tvl and bin_step/base_fee_pct via pool_config
@@ -363,6 +363,8 @@ function condenseGmgnCandidate({ token, pool, poolDetail, security, info, infoAn
   const feeActiveTvlRatio = Number.isFinite(Number(poolDetail?.fee_active_tvl_ratio))
     ? Number(Number(poolDetail.fee_active_tvl_ratio).toFixed(4))
     : null;
+  const volumeWindow = num(poolDetail?.volume ?? token.volume ?? 0);
+  const organicScore = num(poolDetail?.token_x?.organic_score);
   const kolCount = holdersAnalysis.kolHolding || num(token.renowned_count) || num(info?.wallet_tags_stat?.renowned_wallets);
   const smartCount = holdersAnalysis.smartHolding + holdersAnalysis.smartAccumulating || num(token.smart_degen_count) || num(info?.wallet_tags_stat?.smart_wallets);
   const gmgnScore =
@@ -381,7 +383,7 @@ function condenseGmgnCandidate({ token, pool, poolDetail, security, info, infoAn
     base: {
       symbol: token.symbol || info.symbol || pool.token_x?.symbol,
       mint: token.address || info.address || pool.token_x?.address,
-      organic: null,
+      organic: organicScore,
       warnings: 0,
     },
     quote: {
@@ -389,6 +391,7 @@ function condenseGmgnCandidate({ token, pool, poolDetail, security, info, infoAn
       mint: pool.token_y?.address || config.tokens.SOL,
     },
     pool_type: "dlmm",
+    discovery_timeframe: discoveryTimeframe,
     // Stage 3 Meteora search: pool_config.bin_step / base_fee_pct
     bin_step: pool.pool_config?.bin_step ?? poolDetail?.dlmm_params?.bin_step ?? null,
     fee_pct: pool.pool_config?.base_fee_pct ?? poolDetail?.fee_pct ?? null,
@@ -398,7 +401,9 @@ function condenseGmgnCandidate({ token, pool, poolDetail, security, info, infoAn
     fee_active_tvl_ratio: feeActiveTvlRatio,
     volatility: poolDetail?.volatility != null ? Number(Number(poolDetail.volatility).toFixed(2)) : null,
     // Stage 1 GMGN rank: token-level metrics
-    holders: num(token.holder_count || info.holder_count),
+    volume_window: volumeWindow,
+    organic_score: organicScore,
+    holders: num(poolDetail?.base_token_holders || poolDetail?.token_x?.holders || token.holder_count || info.holder_count),
     mcap: round(num(token.market_cap || (num(info.price) * num(info.circulating_supply)))),
     token_age_hours: token.open_timestamp ? Math.floor((Date.now() / 1000 - num(token.open_timestamp)) / 3600) : null,
     dev: info.dev?.creator_address || null,
@@ -520,6 +525,10 @@ async function checkBounceSetup(mint) {
 
 export async function discoverGmgnPools({ limit = 10 } = {}) {
   const g = config.gmgn;
+  // GMGN supplies token flow; use a 30m+ Meteora window for executable pool
+  // economics so volatility is usable and fee/volume share one provenance.
+  const configuredTimeframe = String(config.screening?.timeframe || "5m");
+  const detailTimeframe = configuredTimeframe === "5m" ? "30m" : configuredTimeframe;
   const filtered = [];
   const stageCounts = {};
 
@@ -536,6 +545,7 @@ export async function discoverGmgnPools({ limit = 10 } = {}) {
     },
   });
   const ranked = unwrapList(rankPayload, ["rank", "list", "data"]);
+  stageCounts.ranked = ranked.length;
   const s1 = ranked.filter((token) => {
     const check = passBasicRankFilter(token);
     if (!check.pass) {
@@ -631,13 +641,13 @@ export async function discoverGmgnPools({ limit = 10 } = {}) {
     if (pools.length >= limit) break;
     const mint = token.address;
     try {
-      const { pool, detail: poolDetail } = await pickBestPool(topPools);
+      const { pool, detail: poolDetail } = await pickBestPool(topPools, detailTimeframe);
       if (!pool) {
         filtered.push({ stage: 5, name: token.symbol || mint, reason: "pool selection failed" });
         continue;
       }
       const security = {};
-      const candidate = condenseGmgnCandidate({ token, pool, poolDetail, security, info, infoAnalysis: infoCheck, holdersAnalysis: holdersCheck, indicatorSignal });
+      const candidate = condenseGmgnCandidate({ token, pool, poolDetail, security, info, infoAnalysis: infoCheck, holdersAnalysis: holdersCheck, indicatorSignal, discoveryTimeframe: detailTimeframe });
       if (!candidate.pool || !candidate.base?.mint) {
         filtered.push({ stage: 5, name: token.symbol || mint, reason: "incomplete pool mapping" });
         continue;
@@ -656,6 +666,7 @@ export async function discoverGmgnPools({ limit = 10 } = {}) {
     stage_counts: stageCounts,
     pools,
     filtered_examples: filtered,
+    discovery_timeframe: detailTimeframe,
   };
 }
 
