@@ -1065,7 +1065,10 @@ export function listLessons({ role = null, pinned = null, tag = null, limit = 30
       outcome: l.outcome,
       pinned: !!l.pinned,
       role: l.role || "all",
-      created_at: l.created_at?.slice(0, 10),
+      // Full timestamp — a date-only slice made every lesson created today
+      // render as the same "Nh ago" age in /lessons (timeAgo parses the
+      // bare date as midnight UTC).
+      created_at: l.created_at,
     })),
   };
 }

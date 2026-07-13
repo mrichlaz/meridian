@@ -1343,6 +1343,20 @@ async function runSafetyChecks(name, args) {
             reason: `Insufficient SOL: have ${balance.sol} SOL, need ${minRequired} SOL (${amountY} deploy + ${gasReserve} gas reserve).`,
           };
         }
+        // Never trust the caller's USD estimate for the tracked cost basis —
+        // the SCREENER LLM fills initial_value_usd from its own idea of the
+        // SOL price (Jul 13: ~2.3× the live price), and every later PnL that
+        // falls back to this basis (external-close backfill, close paths with
+        // no live mark) inherits the error as a phantom -57% loss.
+        const solPrice = Number(balance.sol_price);
+        if (solPrice > 0) {
+          const trusted = Math.round(amountY * solPrice * 100) / 100;
+          const provided = Number(args.initial_value_usd);
+          if (Number.isFinite(provided) && Math.abs(provided - trusted) > trusted * 0.2) {
+            log("safety", `Corrected initial_value_usd $${provided} → $${trusted} (${amountY} SOL × $${solPrice})`);
+          }
+          args.initial_value_usd = trusted;
+        }
       }
 
       return { pass: true };
