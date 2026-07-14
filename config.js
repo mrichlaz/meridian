@@ -133,6 +133,12 @@ export const config = {
     minTokenAgeHours:   u.minTokenAgeHours   ?? null, // null = no minimum
     maxTokenAgeHours:   u.maxTokenAgeHours   ?? null, // null = no maximum
     athFilterPct:       u.athFilterPct       ?? null, // e.g. -20 = only deploy if price is >= 20% below ATH
+    // Momentum veto (uses OKX 1h price change captured during enrichment).
+    // A single-sided-below ladder gets run over both by post-pump retraces
+    // (entering right after a vertical move) and by active dumps (price falls
+    // straight into the ladder). 0 = off.
+    maxEntryPriceRunup1hPct: u.maxEntryPriceRunup1hPct ?? 30, // skip if 1h change > +30%
+    maxEntryPriceDrop1hPct:  u.maxEntryPriceDrop1hPct  ?? 15, // skip if 1h change < -15%
   },
 
   // ─── Bot-tracker merge funnel ───────────

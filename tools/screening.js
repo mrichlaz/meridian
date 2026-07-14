@@ -1151,6 +1151,8 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       if (price) {
         eligible[i].price_vs_ath_pct = price.price_vs_ath_pct;
         eligible[i].ath              = price.ath;
+        eligible[i].price_change_1h  = price.price_change_1h ?? null;
+        eligible[i].price_change_5m  = price.price_change_5m ?? null;
       }
       if (clusters?.length) {
         // Surface KOL presence and top cluster trend for LLM
@@ -1184,6 +1186,35 @@ export async function getTopCandidates({ limit = 10 } = {}) {
         return true;
       }));
       if (eligible.length < before) log("screening", `ATH filter removed ${before - eligible.length} pool(s)`);
+    }
+
+    // Momentum veto — a single-sided-below ladder loses both ways at the
+    // extremes: entering right after a vertical 1h pump means the retrace
+    // runs the ladder over (Jul 7-14: first-time stop-outs cost -$327, all
+    // on post-pump entries), and entering during an active dump converts
+    // the ladder immediately. Chop is what the book wants.
+    {
+      const maxRunup = Number(config.screening.maxEntryPriceRunup1hPct ?? 0);
+      const maxDrop = Number(config.screening.maxEntryPriceDrop1hPct ?? 0);
+      if (maxRunup > 0 || maxDrop > 0) {
+        const before = eligible.length;
+        eligible.splice(0, eligible.length, ...eligible.filter((p) => {
+          const chg = Number(p.price_change_1h);
+          if (!Number.isFinite(chg)) return true; // no data → don't filter
+          if (maxRunup > 0 && chg > maxRunup) {
+            log("screening", `Momentum veto: dropped ${p.name} — +${chg.toFixed(1)}% in 1h (post-pump, limit +${maxRunup}%)`);
+            pushFilteredReason(filteredOut, p, `1h run-up +${chg.toFixed(1)}% above pump limit +${maxRunup}%`);
+            return false;
+          }
+          if (maxDrop > 0 && chg < -maxDrop) {
+            log("screening", `Momentum veto: dropped ${p.name} — ${chg.toFixed(1)}% in 1h (active dump, limit -${maxDrop}%)`);
+            pushFilteredReason(filteredOut, p, `1h drop ${chg.toFixed(1)}% below dump limit -${maxDrop}%`);
+            return false;
+          }
+          return true;
+        }));
+        if (eligible.length < before) log("screening", `Momentum veto removed ${before - eligible.length} pool(s)`);
+      }
     }
 
     // Drop any pools whose creator is on the dev blocklist (caught via advanced-info)
@@ -1554,6 +1585,8 @@ function categorizeRejectReason(rawReason) {
     { re: /^PVP hard filter\b/, label: () => "PVP hard filter" },
     { re: /^wash trading flagged\b/, label: () => "wash trading flagged" },
     { re: /^\d+(?:\.\d+)?% of ATH above ATH limit\b/, label: () => `near ATH limit (above threshold ${s.athFilterPct != null ? `+${s.athFilterPct}%` : ""})`.replace(/\s+$/, "") },
+    { re: /^1h run-up .* above pump limit\b/, label: () => `1h run-up above maxEntryPriceRunup1hPct (+${s.maxEntryPriceRunup1hPct ?? "n/a"}%)` },
+    { re: /^1h drop .* below dump limit\b/, label: () => `1h drop below maxEntryPriceDrop1hPct (-${s.maxEntryPriceDrop1hPct ?? "n/a"}%)` },
     { re: /^bot holders .* above .*$/, label: () => `bot holders above maxBotHoldersPct (${s.maxBotHoldersPct ?? "n/a"}%)` },
     { re: /^volume persistence weak\b/, label: () => "volume persistence weak" },
     { re: /^indicator reject:/, label: () => "indicator rejected" },
@@ -1900,8 +1933,12 @@ export function deriveRejectionReasons(pool, config) {
   if (pool.sniper_pct != null && Number(pool.sniper_pct) > Number(s.maxBotHoldersPct ?? 100)) reasons.push("high_sniper");
   if (pool.bot_holders_pct != null && Number(pool.bot_holders_pct) > Number(s.maxBotHoldersPct ?? 100)) reasons.push("high_bot");
   if (pool.top10_pct != null && Number(pool.top10_pct) > Number(s.maxTop10Pct ?? 100)) reasons.push("high_top10");
-  if (Number(pool.token_age_hours) < Number(s.minTokenAgeHours ?? Infinity)) reasons.push("too_young");
+  // minTokenAgeHours is null by default (no minimum) — coalescing to
+  // Infinity tagged EVERY pool "too_young" whenever the key was unset.
+  if (s.minTokenAgeHours != null && Number(pool.token_age_hours) < Number(s.minTokenAgeHours)) reasons.push("too_young");
   if (s.athFilterPct != null && Number(pool.price_vs_ath_pct ?? 0) > 100 + Number(s.athFilterPct)) reasons.push("near_ath");
+  if (Number(s.maxEntryPriceRunup1hPct ?? 0) > 0 && Number(pool.price_change_1h ?? 0) > Number(s.maxEntryPriceRunup1hPct)) reasons.push("post_pump");
+  if (Number(s.maxEntryPriceDrop1hPct ?? 0) > 0 && Number(pool.price_change_1h ?? 0) < -Number(s.maxEntryPriceDrop1hPct)) reasons.push("active_dump");
   if (Number(pool.volatility ?? 0) <= 0) reasons.push("unusable_volatility");
   return reasons;
 }
