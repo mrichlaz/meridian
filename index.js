@@ -1859,8 +1859,20 @@ export function getDeterministicCloseRule(position, managementConfig) {
 
   // Rule 1 acts on the loss-side effective PnL (freshest mark — derived
   // preferred over the provider's lagging precomputed pct, see state.js).
+  // V-bottom guard: while a shallow breach is inside its confirmation window
+  // (pending_stop_loss_since is stamped by updatePnlAndCheckExits, which
+  // always runs before this in both the poller and the management cycle),
+  // Rule 1 defers rather than closing around the guard. Deep breaches
+  // (> 4pp past the stop) never defer.
+  const stopLossConfirmed = (pnl) => {
+    const confirmMin = Number(managementConfig.stopLossConfirmMinutes ?? 0);
+    if (confirmMin <= 0) return true;
+    if (pnl <= managementConfig.stopLossPct - 4) return true;
+    const since = tracked?.pending_stop_loss_since ? Date.parse(tracked.pending_stop_loss_since) : null;
+    return since != null && Date.now() - since >= confirmMin * 60000;
+  };
   const lossPnlPct = effectiveLossPnlPct(position);
-  if (!pnlSuspect && lossPnlPct != null && lossPnlPct <= managementConfig.stopLossPct) {
+  if (!pnlSuspect && lossPnlPct != null && lossPnlPct <= managementConfig.stopLossPct && stopLossConfirmed(lossPnlPct)) {
     return { action: "CLOSE", rule: 1, reason: "stop loss" };
   }
   // Suspicious-tick override for the stop loss only: a phantom loss shows in
@@ -1871,7 +1883,8 @@ export function getDeterministicCloseRule(position, managementConfig) {
     pnlSuspect &&
     position.pnl_pct != null &&
     position.pnl_pct_derived != null &&
-    Math.max(position.pnl_pct, position.pnl_pct_derived) <= managementConfig.stopLossPct
+    Math.max(position.pnl_pct, position.pnl_pct_derived) <= managementConfig.stopLossPct &&
+    stopLossConfirmed(Math.max(position.pnl_pct, position.pnl_pct_derived))
   ) {
     return { action: "CLOSE", rule: 1, reason: "stop loss (both PnL sources agree despite suspicious tick)" };
   }

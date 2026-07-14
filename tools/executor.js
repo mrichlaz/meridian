@@ -657,6 +657,7 @@ const toolMap = {
       maxDeploysPerToken24h: ["management", "maxDeploysPerToken24h"],
       minVolumeToRebalance: ["management", "minVolumeToRebalance"],
       stopLossPct: ["management", "stopLossPct"],
+      stopLossConfirmMinutes: ["management", "stopLossConfirmMinutes"],
       takeProfitPct: ["management", "takeProfitPct"],
       takeProfitFeePct: ["management", "takeProfitPct"],
       trailingTakeProfit: ["management", "trailingTakeProfit"],

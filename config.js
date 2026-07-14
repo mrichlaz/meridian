@@ -218,6 +218,9 @@ export const config = {
     maxDeploysPerToken24h: u.maxDeploysPerToken24h ?? 5,
     minVolumeToRebalance:  u.minVolumeToRebalance  ?? 1000,
     stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? -50,
+    // V-bottom guard: a shallow stop breach must hold this many minutes
+    // before closing (deep breaches — >4pp past the stop — close at once).
+    stopLossConfirmMinutes: u.stopLossConfirmMinutes ?? 3, // 0 = off
     takeProfitPct:         u.takeProfitPct         ?? u.takeProfitFeePct ?? 5,
     minFeePerTvl24h:       u.minFeePerTvl24h       ?? 7,
     minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 60, // minutes before low yield can trigger close
