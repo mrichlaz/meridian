@@ -100,6 +100,28 @@ export function isMaterialLosingDeploy(deploy) {
     || reason.includes("loss cut");
 }
 
+/**
+ * Count the trailing run of material-loss closes for a base mint across
+ * every pool that trades it (the deploy being recorded is already in
+ * entry.deploys, so the result is always >= 1 when called on a loss).
+ * Any non-material close (profit, flat, small dip) resets the streak.
+ */
+function countConsecutiveMintMaterialLosses(db, baseMint, currentEntry) {
+  const all = [];
+  for (const entry of Object.values(db)) {
+    if (!entry || typeof entry !== "object" || !Array.isArray(entry.deploys)) continue;
+    if (baseMint ? entry.base_mint !== baseMint : entry !== currentEntry) continue;
+    all.push(...entry.deploys);
+  }
+  all.sort((a, b) => (Date.parse(a.closed_at || 0) || 0) - (Date.parse(b.closed_at || 0) || 0));
+  let streak = 0;
+  for (let i = all.length - 1; i >= 0; i--) {
+    if (!isMaterialLosingDeploy(all[i])) break;
+    streak++;
+  }
+  return Math.max(1, streak);
+}
+
 export function hasRecentMaterialLoss(entry, { now = Date.now() } = {}) {
   return (entry?.deploys || []).some((deploy) => {
     if (!isMaterialLosingDeploy(deploy)) return false;
@@ -241,9 +263,16 @@ export function recordPoolDeploy(poolAddress, deployData) {
   // Lessons influence future ranking, but they must not be the only defense
   // against immediately re-entering the token that just produced a material
   // loss. Pause both this pool and every pool for the same base mint.
+  // The cooldown ESCALATES with consecutive material losses on the token
+  // (6h → 24h → 72h): a hot runner's headline metrics recover long before
+  // its pump/dump cycle does, and a flat 6h timer expires right into the
+  // next entry window (Jul 13-14: febu redeployed 2 minutes after cooldown
+  // expiry and took three stop-losses in 18h, -$61).
   if (isMaterialLosingDeploy(deploy)) {
-    const lossCooldownHours = 6;
-    const reason = `material losing close (${Number(deploy.pnl_pct).toFixed(2)}%)`;
+    const lossStreak = countConsecutiveMintMaterialLosses(db, entry.base_mint, entry);
+    const ladder = [6, 24, 72];
+    const lossCooldownHours = ladder[Math.min(Math.max(lossStreak, 1), ladder.length) - 1];
+    const reason = `material losing close (${Number(deploy.pnl_pct).toFixed(2)}%, loss streak ${lossStreak}x)`;
     const poolCooldownUntil = setPoolCooldown(entry, lossCooldownHours, reason);
     const mintCooldownUntil = setBaseMintCooldown(db, entry.base_mint, lossCooldownHours, reason);
     log("pool-memory", `Cooldown set for ${entry.name} until ${poolCooldownUntil} (${reason})`);

@@ -254,6 +254,7 @@ auto-swap on close (executor.js:610)
 
 **Cooldown logic** (`pool-memory.js`):
 - Single `low yield` close → 4h pool cooldown.
+- Material-loss close (pnl ≤ -2% or a stop-loss reason) → pool+mint cooldown that **escalates with consecutive material losses on the mint across all its pools**: 6h → 24h → 72h (`countConsecutiveMintMaterialLosses`, pool-memory.js). Any non-material close resets the streak. Rationale: a flat 6h timer expires right into the next entry window on a pump/dump runner (Jul 13-14: febu redeployed 2 min after cooldown expiry, three stop-losses in 18h). `scripts/loss-autopsy.mjs [--days N] [--export <wallet-export>]` classifies losing closes into archetypes (repeat_stop_loss/stop_loss/bleed_conversion/churn) and prints the lever for each — run it after a losing day.
 - `oorCooldownTriggerCount` (default 3) consecutive OOR closes → `oorCooldownHours` (default 12h) cooldown on **both pool and base mint**.
 - Optional repeat-deploy cooldown: `repeatDeployCooldownTriggerCount` (default 3) fee-generating deploys in a row → pool+token cooldown (configurable scope).
 - All checked by `isPoolOnCooldown` / `isBaseMintOnCooldown` in `getTopCandidates` and `deployPosition`.
