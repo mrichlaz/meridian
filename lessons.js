@@ -143,7 +143,7 @@ export async function recordPerformance(perf) {
   data.performance.push(entry);
 
   // Derive and store a lesson
-  const lesson = derivLesson(entry);
+  const lesson = derivePerformanceLesson(entry);
   if (lesson) {
     data.lessons.push(lesson);
     log("lessons", `New lesson: ${lesson.rule}`);
@@ -176,10 +176,11 @@ export async function recordPerformance(perf) {
     });
   }
 
-  // Auto-evolve every 5 closed positions (only runs if evolveEnabled)
-  if (data.performance.length % MIN_EVOLVE_POSITIONS === 0 && config.management.evolveEnabled !== false) {
+  const closeCount = data.performance.length;
 
-    // Threshold evolution — gated by thresholdEvolveEnabled
+  // Threshold and quiet-hours evolution retain the established five-close
+  // cadence. Darwin and ML use their existing configured cadences below.
+  if (closeCount % MIN_EVOLVE_POSITIONS === 0 && config.management.evolveEnabled !== false) {
     if (config.management.thresholdEvolveEnabled !== false) {
       const result = evolveThresholds(data.performance, config);
       if (result?.changes && Object.keys(result.changes).length > 0) {
@@ -190,8 +191,6 @@ export async function recordPerformance(perf) {
       log("evolve", "Threshold evolution skipped (thresholdEvolveEnabled=false)");
     }
 
-    // Quiet-hours evolution — re-derive the negative UTC deploy windows
-    // from recent closes (gated by policyQuietHoursAuto, default on)
     try {
       const qResult = evolveQuietHours(data.performance, config);
       if (qResult) {
@@ -201,42 +200,33 @@ export async function recordPerformance(perf) {
       log("evolve", `Quiet-hours evolution failed (non-fatal): ${err.message}`);
     }
 
-    // Darwinian signal weight recalculation — always runs
-    if (config.darwin?.enabled) {
-      const { recalculateWeights } = await import("./signal-weights.js");
-      const wResult = recalculateWeights(data.performance, config);
-      if (wResult.changes.length > 0) {
-        log("evolve", `Darwin: adjusted ${wResult.changes.length} signal weight(s)`);
-      }
-    }
+  }
 
-    // ML model training — always runs
-    if (config.ml?.enabled) {
-      try {
-        const { onModelTrained } = await import("./ml/emotions.js");
-        const { trainModel } = await import("./ml/trainer.js");
-        const { invalidateBlendLambda } = await import("./ml/inference.js");
-        const trainResult = await trainModel({ config: config.ml });
-        if (trainResult.trained) {
-          invalidateBlendLambda(); // pick up new predictiveness
-          onModelTrained(trainResult);
-          log("evolve", `ML: trained on ${trainResult.trainSize} samples, loss=${trainResult.finalLoss?.totalLoss?.toFixed(4) || "N/A"}`);
-        }
-      } catch (mlErr) {
-        log("ml_error", `ML training failed: ${mlErr.message}`);
-      }
+  const darwinEvery = Math.max(1, Math.round(Number(config.darwin?.recalcEvery) || MIN_EVOLVE_POSITIONS));
+  if (config.darwin?.enabled && closeCount % darwinEvery === 0) {
+    const { recalculateWeights } = await import("./signal-weights.js");
+    const wResult = recalculateWeights(data.performance, config);
+    if (wResult.changes.length > 0) {
+      log("evolve", `Darwin: adjusted ${wResult.changes.length} signal weight(s)`);
     }
   }
 
-  // Online ML update for every close (not just batch training)
-  if (config.ml?.enabled) {
+  const mlTrainEvery = Math.max(1, Math.round(Number(config.ml?.trainEvery) || MIN_EVOLVE_POSITIONS));
+  if (config.ml?.enabled && closeCount % mlTrainEvery === 0) {
     try {
-      const { onlineUpdate } = await import("./ml/trainer.js");
-      const updateResult = await onlineUpdate(entry);
-      if (updateResult.updated) {
-        log("ml", `Online update: gen ${updateResult.generation}`);
+      const { onModelTrained } = await import("./ml/emotions.js");
+      const { trainModel } = await import("./ml/trainer.js");
+      const { invalidateBlendLambda } = await import("./ml/inference.js");
+      const trainResult = await trainModel({ config: config.ml });
+      if (trainResult.trained) {
+        invalidateBlendLambda();
+        onModelTrained(trainResult);
+        const lossText = Number.isFinite(trainResult.finalLoss) ? trainResult.finalLoss.toFixed(4) : "N/A";
+        log("evolve", `ML: validated retrain on ${trainResult.sampleCount} samples, loss=${lossText}`);
       }
-    } catch {} // online update is best-effort
+    } catch (mlErr) {
+      log("ml_error", `ML training failed: ${mlErr.message}`);
+    }
   }
 
   // Update emotions on position close
@@ -423,7 +413,7 @@ export function clearPerformanceRejects() {
  * Derive a lesson from a closed position's performance.
  * Only generates a lesson if the outcome was clearly good or bad.
  */
-function derivLesson(perf) {
+export function derivePerformanceLesson(perf) {
   const tags = [];
   const feeYieldPct = perf.initial_value_usd > 0
     ? ((perf.fees_earned_usd || 0) / perf.initial_value_usd) * 100
@@ -470,6 +460,9 @@ function derivLesson(perf) {
       rule = `FAILED: ${context} → PnL ${perf.pnl_pct}%, range efficiency ${perf.range_efficiency}%. Reason: ${perf.close_reason}.`;
       tags.push("failed");
     }
+  } else if (outcome === "poor") {
+    rule = `UNDERPERFORMED: ${context} → PnL ${perf.pnl_pct}%, range efficiency ${perf.range_efficiency}%. Reason: ${perf.close_reason}.`;
+    tags.push("underperformed", perf.strategy);
   }
 
   if (!rule) return null;
@@ -996,17 +989,31 @@ export function addLesson(rule, tags = [], { pinned = false, role = null } = {})
   const safeRule = sanitizeLessonText(rule);
   if (!safeRule) return;
   const data = load();
+  const isConfigChange = tags.includes("self_tune") || tags.includes("config_change");
   const lesson = {
     id: Date.now(),
     rule: safeRule,
     tags,
     outcome: "manual",
-    sourceType: tags.includes("self_tune") || tags.includes("config_change") ? "config_change" : "manual",
+    sourceType: isConfigChange ? "config_change" : "manual",
     pinned: !!pinned,
     role: role || null,
     created_at: new Date().toISOString(),
   };
-  data.lessons.push(lesson);
+  if (isConfigChange) {
+    // Telegram +/- buttons can emit ten updates in seconds. Keep only the
+    // latest audit entry per setting instead of flooding the learning feed
+    // with intermediate values that are no longer active.
+    const changedKey = safeRule.match(/^\[SELF-TUNED\]\s+Changed\s+([^=,\s]+)/i)?.[1]?.toLowerCase();
+    const previousIndex = changedKey
+      ? data.lessons.findLastIndex((item) => item.sourceType === "config_change"
+        && item.rule?.match(/^\[SELF-TUNED\]\s+Changed\s+([^=,\s]+)/i)?.[1]?.toLowerCase() === changedKey)
+      : -1;
+    if (previousIndex >= 0) data.lessons[previousIndex] = lesson;
+    else data.lessons.push(lesson);
+  } else {
+    data.lessons.push(lesson);
+  }
   save(data);
   log("lessons", `Manual lesson added${pinned ? " [PINNED]" : ""}${role ? ` [${role}]` : ""}: ${safeRule}`);
   void pushHiveLesson(lesson);
@@ -1040,10 +1047,11 @@ export function unpinLesson(id) {
 /**
  * List lessons with optional filters — for agent browsing via Telegram.
  */
-export function listLessons({ role = null, pinned = null, tag = null, limit = 30 } = {}) {
+export function listLessons({ role = null, pinned = null, tag = null, limit = 30, includeConfigChanges = false } = {}) {
   const data = load();
   let lessons = [...data.lessons];
 
+  if (!includeConfigChanges && tag !== "config_change") lessons = lessons.filter((l) => l.sourceType !== "config_change");
   if (pinned !== null) lessons = lessons.filter((l) => !!l.pinned === pinned);
   if (role)            lessons = lessons.filter((l) => !l.role || l.role === role);
   if (tag)             lessons = lessons.filter((l) => l.tags?.includes(tag));
@@ -1126,7 +1134,8 @@ export function getLessonsForPrompt(opts = {}) {
   const { agentType = "GENERAL", maxLessons } = opts;
 
   const data = load();
-  if (data.lessons.length === 0) return null;
+  const learningLessons = data.lessons.filter((lesson) => lesson.sourceType !== "config_change");
+  if (learningLessons.length === 0) return null;
 
   // Smaller caps for automated cycles — they don't need the full lesson history
   const isAutoCycle = agentType === "SCREENER" || agentType === "MANAGER";
@@ -1139,7 +1148,7 @@ export function getLessonsForPrompt(opts = {}) {
 
   // ── Tier 1: Pinned ──────────────────────────────────────────────
   // Respect role even for pinned lessons — a pinned SCREENER lesson shouldn't pollute MANAGER
-  const pinned = data.lessons
+  const pinned = learningLessons
     .filter((l) => l.pinned && (!l.role || l.role === agentType || agentType === "GENERAL"))
     .sort(byPriority)
     .slice(0, PINNED_CAP);
@@ -1148,7 +1157,7 @@ export function getLessonsForPrompt(opts = {}) {
 
   // ── Tier 2: Role-matched ────────────────────────────────────────
   const roleTags = ROLE_TAGS[agentType] || [];
-  const roleMatched = data.lessons
+  const roleMatched = learningLessons
     .filter((l) => {
       if (usedIds.has(l.id)) return false;
       // Include if: lesson has no role restriction OR matches this role
@@ -1165,7 +1174,7 @@ export function getLessonsForPrompt(opts = {}) {
   // ── Tier 3: Recent fill ─────────────────────────────────────────
   const remainingBudget = RECENT_CAP - pinned.length - roleMatched.length;
   const recent = remainingBudget > 0
-    ? data.lessons
+    ? learningLessons
         .filter((l) => !usedIds.has(l.id))
         .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""))
         .slice(0, remainingBudget)
@@ -1228,15 +1237,43 @@ export function getPerformanceHistory({ hours = 24, limit = 50 } = {}) {
       closed_at: r.recorded_at,
     }));
 
-  const totalPnl = filtered.reduce((s, r) => s + (r.pnl_usd ?? 0), 0);
-  const wins = filtered.filter((r) => r.pnl_usd > 0).length;
+  const stats = summarizePerformanceRecords(filtered);
 
   return {
     hours,
     count: filtered.length,
-    total_pnl_usd: Math.round(totalPnl * 100) / 100,
-    win_rate_pct: filtered.length > 0 ? Math.round((wins / filtered.length) * 100) : null,
+    total_pnl_usd: stats.total_pnl_usd,
+    win_rate_pct: stats.win_rate_pct,
+    decisive_positions: stats.decisive_positions,
+    flat_positions: stats.flat_positions,
     positions: filtered,
+  };
+}
+
+export function summarizePerformanceRecords(records = []) {
+  const normalized = records.filter((record) => Number.isFinite(Number(record?.pnl_usd)));
+  const totalPnl = normalized.reduce((sum, record) => sum + Number(record.pnl_usd), 0);
+  const totalFees = normalized.reduce((sum, record) => sum + (Number(record.fees_earned_usd) || 0), 0);
+  const wins = normalized.filter((record) => Number(record.pnl_usd) > 0).length;
+  const losses = normalized.filter((record) => Number(record.pnl_usd) < 0).length;
+  const decisive = wins + losses;
+  const pnlPctValues = normalized.map((record) => Number(record.pnl_pct)).filter(Number.isFinite);
+  const rangeValues = normalized.map((record) => Number(record.range_efficiency)).filter(Number.isFinite);
+  return {
+    total_positions_closed: normalized.length,
+    decisive_positions: decisive,
+    flat_positions: normalized.length - decisive,
+    wins,
+    losses,
+    total_pnl_usd: Math.round(totalPnl * 100) / 100,
+    total_fees_usd: Math.round(totalFees * 100) / 100,
+    avg_pnl_pct: pnlPctValues.length
+      ? Math.round((pnlPctValues.reduce((sum, value) => sum + value, 0) / pnlPctValues.length) * 100) / 100
+      : null,
+    avg_range_efficiency_pct: rangeValues.length
+      ? Math.round((rangeValues.reduce((sum, value) => sum + value, 0) / rangeValues.length) * 10) / 10
+      : null,
+    win_rate_pct: decisive > 0 ? Math.round((wins / decisive) * 100) : null,
   };
 }
 
@@ -1249,17 +1286,8 @@ export function getPerformanceSummary() {
 
   if (p.length === 0) return null;
 
-  const totalPnl = p.reduce((s, x) => s + x.pnl_usd, 0);
-  const avgPnlPct = p.reduce((s, x) => s + x.pnl_pct, 0) / p.length;
-  const avgRangeEfficiency = p.reduce((s, x) => s + x.range_efficiency, 0) / p.length;
-  const wins = p.filter((x) => x.pnl_usd > 0).length;
-
   return {
-    total_positions_closed: p.length,
-    total_pnl_usd: Math.round(totalPnl * 100) / 100,
-    avg_pnl_pct: Math.round(avgPnlPct * 100) / 100,
-    avg_range_efficiency_pct: Math.round(avgRangeEfficiency * 10) / 10,
-    win_rate_pct: Math.round((wins / p.length) * 100),
+    ...summarizePerformanceRecords(p),
     total_lessons: data.lessons.length,
   };
 }

@@ -58,6 +58,7 @@ export function trackPosition({
   position,
   pool,
   pool_name,
+  base_mint = null,
   strategy,
   bin_range = {},
   amount_sol,
@@ -85,6 +86,7 @@ export function trackPosition({
     position,
     pool,
     pool_name,
+    base_mint,
     strategy,
     bin_range,
     amount_sol,
@@ -534,11 +536,36 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   if (changed) save(state);
 
   // ── Stop loss ──────────────────────────────────────────────────
+  // V-bottom guard: the stop fires within 30-90s of a breach — the moment of
+  // maximum panic. Jul 12-14: 3 of 4 febu stop-outs sold within an hour of a
+  // local bottom (+14-16% one hour later). A shallow breach must HOLD for
+  // stopLossConfirmMinutes before closing; a deep breach (> 4pp past the
+  // stop) closes immediately — rugs don't bounce, and every second past -12%
+  // with an -8% stop costs real money.
   if (lossPnlPct != null && mgmtConfig.stopLossPct != null && lossPnlPct <= mgmtConfig.stopLossPct) {
+    const confirmMinutes = Number(mgmtConfig.stopLossConfirmMinutes ?? 0);
+    const deepBreach = lossPnlPct <= mgmtConfig.stopLossPct - 4;
+    if (confirmMinutes > 0 && !deepBreach) {
+      if (!pos.pending_stop_loss_since) {
+        pos.pending_stop_loss_since = new Date().toISOString();
+        save(state);
+        log("state", `Position ${position_address} breached stop (${lossPnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}%) — confirming over ${confirmMinutes}m (V-bottom guard)`);
+        return null;
+      }
+      const heldMin = (Date.now() - new Date(pos.pending_stop_loss_since).getTime()) / 60000;
+      if (heldMin < confirmMinutes) return null;
+    }
+    const heldNote = pos.pending_stop_loss_since && !deepBreach ? `, held ${confirmMinutes}m` : "";
     return {
       action: "STOP_LOSS",
-      reason: `Stop loss: PnL ${lossPnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}%${pnl_pct_suspicious ? " (both PnL sources agree despite suspicious tick)" : ""}`,
+      reason: `Stop loss: PnL ${lossPnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}%${pnl_pct_suspicious ? " (both PnL sources agree despite suspicious tick)" : ""}${heldNote}`,
     };
+  } else if (pos.pending_stop_loss_since && lossPnlPct != null) {
+    // Recovered above the stop before the window ended — the V-bottom the
+    // guard exists for. (A null tick does NOT cancel: unknown ≠ recovered.)
+    log("state", `Position ${position_address} recovered above stop (${lossPnlPct.toFixed(2)}%) — pending stop-loss cancelled`);
+    pos.pending_stop_loss_since = null;
+    save(state);
   }
 
   // ── Trailing TP ────────────────────────────────────────────────

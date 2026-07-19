@@ -20,10 +20,11 @@ import { getWalletBalances } from "./tools/wallet.js";
 import { normalizeMint } from "./tools/wallet.js";
 import { getTopCandidates, chooseAdaptiveDeployProfile } from "./tools/screening.js";
 import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
-import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
+import { config, reloadScreeningThresholds, computeDeployAmount, scaleDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { checkCircuitBreaker, getMarketRegime, rankCandidates, sizeMultiplierForScore, scoreCandidate } from "./policy-engine.js";
-import { executeTool, registerCronRestarter } from "./tools/executor.js";
+import { applyLearnedRangePreference } from "./adaptive-preferences.js";
+import { authorizeRiskSizedDeploy, executeTool, registerCronRestarter } from "./tools/executor.js";
 import {
   startPolling,
   stopPolling,
@@ -168,7 +169,7 @@ function computeFinalDeployAmount({
   const profileMult = Number(profile?.sizeMultiplier) || 1;
   // sizeMultiplierForScore requires regime; if not supplied use NEUTRAL.
   const scoreMult = Number(sizeMultiplierForScore(Number(score) || 0, regime)) || 1;
-  const multiplied = base * profileMult * scoreMult;
+  const multiplied = scaleDeployAmount(base, profileMult, scoreMult) ?? base;
   const { final, clamped } = applyDeployAmountClamp(multiplied, { walletSol, allowBelowFloor });
   return { final, base, multiplied: Number(multiplied.toFixed(2)), profileMult, scoreMult, clamped };
 }
@@ -366,7 +367,23 @@ function scheduleTrailingDropConfirmation(positionAddress) {
         TRAILING_DROP_CONFIRM_TOLERANCE_PCT,
       );
       if (resolved?.confirmed) {
-        log("state", `[Trailing recheck] Confirmed trailing exit for ${positionAddress} — triggering management`);
+        // Close directly instead of spinning up a management cycle: the 15s
+        // recheck IS the confirmation, and the cycle's position refetch + LLM
+        // round-trip costs 30-60s — on a fast dump that latency turned a
+        // +1.1% trailing exit into a -0.76% close (Jimothy, Jul 19).
+        // executeTool runs the same safety checks, notifications, and
+        // auto-swap as the management path.
+        log("state", `[Trailing recheck] Confirmed trailing exit for ${positionAddress} — closing directly`);
+        try {
+          const result = await executeTool("close_position", { position_address: positionAddress, reason: resolved.reason });
+          if (result?.success || result?.already_closed) {
+            log("cron", `[Trailing recheck] Direct trailing close succeeded for ${positionAddress}`);
+            return;
+          }
+          log("cron_error", `[Trailing recheck] Direct trailing close failed for ${positionAddress}: ${result?.error || "unknown error"} — falling back to management cycle`);
+        } catch (error) {
+          log("cron_error", `[Trailing recheck] Direct trailing close error for ${positionAddress}: ${error.message} — falling back to management cycle`);
+        }
         runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Trailing recheck management failed: ${e.message}`));
       }
     } catch (error) {
@@ -731,6 +748,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
   let deployPoolName = null;
   let screeningBalance = preBalance;
   let screeningDeployAmount = 0;
+  let screeningRecommendedDeployAmount = 0;
   let passingForFallback = [];
   try {
     // Reuse pre-fetched balance — no extra RPC call needed
@@ -805,14 +823,14 @@ export async function runScreeningCycle({ silent = false } = {}) {
 
     if (passing.length === 0) {
       const combined = filteredOut.length > 0 ? filteredOut : earlyFilteredExamples;
-      const combinedExamples = combined.slice(0, 5)
+      const combinedExamples = combined.slice(0, 3)
         .map((entry) => `- ${entry.name}: ${entry.reason}`)
         .join("\n");
       // Per-reason kill counts across the whole funnel — the examples alone
       // can't show which filter is doing most of the rejecting.
       const rejectCounts = topCandidates?.reject_summary && Object.keys(topCandidates.reject_summary).length
         ? "Reject counts:\n" + Object.entries(topCandidates.reject_summary)
-            .sort((a, b) => b[1] - a[1]).slice(0, 6)
+            .sort((a, b) => b[1] - a[1]).slice(0, 4)
             .map(([reason, count]) => `- ${count}× ${reason}`).join("\n")
         : null;
       const funnelBlock = buildGmgnFunnelReport(gmgnStageCounts, gmgnAllFiltered, { fromStage: 2 });
@@ -820,7 +838,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
       screenReport = [
         "No candidates available.",
         funnelBlock,
-        rejectCounts,
+        !funnelBlock ? rejectCounts : null,
         !funnelBlock && combinedExamples ? `Filtered examples:\n${combinedExamples}` : null,
         !funnelBlock && !combinedExamples && !rejectCounts ? thresholds : null,
       ].filter(Boolean).join("\n\n");
@@ -837,6 +855,27 @@ export async function runScreeningCycle({ silent = false } = {}) {
         },
       });
       return screenReport;
+    }
+
+    const topSizingProfile = chooseAdaptiveDeployProfile(passing[0].pool, config.strategy);
+    const topSizingScore = passing[0]?.policy?.finalScore ?? passing[0]?.policy?.score ?? 66;
+    screeningRecommendedDeployAmount = computeFinalDeployAmount({
+      walletSol: currentBalance.sol,
+      baseDeployAmount: deployAmount,
+      profile: topSizingProfile,
+      score: topSizingScore,
+      regime,
+      allowBelowFloor: true,
+    }).final;
+    log(
+      "screening",
+      `Risk-sized deploy: base ${deployAmount} SOL → ${screeningRecommendedDeployAmount} SOL (${regime.regime}, score ${topSizingScore})`,
+    );
+    // The executor normally treats deployAmountSol as a manual floor. Stage
+    // the exact deterministic amount for every survivor so the LLM can obey
+    // risk sizing below that floor without receiving a general bypass flag.
+    for (const entry of passing) {
+      authorizeRiskSizedDeploy(entry.pool?.pool, screeningRecommendedDeployAmount);
     }
 
     if (passing.length <= 1 && gmgnStageCounts) {
@@ -945,7 +984,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
       ].filter(Boolean).join(", ");
       const okxUnavailable = !okxParts && pool.price_vs_ath_pct == null;
 
-      const botLine = pool.bot_traded ? `  bot_traded: true (${pool.bot_trade_count} trades)` : null;
+      const botLine = pool.bot_traded ? `  bot_flow_observed: ${pool.bot_trade_count} events (context only; not automatic confidence)` : null;
 
       const okxTags = [
         pool.smart_money_buy    ? "smart_money_buy"    : null,
@@ -962,7 +1001,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
       if (pool.gmgn) {
         block = [
           `POOL: ${pool.name} (${pool.pool})`,
-          `  policy: score=${policy?.score ?? "?"}/${policy?.minScore ?? "?"}, final=${policy?.finalScore ?? policy?.score ?? "?"}, regime=${policy?.regime ?? "NEUTRAL"}, fee/vol=${policy?.flow?.feeVolatilityRatio?.toFixed?.(4) ?? "?"}, volume_persist=${policy?.flow?.volumePersistenceRatio?.toFixed?.(2) ?? "?"}${policy?.ml ? `, ml=${policy.ml.mlScore} (${policy.mlVerdict})` : ""}${policy?.flow?.toxic ? `, toxic=${policy.flow.toxicReasons.join("; ")}` : ""}`,
+          `  policy: score=${policy?.score ?? "?"}/${policy?.minScore ?? "?"}, final=${policy?.finalScore ?? policy?.score ?? "?"}, regime=${policy?.regime ?? "NEUTRAL"}, learned_penalty=${policy?.learned?.scoreAdjustment ?? 0}, learned_bins=${policy?.learned?.recommendedBinsBelow ?? "?"}, fee/vol=${policy?.flow?.feeVolatilityRatio?.toFixed?.(4) ?? "?"}, volume_persist=${policy?.flow?.volumePersistenceRatio?.toFixed?.(2) ?? "?"}${policy?.ml ? `, ml=${policy.ml.mlScore} (${policy.mlVerdict})` : ""}${policy?.flow?.toxic ? `, toxic=${policy.flow.toxicReasons.join("; ")}` : ""}`,
           formatGmgnCandidateForPrompt(pool),
           pvpLine,
           `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
@@ -976,7 +1015,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
           : null;
         block = [
           `POOL: ${pool.name} (${pool.pool})`,
-          `  policy: score=${policy?.score ?? "?"}/${policy?.minScore ?? "?"}, final=${policy?.finalScore ?? policy?.score ?? "?"}, regime=${policy?.regime ?? "NEUTRAL"}, fee/vol=${policy?.flow?.feeVolatilityRatio?.toFixed?.(4) ?? "?"}, volume_persist=${policy?.flow?.volumePersistenceRatio?.toFixed?.(2) ?? "?"}${policy?.ml ? `, ml=${policy.ml.mlScore} (${policy.mlVerdict})` : ""}${policy?.flow?.toxic ? `, toxic=${policy.flow.toxicReasons.join("; ")}` : ""}`,
+          `  policy: score=${policy?.score ?? "?"}/${policy?.minScore ?? "?"}, final=${policy?.finalScore ?? policy?.score ?? "?"}, regime=${policy?.regime ?? "NEUTRAL"}, learned_penalty=${policy?.learned?.scoreAdjustment ?? 0}, learned_bins=${policy?.learned?.recommendedBinsBelow ?? "?"}, fee/vol=${policy?.flow?.feeVolatilityRatio?.toFixed?.(4) ?? "?"}, volume_persist=${policy?.flow?.volumePersistenceRatio?.toFixed?.(2) ?? "?"}${policy?.ml ? `, ml=${policy.ml.mlScore} (${policy.mlVerdict})` : ""}${policy?.flow?.toxic ? `, toxic=${policy.flow.toxicReasons.join("; ")}` : ""}`,
           `  metrics: bin_step=${pool.bin_step}, fee_pct=${pool.fee_pct}%, fee_tvl=${pool.fee_active_tvl_ratio}, vol=$${pool.volume_window}, tvl=$${pool.tvl ?? pool.active_tvl}, volatility_${pool.volatility_timeframe || "30m"}=${pool.volatility}, mcap=$${pool.mcap}, organic=${pool.organic_score}${pool.token_age_hours != null ? `, age=${pool.token_age_hours}h` : ""}`,
           `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
           gmgnPriceLine,
@@ -1059,7 +1098,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     const { content } = await agentLoop(`
 SCREENING CYCLE
 ${strategyBlock}
-Positions: ${prePositions.total_positions}/${config.risk.maxPositions} | SOL: ${currentBalance.sol.toFixed(3)} | Deploy: ${deployAmount} SOL
+Positions: ${prePositions.total_positions}/${config.risk.maxPositions} | SOL: ${currentBalance.sol.toFixed(3)} | Deploy: ${screeningRecommendedDeployAmount} SOL
 ${mlEmotionContext ? "\n" + mlEmotionContext + "\n" : ""}
 ${configBlock}
 
@@ -1080,7 +1119,8 @@ RULES — read carefully:
 STEPS:
 1. If passing.length >= 1, deploy the top survivor (the one with the highest fee/aTVL × organic × smart-wallet score). If you have a strong data-grounded reason to skip it, name the pool and cite the specific qualitative or comparative data point exactly as shown.
 2. Call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
-   bins_below = round(${config.strategy.minBinsBelow} + (candidate volatility/5)*(${config.strategy.maxBinsBelow - config.strategy.minBinsBelow})) clamped to [${config.strategy.minBinsBelow},${config.strategy.maxBinsBelow}].
+   Set amount_y=${screeningRecommendedDeployAmount} exactly. This is the deterministic risk-sized amount for the current score and regime.
+   Set bins_below to the candidate's exact policy learned_bins value. It is the volatility range adjusted by validated rolling outcomes and bounded to a 10% move. If learned_bins is unavailable, use round(${config.strategy.minBinsBelow} + (candidate volatility/5)*(${config.strategy.maxBinsBelow - config.strategy.minBinsBelow})) clamped to [${config.strategy.minBinsBelow},${config.strategy.maxBinsBelow}].
    pass deploy_position.volatility = the candidate volatility value.
    pass deploy_position.discovery_timeframe = the candidate discovery_timeframe value exactly as shown.
    For single-side SOL deploys, do not invent upside:
@@ -1225,9 +1265,10 @@ IMPORTANT:
                 profile: deployProfile,
                 score: passing[0]?.policy?.score || 66,
                 regime,
+                allowBelowFloor: true,
               });
               const initialValueUsd = currentBalance.sol_price ? deployAmountOverride * currentBalance.sol_price : null;
-              const binsBelow = Math.max(config.minSafeBinsBelow, Math.round(computeBinsBelow(topSurvivor.volatility) * (deployProfile.binsMultiplier || 1)));
+              const binsBelow = Math.max(config.minSafeBinsBelow, Math.round(computeBinsBelow(topSurvivor.volatility, topSurvivor, passing[0]?.policy) * (deployProfile.binsMultiplier || 1)));
               const fallbackResult = await executeTool("deploy_position", {
                 pool_address: topSurvivor.pool,
                 amount_y: deployAmountOverride,
@@ -1276,7 +1317,7 @@ IMPORTANT:
         metrics: {
           passing_candidates: passing.length,
           positions_open: prePositions.total_positions,
-          deploy_amount_sol: deployAmount,
+          deploy_amount_sol: screeningRecommendedDeployAmount || deployAmount,
         },
       });
     } else if (!deploySucceeded) {
@@ -1311,9 +1352,11 @@ IMPORTANT:
               baseDeployAmount: screeningDeployAmount,
               profile: deployProfile,
               score: passingForFallback[0]?.policy?.score || 66,
+              regime: getMarketRegime(),
+              allowBelowFloor: true,
             });
             const initialValueUsd = screeningBalance?.sol_price ? deployAmountOverride * screeningBalance.sol_price : null;
-            const binsBelow = Math.max(config.minSafeBinsBelow, Math.round(computeBinsBelow(topSurvivor.volatility) * (deployProfile.binsMultiplier || 1)));
+            const binsBelow = Math.max(config.minSafeBinsBelow, Math.round(computeBinsBelow(topSurvivor.volatility, topSurvivor, passingForFallback[0]?.policy) * (deployProfile.binsMultiplier || 1)));
             const fallbackResult = await executeTool("deploy_position", {
               pool_address: topSurvivor.pool,
               amount_y: deployAmountOverride,
@@ -1832,8 +1875,20 @@ export function getDeterministicCloseRule(position, managementConfig) {
 
   // Rule 1 acts on the loss-side effective PnL (freshest mark — derived
   // preferred over the provider's lagging precomputed pct, see state.js).
+  // V-bottom guard: while a shallow breach is inside its confirmation window
+  // (pending_stop_loss_since is stamped by updatePnlAndCheckExits, which
+  // always runs before this in both the poller and the management cycle),
+  // Rule 1 defers rather than closing around the guard. Deep breaches
+  // (> 4pp past the stop) never defer.
+  const stopLossConfirmed = (pnl) => {
+    const confirmMin = Number(managementConfig.stopLossConfirmMinutes ?? 0);
+    if (confirmMin <= 0) return true;
+    if (pnl <= managementConfig.stopLossPct - 4) return true;
+    const since = tracked?.pending_stop_loss_since ? Date.parse(tracked.pending_stop_loss_since) : null;
+    return since != null && Date.now() - since >= confirmMin * 60000;
+  };
   const lossPnlPct = effectiveLossPnlPct(position);
-  if (!pnlSuspect && lossPnlPct != null && lossPnlPct <= managementConfig.stopLossPct) {
+  if (!pnlSuspect && lossPnlPct != null && lossPnlPct <= managementConfig.stopLossPct && stopLossConfirmed(lossPnlPct)) {
     return { action: "CLOSE", rule: 1, reason: "stop loss" };
   }
   // Suspicious-tick override for the stop loss only: a phantom loss shows in
@@ -1844,7 +1899,8 @@ export function getDeterministicCloseRule(position, managementConfig) {
     pnlSuspect &&
     position.pnl_pct != null &&
     position.pnl_pct_derived != null &&
-    Math.max(position.pnl_pct, position.pnl_pct_derived) <= managementConfig.stopLossPct
+    Math.max(position.pnl_pct, position.pnl_pct_derived) <= managementConfig.stopLossPct &&
+    stopLossConfirmed(Math.max(position.pnl_pct, position.pnl_pct_derived))
   ) {
     return { action: "CLOSE", rule: 1, reason: "stop loss (both PnL sources agree despite suspicious tick)" };
   }
@@ -2575,7 +2631,7 @@ async function deployLatestCandidate(index, { manual = false } = {}) {
     score: manualPolicy.score,
   });
   const initialValueUsd = wallet.sol_price ? deployAmount * wallet.sol_price : null;
-  const binsBelow = Math.max(config.minSafeBinsBelow, Math.round(computeBinsBelow(candidate.volatility) * (deployProfile.binsMultiplier || 1)));
+  const binsBelow = Math.max(config.minSafeBinsBelow, Math.round(computeBinsBelow(candidate.volatility, candidate, { learned: manualPolicy.learned }) * (deployProfile.binsMultiplier || 1)));
   const result = await executeTool("deploy_position", {
     pool_address: candidate.pool,
     amount_y: deployAmount,
@@ -3546,18 +3602,34 @@ function buildGmgnFunnelReport(stageCounts, allFiltered = [], { fromStage = 1 } 
   if (!stageCounts) return null;
   const sc = stageCounts;
   const funnel = `GMGN funnel: ranked=${sc.ranked ?? "?"} → S1=${sc.s1 ?? "?"} → S2=${sc.s2 ?? "?"} → S3=${sc.s3 ?? "?"} → S4=${sc.s4 ?? "?"} → final=${sc.s5 ?? "?"}`;
+  // Entries without a numeric stage come from outside the GMGN funnel:
+  // discovery-level filters and the merge-layer hard filters in
+  // getTopCandidates (cooldowns, already-holding, persistence floor, …).
+  // Bucket them under their own label instead of the "s" + undefined key.
   const byStage = {};
   for (const f of allFiltered) {
-    if (f.stage < fromStage) continue;
-    const key = `s${f.stage}`;
+    const stage = Number.isFinite(Number(f.stage)) ? Number(f.stage) : null;
+    if (stage != null && stage < fromStage) continue;
+    const key = stage != null ? `s${stage}` : "hard";
     if (!byStage[key]) byStage[key] = [];
-    byStage[key].push(`${f.name}: ${f.reason}`);
+    byStage[key].push({ name: f.name, reason: f.reason });
   }
-  const stageLabels = { s2: "S2 info", s3: "S3 pool", s4: "S4 indicators", s5: "S5 pick" };
-  const details = Object.entries(byStage)
-    .map(([key, items]) => `${stageLabels[key] || key}:\n${items.map(r => `  • ${r}`).join("\n")}`)
-    .join("\n");
-  return details ? `${funnel}\n\n${details}` : funnel;
+
+  // Per-stage: pick at most 2 examples and summarise the rest as a count
+  const stageLabels = { s1: "S1", s2: "S2", s3: "S3", s4: "S4", s5: "S5", hard: "Hard filters" };
+  const stageOrder = Object.keys(byStage).sort((a, b) => (a === "hard") - (b === "hard") || a.localeCompare(b));
+  const lines = [];
+  for (const key of stageOrder) {
+    const items = byStage[key];
+    const label = stageLabels[key] || key;
+    if (items.length === 0) continue;
+    // Pick 2 representative examples
+    const top = items.slice(0, 2);
+    const summary = top.map(r => `${r.name}: ${r.reason}`);
+    if (items.length > 2) summary.push(`+${items.length - 2} more`);
+    lines.push(`${label}: ${summary.join(" | ")}`);
+  }
+  return lines.length > 0 ? `${funnel}\n${lines.join("\n")}` : funnel;
 }
 
 // Data-anchored verdict for a single candidate. Used to surface the real
@@ -3667,7 +3739,7 @@ function getLoneCandidateSkipReason({ pool, sw, n, ti } = {}) {
   return null;
 }
 
-function computeBinsBelow(volatility) {
+function computeBinsBelow(volatility, candidate = null, policy = null) {
   const parsedVolatility = Number(volatility);
   const lo = config.strategy.minBinsBelow;
   const hi = config.strategy.maxBinsBelow;
@@ -3678,9 +3750,13 @@ function computeBinsBelow(volatility) {
   // count, and the position can be re-tuned if volatility becomes available
   // on a later refresh.
   if (!Number.isFinite(parsedVolatility) || parsedVolatility <= 0) {
-    return Math.max(lo, Math.min(hi, defaultBins));
+    const fallback = Math.max(lo, Math.min(hi, defaultBins));
+    if (Number.isFinite(Number(policy?.learned?.recommendedBinsBelow))) return Number(policy.learned.recommendedBinsBelow);
+    return candidate ? applyLearnedRangePreference(fallback, candidate.bin_step, policy?.learned?.rangeTargetPct) : fallback;
   }
-  return Math.max(lo, Math.min(hi, Math.round(lo + (parsedVolatility / 5) * (hi - lo))));
+  const volatilityBins = Math.max(lo, Math.min(hi, Math.round(lo + (parsedVolatility / 5) * (hi - lo))));
+  if (Number.isFinite(Number(policy?.learned?.recommendedBinsBelow))) return Number(policy.learned.recommendedBinsBelow);
+  return candidate ? applyLearnedRangePreference(volatilityBins, candidate.bin_step, policy?.learned?.rangeTargetPct) : volatilityBins;
 }
 
 async function syncMlPersonalityFromConfig() {

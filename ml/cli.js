@@ -13,7 +13,7 @@
 
 import { log } from "../logger.js";
 import { LogisticRegression } from "./model.js";
-import { trainModel, onlineUpdate, loadTrainingData } from "./trainer.js";
+import { trainModel, loadTrainingData } from "./trainer.js";
 import { scoreCandidate, scoreAndRank, explainScore, getMlPromptContext, getBlendLambda, setBlendLambda } from "./inference.js";
 import { getCurrentState, resetEmotions, getEmotionTrend, getEmotionPrompt } from "./emotions.js";
 import { getActive, setActive, list as listPersonalities } from "./personalities.js";
@@ -66,6 +66,9 @@ export function mlStatus(config) {
       const lossValue = recentLoss.loss ?? recentLoss.total ?? recentLoss.totalLoss ?? null;
       lines.push(`  Last loss: ${lossValue != null ? Number(lossValue).toFixed(4) : "N/A"}`);
     }
+    lines.push(model.pnlCalibration
+      ? `  Return estimate: calibrated on ${model.pnlCalibration.samples} walk-forward observations`
+      : "  Return estimate: unavailable until next validated retrain");
   } else {
     lines.push("Model: not trained yet");
   }

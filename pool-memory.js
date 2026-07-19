@@ -8,6 +8,8 @@
 import fs from "fs";
 import { log } from "./logger.js";
 import { config } from "./config.js";
+
+const MATERIAL_LOSS_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 import { PATHS } from "./utils/paths.js";
 
 const POOL_MEMORY_FILE = PATHS.poolMemory;
@@ -87,6 +89,45 @@ function isFeeGeneratingDeploy(deploy) {
   const hasFees = (Number.isFinite(feesUsd) && feesUsd > 0) || (Number.isFinite(feesSol) && feesSol > 0);
   if (!hasFees) return false;
   return Number.isFinite(feeEarnedPct) && feeEarnedPct >= minFeeEarnedPct;
+}
+
+export function isMaterialLosingDeploy(deploy) {
+  const pnlPct = Number(deploy?.pnl_pct);
+  const reason = String(deploy?.close_reason || "").toLowerCase();
+  return (Number.isFinite(pnlPct) && pnlPct <= -2)
+    || reason.includes("stop loss")
+    || reason.includes("stop-loss")
+    || reason.includes("loss cut");
+}
+
+/**
+ * Count the trailing run of material-loss closes for a base mint across
+ * every pool that trades it (the deploy being recorded is already in
+ * entry.deploys, so the result is always >= 1 when called on a loss).
+ * Any non-material close (profit, flat, small dip) resets the streak.
+ */
+function countConsecutiveMintMaterialLosses(db, baseMint, currentEntry) {
+  const all = [];
+  for (const entry of Object.values(db)) {
+    if (!entry || typeof entry !== "object" || !Array.isArray(entry.deploys)) continue;
+    if (baseMint ? entry.base_mint !== baseMint : entry !== currentEntry) continue;
+    all.push(...entry.deploys);
+  }
+  all.sort((a, b) => (Date.parse(a.closed_at || 0) || 0) - (Date.parse(b.closed_at || 0) || 0));
+  let streak = 0;
+  for (let i = all.length - 1; i >= 0; i--) {
+    if (!isMaterialLosingDeploy(all[i])) break;
+    streak++;
+  }
+  return Math.max(1, streak);
+}
+
+export function hasRecentMaterialLoss(entry, { now = Date.now() } = {}) {
+  return (entry?.deploys || []).some((deploy) => {
+    if (!isMaterialLosingDeploy(deploy)) return false;
+    const closedAt = Date.parse(deploy.closed_at || deploy.deployed_at || "");
+    return Number.isFinite(closedAt) && now - closedAt >= 0 && now - closedAt < MATERIAL_LOSS_COOLDOWN_MS;
+  });
 }
 
 function setPoolCooldown(entry, hours, reason) {
@@ -197,7 +238,7 @@ export function recordPoolDeploy(poolAddress, deployData) {
   entry.deploys.push(deploy);
   entry.total_deploys = entry.deploys.length;
   entry.last_deployed_at = deploy.closed_at;
-  entry.last_outcome = (deploy.pnl_pct ?? 0) >= 0 ? "profit" : "loss";
+  entry.last_outcome = (deploy.pnl_pct ?? 0) > 0 ? "profit" : (deploy.pnl_pct ?? 0) < 0 ? "loss" : "flat";
 
   recomputeAggregates(entry);
 
@@ -217,6 +258,27 @@ export function recordPoolDeploy(poolAddress, deployData) {
     const cooldownHours = 4;
     const cooldownUntil = setPoolCooldown(entry, cooldownHours, "low yield");
     log("pool-memory", `Cooldown set for ${entry.name} until ${cooldownUntil} (low yield close)`);
+  }
+
+  // Lessons influence future ranking, but they must not be the only defense
+  // against immediately re-entering the token that just produced a material
+  // loss. Pause both this pool and every pool for the same base mint.
+  // The cooldown ESCALATES with consecutive material losses on the token
+  // (6h → 24h → 72h): a hot runner's headline metrics recover long before
+  // its pump/dump cycle does, and a flat 6h timer expires right into the
+  // next entry window (Jul 13-14: febu redeployed 2 minutes after cooldown
+  // expiry and took three stop-losses in 18h, -$61).
+  if (isMaterialLosingDeploy(deploy)) {
+    const lossStreak = countConsecutiveMintMaterialLosses(db, entry.base_mint, entry);
+    const ladder = [6, 24, 72];
+    const lossCooldownHours = ladder[Math.min(Math.max(lossStreak, 1), ladder.length) - 1];
+    const reason = `material losing close (${Number(deploy.pnl_pct).toFixed(2)}%, loss streak ${lossStreak}x)`;
+    const poolCooldownUntil = setPoolCooldown(entry, lossCooldownHours, reason);
+    const mintCooldownUntil = setBaseMintCooldown(db, entry.base_mint, lossCooldownHours, reason);
+    log("pool-memory", `Cooldown set for ${entry.name} until ${poolCooldownUntil} (${reason})`);
+    if (entry.base_mint && mintCooldownUntil) {
+      log("pool-memory", `Base mint cooldown set for ${entry.base_mint.slice(0, 8)} until ${mintCooldownUntil} (${reason})`);
+    }
   }
 
   const oorTriggerCount = config.management.oorCooldownTriggerCount ?? 3;
@@ -270,8 +332,9 @@ export function isPoolOnCooldown(poolAddress) {
   if (!poolAddress) return false;
   const db = load();
   const entry = db[poolAddress];
-  if (!entry?.cooldown_until) return false;
-  return new Date(entry.cooldown_until) > new Date();
+  if (!entry) return false;
+  return (entry.cooldown_until && new Date(entry.cooldown_until) > new Date())
+    || hasRecentMaterialLoss(entry);
 }
 
 export function isBaseMintOnCooldown(baseMint) {
@@ -279,9 +342,10 @@ export function isBaseMintOnCooldown(baseMint) {
   const db = load();
   const now = new Date();
   return Object.values(db).some((entry) =>
-    entry?.base_mint === baseMint &&
-    entry?.base_mint_cooldown_until &&
-    new Date(entry.base_mint_cooldown_until) > now
+    entry?.base_mint === baseMint && (
+      (entry?.base_mint_cooldown_until && new Date(entry.base_mint_cooldown_until) > now)
+      || hasRecentMaterialLoss(entry, { now: now.getTime() })
+    )
   );
 }
 

@@ -94,6 +94,10 @@ function loadTrainingData(opts = {}) {
   for (const entry of perfEntries) {
     if (typeof entry.pnl_pct !== "number") continue;
     if (!entry.signal_snapshot && typeof entry.fee_tvl_ratio !== "number") continue;
+    // Exact-zero closes are frequently external/backfilled positions without
+    // a reliable exit mark. Keep them in the audit history, but do not teach
+    // the classifier that missing/flat outcomes are losses.
+    if (Math.abs(entry.pnl_pct) < 0.01 && Math.abs(Number(entry.pnl_usd) || 0) < 0.01) continue;
 
     try {
       const features = extractFromPerformance(entry);
@@ -185,6 +189,35 @@ function computeValidationMetric(model, features, labels) {
     f1: Math.round(f1 * 100) / 100,
     directionAccuracy: Math.round(accuracy * 10000) / 100,
     lift: lift != null ? Math.round(lift * 100) / 100 : null,
+    probabilities: probs,
+  };
+}
+
+function fitPnlCalibration(probabilities, pnlValues) {
+  if (probabilities.length < 30 || probabilities.length !== pnlValues.length) return null;
+  const meanProb = probabilities.reduce((sum, value) => sum + value, 0) / probabilities.length;
+  const meanPnl = pnlValues.reduce((sum, value) => sum + value, 0) / pnlValues.length;
+  let covariance = 0;
+  let variance = 0;
+  for (let i = 0; i < probabilities.length; i++) {
+    const probDelta = probabilities[i] - meanProb;
+    covariance += probDelta * (pnlValues[i] - meanPnl);
+    variance += probDelta * probDelta;
+  }
+  if (variance < 1e-9) return null;
+  const slope = covariance / variance;
+  const intercept = meanPnl - slope * meanProb;
+  if (!Number.isFinite(slope) || !Number.isFinite(intercept)) return null;
+
+  const sortedPnl = [...pnlValues].sort((a, b) => a - b);
+  const percentile = (q) => sortedPnl[Math.min(sortedPnl.length - 1, Math.floor((sortedPnl.length - 1) * q))];
+  return {
+    intercept,
+    slope,
+    min: percentile(0.05),
+    max: percentile(0.95),
+    samples: probabilities.length,
+    source: "walk_forward_oos",
   };
 }
 
@@ -211,9 +244,10 @@ export async function trainModel({ config: mlConfig, force = false } = {}) {
     allSamples = allSamples.slice(-windowRecords); // chronological — keep most recent
     log("ml_trainer", `Recency window: training on last ${allSamples.length} of ${totalLabeled} labeled closes`);
   }
-  if (allSamples.length < cfg.minSamples) {
-    log("ml_trainer", `Insufficient data: ${allSamples.length} samples, need ${cfg.minSamples}`);
-    return { trained: false, reason: "insufficient_data", sampleCount: allSamples.length };
+  const effectiveMinSamples = Math.max(Number(cfg.minSamples) || 0, FEATURE_COUNT * 3);
+  if (allSamples.length < effectiveMinSamples) {
+    log("ml_trainer", `Insufficient data: ${allSamples.length} samples, need ${effectiveMinSamples} for ${FEATURE_COUNT} features`);
+    return { trained: false, reason: "insufficient_data", sampleCount: allSamples.length, requiredSamples: effectiveMinSamples };
   }
 
   // Walk-forward folds over chronological samples
@@ -224,6 +258,8 @@ export async function trainModel({ config: mlConfig, force = false } = {}) {
   let valTotal = 0;
   let valCorrect = 0;
   let valPositives = 0;
+  const oosProbabilities = [];
+  const oosPnlValues = [];
 
   for (let fold = 1; fold < k; fold++) {
     const valStart = fold * foldSize;
@@ -253,7 +289,10 @@ export async function trainModel({ config: mlConfig, force = false } = {}) {
       sampleWeights: trainWeights,
     });
 
-    const metric = computeValidationMetric(model, valFeatures, valLabels);
+    const metricWithPredictions = computeValidationMetric(model, valFeatures, valLabels);
+    const { probabilities, ...metric } = metricWithPredictions;
+    oosProbabilities.push(...probabilities);
+    oosPnlValues.push(...valSlice.map((sample) => sample.pnl_pct));
     foldMetrics.push(metric);
     valTotal += valLabels.length;
     valCorrect += Math.round((metric.accuracy / 100) * valLabels.length);
@@ -306,6 +345,9 @@ export async function trainModel({ config: mlConfig, force = false } = {}) {
   // (classification accuracy vs base rate) is kept as a legacy diagnostic.
   finalModel.cvEdge = avgMetric.edge;
   finalModel.cvLift = avgMetric.lift;
+  finalModel.pnlCalibration = Number(avgMetric.lift) > 0
+    ? fitPnlCalibration(oosProbabilities, oosPnlValues)
+    : null;
 
   // Save final model
   finalModel.save();
@@ -336,30 +378,13 @@ export async function trainModel({ config: mlConfig, force = false } = {}) {
   };
 }
 
-// ─── Online update (single sample after each close) ─────────────
+// ─── Legacy online-update compatibility shim ───────────────────
 
-export async function onlineUpdate(perf) {
-  try {
-    const features = extractFromPerformance(perf);
-    const model = LogisticRegression.load();
-    if (!model) return { updated: false, reason: "no_model" };
-
-    // Same expectancy labeling/weighting as batch training, so online steps
-    // don't pull the model back toward hit-rate optimization.
-    const pnl = perf.pnl_pct || 0;
-    const label = pnl > DEFAULT_CONFIG.labelHurdlePct ? 1 : 0;
-    const weight = Math.min(
-      DEFAULT_CONFIG.weightCap,
-      Math.max(DEFAULT_CONFIG.weightFloor, Math.abs(pnl) / DEFAULT_CONFIG.weightScalePct),
-    );
-    model.trainBatch([features], new Float64Array([label]), 0.005, 0.0001, 1.0, new Float64Array([weight]));
-    model.save();
-
-    return { updated: true, generation: model.generation };
-  } catch (err) {
-    log("ml_trainer", `Online update failed: ${err.message}`);
-    return { updated: false, error: err.message };
-  }
+export async function onlineUpdate(_perf) {
+  // Production models are promoted only after chronological validation in
+  // trainModel(). A one-sample mutation would make the persisted validation
+  // metrics and the blend weight stale immediately.
+  return { updated: false, reason: "batch_validation_required" };
 }
 
 // ─── Blend lambda ───────────────────────────────────────────────
@@ -407,6 +432,7 @@ function saveCheckpoint(model, metadata) {
     bias: model.bias,
     generation: model.generation,
     totalSamples: model.totalSamples,
+    pnlCalibration: model.pnlCalibration,
     metadata,
   };
 

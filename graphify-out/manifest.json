@@ -1,0 +1,697 @@
+{
+  "/Users/ichlas/No-cloud/meridian/lessons.json": {
+    "mtime": 1780990063.4400816,
+    "ast_hash": "bc813c4d673da562969f45081f800450",
+    "semantic_hash": "bc813c4d673da562969f45081f800450"
+  },
+  "/Users/ichlas/No-cloud/meridian/tmp-screening-timing.mjs": {
+    "mtime": 1780933447.286776,
+    "ast_hash": "c197f4124092c4e07731210ee187f546",
+    "semantic_hash": "c197f4124092c4e07731210ee187f546"
+  },
+  "/Users/ichlas/No-cloud/meridian/telegram.js": {
+    "mtime": 1783798691.029779,
+    "ast_hash": "99771206216b64b95fd7b8cf086da3df",
+    "semantic_hash": "99771206216b64b95fd7b8cf086da3df"
+  },
+  "/Users/ichlas/No-cloud/meridian/user-config.json": {
+    "mtime": 1783216269.457738,
+    "ast_hash": "4197cff37174a0f5bea38207d6d6b526",
+    "semantic_hash": "4197cff37174a0f5bea38207d6d6b526"
+  },
+  "/Users/ichlas/No-cloud/meridian/test-telegram-commands.js": {
+    "mtime": 1780922049.6084692,
+    "ast_hash": "8df3210e0bfd1f963c96ebd0ddcd088f",
+    "semantic_hash": "8df3210e0bfd1f963c96ebd0ddcd088f"
+  },
+  "/Users/ichlas/No-cloud/meridian/repo-root.js": {
+    "mtime": 1783010105.8295724,
+    "ast_hash": "4c4898817ebdecced7c8a75506fabcdb",
+    "semantic_hash": "4c4898817ebdecced7c8a75506fabcdb"
+  },
+  "/Users/ichlas/No-cloud/meridian/state.json": {
+    "mtime": 1783011239.9668021,
+    "ast_hash": "c83e65c4017beb99eda147378eda812e",
+    "semantic_hash": "c83e65c4017beb99eda147378eda812e"
+  },
+  "/Users/ichlas/No-cloud/meridian/signal-weights.js": {
+    "mtime": 1783015214.9410312,
+    "ast_hash": "6f2f3a6934bb245a68d807662cb3b433",
+    "semantic_hash": "6f2f3a6934bb245a68d807662cb3b433"
+  },
+  "/Users/ichlas/No-cloud/meridian/hivemind.js": {
+    "mtime": 1783011157.7090726,
+    "ast_hash": "a9b3578c84c99a658067a95bac41fa00",
+    "semantic_hash": "a9b3578c84c99a658067a95bac41fa00"
+  },
+  "/Users/ichlas/No-cloud/meridian/logger.js": {
+    "mtime": 1783011862.3932664,
+    "ast_hash": "a438ecf62686b4994454de9998c68d5f",
+    "semantic_hash": "a438ecf62686b4994454de9998c68d5f"
+  },
+  "/Users/ichlas/No-cloud/meridian/pool-memory.js": {
+    "mtime": 1783794869.7302072,
+    "ast_hash": "6598ca1475116de9393dea8886898109",
+    "semantic_hash": "6598ca1475116de9393dea8886898109"
+  },
+  "/Users/ichlas/No-cloud/meridian/gmgn-config.example.json": {
+    "mtime": 1783010105.8278213,
+    "ast_hash": "22b45c726dd8668bb286d6a719abaa27",
+    "semantic_hash": "22b45c726dd8668bb286d6a719abaa27"
+  },
+  "/Users/ichlas/No-cloud/meridian/signal-weights.json": {
+    "mtime": 1780731520.132486,
+    "ast_hash": "3b07264975b4623aa6d6d2cfc3e785ca",
+    "semantic_hash": "3b07264975b4623aa6d6d2cfc3e785ca"
+  },
+  "/Users/ichlas/No-cloud/meridian/signal-tracker.js": {
+    "mtime": 1780959231.8060484,
+    "ast_hash": "fe62e33880b2650a8d0901406ca4f25e",
+    "semantic_hash": "fe62e33880b2650a8d0901406ca4f25e"
+  },
+  "/Users/ichlas/No-cloud/meridian/decision-log.json": {
+    "mtime": 1783250515.7072542,
+    "ast_hash": "14ddef1bcf5ba0d9d0dbf56789a1a0ce",
+    "semantic_hash": "14ddef1bcf5ba0d9d0dbf56789a1a0ce"
+  },
+  "/Users/ichlas/No-cloud/meridian/strategy-library.js": {
+    "mtime": 1783010105.83049,
+    "ast_hash": "c2b5fb79c82d2be0331bab6bf8721e9a",
+    "semantic_hash": "c2b5fb79c82d2be0331bab6bf8721e9a"
+  },
+  "/Users/ichlas/No-cloud/meridian/smart-wallets.js": {
+    "mtime": 1783015214.8530989,
+    "ast_hash": "44f9323349c9497294b618b045693d55",
+    "semantic_hash": "44f9323349c9497294b618b045693d55"
+  },
+  "/Users/ichlas/No-cloud/meridian/test_notify_deploy.mjs": {
+    "mtime": 1783036820.8752716,
+    "ast_hash": "713e9db3b2e4e1fa0290f4e45aeaa3b3",
+    "semantic_hash": "713e9db3b2e4e1fa0290f4e45aeaa3b3"
+  },
+  "/Users/ichlas/No-cloud/meridian/test-search-pipeline.mjs": {
+    "mtime": 1783596681.797601,
+    "ast_hash": "7e50262f5ed2b40e29d64636ed57edce",
+    "semantic_hash": "7e50262f5ed2b40e29d64636ed57edce"
+  },
+  "/Users/ichlas/No-cloud/meridian/policy-engine.js": {
+    "mtime": 1783735985.0722265,
+    "ast_hash": "d0fcf568e117c87e879ea3c84f7fcab4",
+    "semantic_hash": "d0fcf568e117c87e879ea3c84f7fcab4"
+  },
+  "/Users/ichlas/No-cloud/meridian/index.js": {
+    "mtime": 1783800097.6271904,
+    "ast_hash": "c9072be2f847026a42a0fec2b3a93656",
+    "semantic_hash": "c9072be2f847026a42a0fec2b3a93656"
+  },
+  "/Users/ichlas/No-cloud/meridian/config.js": {
+    "mtime": 1783741519.3313107,
+    "ast_hash": "7dad25def99f6546c67a063d8cfdca27",
+    "semantic_hash": "7dad25def99f6546c67a063d8cfdca27"
+  },
+  "/Users/ichlas/No-cloud/meridian/lessons.js": {
+    "mtime": 1783800317.6612694,
+    "ast_hash": "8057ce4f2a3f522bdde54886b4173a0a",
+    "semantic_hash": "8057ce4f2a3f522bdde54886b4173a0a"
+  },
+  "/Users/ichlas/No-cloud/meridian/tmp-merge-inspect-relaxed.mjs": {
+    "mtime": 1782113314.5524817,
+    "ast_hash": "ad7193a6af6f222d6edcffa9d4c40200",
+    "semantic_hash": "ad7193a6af6f222d6edcffa9d4c40200"
+  },
+  "/Users/ichlas/No-cloud/meridian/screening-scales.js": {
+    "mtime": 1783736551.3798027,
+    "ast_hash": "ec19dab0b801c66665d6bad0638f8907",
+    "semantic_hash": "ec19dab0b801c66665d6bad0638f8907"
+  },
+  "/Users/ichlas/No-cloud/meridian/smart-wallets.json": {
+    "mtime": 1780734075.6067872,
+    "ast_hash": "8a80554c91d9fca8acb82f023de02f11",
+    "semantic_hash": "8a80554c91d9fca8acb82f023de02f11"
+  },
+  "/Users/ichlas/No-cloud/meridian/briefing.js": {
+    "mtime": 1783010105.8270764,
+    "ast_hash": "6288d0f2e14568acffd7c420aa20ad4b",
+    "semantic_hash": "6288d0f2e14568acffd7c420aa20ad4b"
+  },
+  "/Users/ichlas/No-cloud/meridian/docker-entrypoint.sh": {
+    "mtime": 1780735260.5307765,
+    "ast_hash": "7b31a17134d5440721289e77dcaa3d06",
+    "semantic_hash": "7b31a17134d5440721289e77dcaa3d06"
+  },
+  "/Users/ichlas/No-cloud/meridian/package.json": {
+    "mtime": 1783587372.4126902,
+    "ast_hash": "cf404d6d5f0e5d230969557881215f52",
+    "semantic_hash": "cf404d6d5f0e5d230969557881215f52"
+  },
+  "/Users/ichlas/No-cloud/meridian/prompt.js": {
+    "mtime": 1783218337.499107,
+    "ast_hash": "8e0b213eefa6506991eaf8409d6c46b2",
+    "semantic_hash": "8e0b213eefa6506991eaf8409d6c46b2"
+  },
+  "/Users/ichlas/No-cloud/meridian/deployer-blacklist.json": {
+    "mtime": 1780729978.258151,
+    "ast_hash": "69c735b57df6c6a0236639700a8248f2",
+    "semantic_hash": "69c735b57df6c6a0236639700a8248f2"
+  },
+  "/Users/ichlas/No-cloud/meridian/state.js": {
+    "mtime": 1783800308.9814653,
+    "ast_hash": "de316f3ae2e5862be88059ab15575b0c",
+    "semantic_hash": "de316f3ae2e5862be88059ab15575b0c"
+  },
+  "/Users/ichlas/No-cloud/meridian/strategy-library.json": {
+    "mtime": 1780730582.1090279,
+    "ast_hash": "51a4675712e544f61db56697fc9ed6ad",
+    "semantic_hash": "51a4675712e544f61db56697fc9ed6ad"
+  },
+  "/Users/ichlas/No-cloud/meridian/user-config.example.json": {
+    "mtime": 1783010105.8319242,
+    "ast_hash": "a9b7425ea43431429c6a1c1c880ae6f5",
+    "semantic_hash": "a9b7425ea43431429c6a1c1c880ae6f5"
+  },
+  "/Users/ichlas/No-cloud/meridian/cli.js": {
+    "mtime": 1783794470.748073,
+    "ast_hash": "3c3d0641273ab547bc1d8dc96603fb87",
+    "semantic_hash": "3c3d0641273ab547bc1d8dc96603fb87"
+  },
+  "/Users/ichlas/No-cloud/meridian/setup.js": {
+    "mtime": 1783015214.9191544,
+    "ast_hash": "04fb1b1ff6a061618fb81bbf4822065e",
+    "semantic_hash": "04fb1b1ff6a061618fb81bbf4822065e"
+  },
+  "/Users/ichlas/No-cloud/meridian/dev-blocklist.js": {
+    "mtime": 1783010105.8275075,
+    "ast_hash": "107b5c8939a3b66e68c74447e3a019ff",
+    "semantic_hash": "107b5c8939a3b66e68c74447e3a019ff"
+  },
+  "/Users/ichlas/No-cloud/meridian/envcrypt.js": {
+    "mtime": 1783218609.7106867,
+    "ast_hash": "5e768e4477c202ddd3bb03942620df63",
+    "semantic_hash": "5e768e4477c202ddd3bb03942620df63"
+  },
+  "/Users/ichlas/No-cloud/meridian/decision-log.js": {
+    "mtime": 1783010105.8273823,
+    "ast_hash": "89ec62f082e301e9a2422ca6efe8ab41",
+    "semantic_hash": "89ec62f082e301e9a2422ca6efe8ab41"
+  },
+  "/Users/ichlas/No-cloud/meridian/screening-snapshot.js": {
+    "mtime": 1780959231.8057659,
+    "ast_hash": "0cb799b4df4ca86f4a965f2601f9002f",
+    "semantic_hash": "0cb799b4df4ca86f4a965f2601f9002f"
+  },
+  "/Users/ichlas/No-cloud/meridian/docker-run.sh": {
+    "mtime": 1780750036.8809993,
+    "ast_hash": "812392c011e9ddc817738c597fe15236",
+    "semantic_hash": "812392c011e9ddc817738c597fe15236"
+  },
+  "/Users/ichlas/No-cloud/meridian/test-utils.js": {
+    "mtime": 1780922049.608524,
+    "ast_hash": "b98cae3078f8bec889b31c09ee551f5e",
+    "semantic_hash": "b98cae3078f8bec889b31c09ee551f5e"
+  },
+  "/Users/ichlas/No-cloud/meridian/hivemind-cache.json": {
+    "mtime": 1783011514.9383018,
+    "ast_hash": "4b34e5c2a9b32c4f69f0893dd79f7567",
+    "semantic_hash": "4b34e5c2a9b32c4f69f0893dd79f7567"
+  },
+  "/Users/ichlas/No-cloud/meridian/agent.js": {
+    "mtime": 1783794551.0276034,
+    "ast_hash": "d6760c7d0b869f57733477f517c0c56c",
+    "semantic_hash": "d6760c7d0b869f57733477f517c0c56c"
+  },
+  "/Users/ichlas/No-cloud/meridian/tmp-merge-inspect.mjs": {
+    "mtime": 1782113314.5567052,
+    "ast_hash": "c17c6620ec8cb93cde65e6bd920f51d6",
+    "semantic_hash": "c17c6620ec8cb93cde65e6bd920f51d6"
+  },
+  "/Users/ichlas/No-cloud/meridian/pool-memory.json": {
+    "mtime": 1783014385.641713,
+    "ast_hash": "beff2d305eeedb28564c3ea40bffe17c",
+    "semantic_hash": "beff2d305eeedb28564c3ea40bffe17c"
+  },
+  "/Users/ichlas/No-cloud/meridian/discord-listener/pre-checks.js": {
+    "mtime": 1780760756.9364314,
+    "ast_hash": "5f01e8632a60664b086eb99858b950c9",
+    "semantic_hash": "5f01e8632a60664b086eb99858b950c9"
+  },
+  "/Users/ichlas/No-cloud/meridian/discord-listener/index.js": {
+    "mtime": 1780729978.258422,
+    "ast_hash": "c93867a673dfb0155e8e1766eafa5b66",
+    "semantic_hash": "c93867a673dfb0155e8e1766eafa5b66"
+  },
+  "/Users/ichlas/No-cloud/meridian/discord-listener/package.json": {
+    "mtime": 1780729978.2587757,
+    "ast_hash": "ee3472b5be03ca5544bf87ec6d899194",
+    "semantic_hash": "ee3472b5be03ca5544bf87ec6d899194"
+  },
+  "/Users/ichlas/No-cloud/meridian/tools/chart-indicators.js": {
+    "mtime": 1783219684.5109305,
+    "ast_hash": "2f3e59429eec047deb674c92791d7993",
+    "semantic_hash": "2f3e59429eec047deb674c92791d7993"
+  },
+  "/Users/ichlas/No-cloud/meridian/tools/screening.js": {
+    "mtime": 1783657346.6277165,
+    "ast_hash": "099cd6d7c3450a7b4d978862a90515b8",
+    "semantic_hash": "099cd6d7c3450a7b4d978862a90515b8"
+  },
+  "/Users/ichlas/No-cloud/meridian/tools/okx.js": {
+    "mtime": 1783015345.5046196,
+    "ast_hash": "51f389f6427c57a9afa89787108b911a",
+    "semantic_hash": "51f389f6427c57a9afa89787108b911a"
+  },
+  "/Users/ichlas/No-cloud/meridian/tools/definitions.js": {
+    "mtime": 1783794189.988892,
+    "ast_hash": "a2dcc0dfb576b6677e7faea6afdd3797",
+    "semantic_hash": "a2dcc0dfb576b6677e7faea6afdd3797"
+  },
+  "/Users/ichlas/No-cloud/meridian/tools/wallet.js": {
+    "mtime": 1780959231.8116307,
+    "ast_hash": "10303f3ccabb9ff3f75dfe025ff57590",
+    "semantic_hash": "10303f3ccabb9ff3f75dfe025ff57590"
+  },
+  "/Users/ichlas/No-cloud/meridian/tools/pnl.js": {
+    "mtime": 1783016176.406901,
+    "ast_hash": "b1a74a509e94c6dfbf6f9435dffe7dd4",
+    "semantic_hash": "b1a74a509e94c6dfbf6f9435dffe7dd4"
+  },
+  "/Users/ichlas/No-cloud/meridian/tools/gmgn.js": {
+    "mtime": 1783576024.0372093,
+    "ast_hash": "a8775b0a89bcfa8eb3aae9ddcbcc5865",
+    "semantic_hash": "a8775b0a89bcfa8eb3aae9ddcbcc5865"
+  },
+  "/Users/ichlas/No-cloud/meridian/tools/executor.js": {
+    "mtime": 1783794252.8842657,
+    "ast_hash": "ac18a7ec1579d5290e6d63f43c9a1e67",
+    "semantic_hash": "ac18a7ec1579d5290e6d63f43c9a1e67"
+  },
+  "/Users/ichlas/No-cloud/meridian/tools/study.js": {
+    "mtime": 1783737375.7586305,
+    "ast_hash": "548b42f6fd6d20ece3304d673d0b61da",
+    "semantic_hash": "548b42f6fd6d20ece3304d673d0b61da"
+  },
+  "/Users/ichlas/No-cloud/meridian/tools/crypto-signals.js": {
+    "mtime": 1783289240.7065923,
+    "ast_hash": "895eab2caf51ccdb613ddef07a3c43ff",
+    "semantic_hash": "895eab2caf51ccdb613ddef07a3c43ff"
+  },
+  "/Users/ichlas/No-cloud/meridian/tools/dlmm.js": {
+    "mtime": 1783800371.0883155,
+    "ast_hash": "07225f6186fb27c9ee16d9502b4ebeab",
+    "semantic_hash": "07225f6186fb27c9ee16d9502b4ebeab"
+  },
+  "/Users/ichlas/No-cloud/meridian/tools/agent-meridian.js": {
+    "mtime": 1780729978.2622795,
+    "ast_hash": "ed2bc70bc4f03b13403fa19bb423bbbf",
+    "semantic_hash": "ed2bc70bc4f03b13403fa19bb423bbbf"
+  },
+  "/Users/ichlas/No-cloud/meridian/tools/bot-tracker/stream-ingester.js": {
+    "mtime": 1783609726.057176,
+    "ast_hash": "84a015e721aeb84cddb0f4a7f37f3244",
+    "semantic_hash": "84a015e721aeb84cddb0f4a7f37f3244"
+  },
+  "/Users/ichlas/No-cloud/meridian/tools/bot-tracker/scoring.js": {
+    "mtime": 1783597801.9412029,
+    "ast_hash": "37a3d2b0d7d1a66191ef24c8a4a7d863",
+    "semantic_hash": "37a3d2b0d7d1a66191ef24c8a4a7d863"
+  },
+  "/Users/ichlas/No-cloud/meridian/tools/bot-tracker/arb-wallets.js": {
+    "mtime": 1783587361.5367508,
+    "ast_hash": "b3aa5494942a3d14e16481d3ba1c009c",
+    "semantic_hash": "b3aa5494942a3d14e16481d3ba1c009c"
+  },
+  "/Users/ichlas/No-cloud/meridian/tools/bot-tracker/telegram.js": {
+    "mtime": 1783654400.0618088,
+    "ast_hash": "0c49cf4b8df2fbb709c9f72beaff43d0",
+    "semantic_hash": "0c49cf4b8df2fbb709c9f72beaff43d0"
+  },
+  "/Users/ichlas/No-cloud/meridian/tools/bot-tracker/logger.js": {
+    "mtime": 1783587361.5393474,
+    "ast_hash": "0e048b94a65b856b0c4e3b6ec97eb2bd",
+    "semantic_hash": "0e048b94a65b856b0c4e3b6ec97eb2bd"
+  },
+  "/Users/ichlas/No-cloud/meridian/tools/bot-tracker/db.js": {
+    "mtime": 1783597526.7293694,
+    "ast_hash": "9ef5fee815147e59aceb0e7e98423ff0",
+    "semantic_hash": "9ef5fee815147e59aceb0e7e98423ff0"
+  },
+  "/Users/ichlas/No-cloud/meridian/tools/bot-tracker/holders.js": {
+    "mtime": 1783587361.5383341,
+    "ast_hash": "27adf7d2f86dbfee902eb4d10566c10f",
+    "semantic_hash": "27adf7d2f86dbfee902eb4d10566c10f"
+  },
+  "/Users/ichlas/No-cloud/meridian/tools/bot-tracker/index.js": {
+    "mtime": 1783602931.1439824,
+    "ast_hash": "97f320717861774926d9716a6c735e23",
+    "semantic_hash": "97f320717861774926d9716a6c735e23"
+  },
+  "/Users/ichlas/No-cloud/meridian/tools/bot-tracker/config.js": {
+    "mtime": 1783654183.4055288,
+    "ast_hash": "8e3d31689a13729ddc0a28133051fae8",
+    "semantic_hash": "8e3d31689a13729ddc0a28133051fae8"
+  },
+  "/Users/ichlas/No-cloud/meridian/tools/bot-tracker/safety.js": {
+    "mtime": 1783587361.541146,
+    "ast_hash": "5824a8e60f5c860a23001374ac33c244",
+    "semantic_hash": "5824a8e60f5c860a23001374ac33c244"
+  },
+  "/Users/ichlas/No-cloud/meridian/tools/bot-tracker/cli.js": {
+    "mtime": 1783597480.7279413,
+    "ast_hash": "9ae2540aeb0491e3a070327053b8fb33",
+    "semantic_hash": "9ae2540aeb0491e3a070327053b8fb33"
+  },
+  "/Users/ichlas/No-cloud/meridian/tools/bot-tracker/outcomes.js": {
+    "mtime": 1783587361.5398328,
+    "ast_hash": "def894387f3b76846faa4bd2b2bb6ed6",
+    "semantic_hash": "def894387f3b76846faa4bd2b2bb6ed6"
+  },
+  "/Users/ichlas/No-cloud/meridian/tools/bot-tracker/pruner.js": {
+    "mtime": 1783587361.5404508,
+    "ast_hash": "6def9a725813d43c2e85ab3135d57a91",
+    "semantic_hash": "6def9a725813d43c2e85ab3135d57a91"
+  },
+  "/Users/ichlas/No-cloud/meridian/tools/bot-tracker/tracker.js": {
+    "mtime": 1783599230.6756837,
+    "ast_hash": "1d2761883aac00572b99694ac0154978",
+    "semantic_hash": "1d2761883aac00572b99694ac0154978"
+  },
+  "/Users/ichlas/No-cloud/meridian/tools/bot-tracker/utils/rpc-pool.js": {
+    "mtime": 1783587361.5472121,
+    "ast_hash": "2d149289e56d93b9a4226d9c2d6eab83",
+    "semantic_hash": "2d149289e56d93b9a4226d9c2d6eab83"
+  },
+  "/Users/ichlas/No-cloud/meridian/test/test-helius.js": {
+    "mtime": 1780959231.807112,
+    "ast_hash": "bd91ff80d9be05de5c716c356828baf1",
+    "semantic_hash": "bd91ff80d9be05de5c716c356828baf1"
+  },
+  "/Users/ichlas/No-cloud/meridian/test/test-screening.js": {
+    "mtime": 1780729978.2620382,
+    "ast_hash": "b895c703218273964d878cf10488a14a",
+    "semantic_hash": "b895c703218273964d878cf10488a14a"
+  },
+  "/Users/ichlas/No-cloud/meridian/test/test-pipeline.js": {
+    "mtime": 1780959231.807494,
+    "ast_hash": "2a7db8dfb591a1f1ec21815c1c0c1b1f",
+    "semantic_hash": "2a7db8dfb591a1f1ec21815c1c0c1b1f"
+  },
+  "/Users/ichlas/No-cloud/meridian/test/test-agent.js": {
+    "mtime": 1780729978.261937,
+    "ast_hash": "faf89f059071cad84bb7ea7c2e10e089",
+    "semantic_hash": "faf89f059071cad84bb7ea7c2e10e089"
+  },
+  "/Users/ichlas/No-cloud/meridian/.claude/settings.json": {
+    "mtime": 1780959231.797461,
+    "ast_hash": "e0fb00e07ed0cb886ecd5ea1b1a46ede",
+    "semantic_hash": "e0fb00e07ed0cb886ecd5ea1b1a46ede"
+  },
+  "/Users/ichlas/No-cloud/meridian/utils/number.js": {
+    "mtime": 1780729978.2644472,
+    "ast_hash": "888afc2b06ca23b625dba0cd06d5c86f",
+    "semantic_hash": "888afc2b06ca23b625dba0cd06d5c86f"
+  },
+  "/Users/ichlas/No-cloud/meridian/utils/position-trend.js": {
+    "mtime": 1780959231.8124192,
+    "ast_hash": "0f8219dc86a755900bde7639dd003887",
+    "semantic_hash": "0f8219dc86a755900bde7639dd003887"
+  },
+  "/Users/ichlas/No-cloud/meridian/utils/runtime-mode.js": {
+    "mtime": 1780959231.8129427,
+    "ast_hash": "15cc37862ee0c22f3c82dcdc6c973a66",
+    "semantic_hash": "15cc37862ee0c22f3c82dcdc6c973a66"
+  },
+  "/Users/ichlas/No-cloud/meridian/utils/rpc-pool.js": {
+    "mtime": 1780959231.8127222,
+    "ast_hash": "fa9d841e620dfcdad440f5d13ccfb901",
+    "semantic_hash": "fa9d841e620dfcdad440f5d13ccfb901"
+  },
+  "/Users/ichlas/No-cloud/meridian/utils/fetch-json.js": {
+    "mtime": 1780959231.8118997,
+    "ast_hash": "d866c52d0d8bbb5c35299543b742140b",
+    "semantic_hash": "d866c52d0d8bbb5c35299543b742140b"
+  },
+  "/Users/ichlas/No-cloud/meridian/utils/decision-log.json": {
+    "mtime": 1780871125.0518973,
+    "ast_hash": "f7bd80dad65e4995f8fc01775b1a7eeb",
+    "semantic_hash": "f7bd80dad65e4995f8fc01775b1a7eeb"
+  },
+  "/Users/ichlas/No-cloud/meridian/utils/telegram-formatter.js": {
+    "mtime": 1783794771.478628,
+    "ast_hash": "5b8eee7be1b9bf8a8337b4f771cd22d9",
+    "semantic_hash": "5b8eee7be1b9bf8a8337b4f771cd22d9"
+  },
+  "/Users/ichlas/No-cloud/meridian/utils/paths.js": {
+    "mtime": 1783011858.5186315,
+    "ast_hash": "14d315f7eedf4588da248bde84f4e026",
+    "semantic_hash": "14d315f7eedf4588da248bde84f4e026"
+  },
+  "/Users/ichlas/No-cloud/meridian/utils/smart-wallets.json": {
+    "mtime": 1780821823.8370583,
+    "ast_hash": "b591d5fd208420360c2a74286ea0848f",
+    "semantic_hash": "b591d5fd208420360c2a74286ea0848f"
+  },
+  "/Users/ichlas/No-cloud/meridian/utils/strategy-library.json": {
+    "mtime": 1780850476.028719,
+    "ast_hash": "7c026db73f3d24121ded0606eaa2e738",
+    "semantic_hash": "7c026db73f3d24121ded0606eaa2e738"
+  },
+  "/Users/ichlas/No-cloud/meridian/utils/pool-memory.json": {
+    "mtime": 1780852641.1685395,
+    "ast_hash": "79cd84b301022cba2eded61f412a3388",
+    "semantic_hash": "79cd84b301022cba2eded61f412a3388"
+  },
+  "/Users/ichlas/No-cloud/meridian/ml/features.js": {
+    "mtime": 1783794292.2699714,
+    "ast_hash": "e8c03814e044a6ea7582b133078dce78",
+    "semantic_hash": "e8c03814e044a6ea7582b133078dce78"
+  },
+  "/Users/ichlas/No-cloud/meridian/ml/personality.json": {
+    "mtime": 1780934954.6785624,
+    "ast_hash": "b2f7eca91947f594afa2d83ec5f6e62b",
+    "semantic_hash": "b2f7eca91947f594afa2d83ec5f6e62b"
+  },
+  "/Users/ichlas/No-cloud/meridian/ml/trainer.js": {
+    "mtime": 1783369619.8700655,
+    "ast_hash": "995fb4b3df2c467053418fe04bd241b4",
+    "semantic_hash": "995fb4b3df2c467053418fe04bd241b4"
+  },
+  "/Users/ichlas/No-cloud/meridian/ml/cli.js": {
+    "mtime": 1783394741.4104953,
+    "ast_hash": "dd17e7c85196fa18714df745b398d3a3",
+    "semantic_hash": "dd17e7c85196fa18714df745b398d3a3"
+  },
+  "/Users/ichlas/No-cloud/meridian/ml/personalities.js": {
+    "mtime": 1780959231.8039596,
+    "ast_hash": "fc152a36126e708208a8448405e88c53",
+    "semantic_hash": "fc152a36126e708208a8448405e88c53"
+  },
+  "/Users/ichlas/No-cloud/meridian/ml/model.js": {
+    "mtime": 1783369641.2502334,
+    "ast_hash": "7fde737a93cc28ac6593d635ffb99010",
+    "semantic_hash": "7fde737a93cc28ac6593d635ffb99010"
+  },
+  "/Users/ichlas/No-cloud/meridian/ml/emotion-state.json": {
+    "mtime": 1781091376.8874316,
+    "ast_hash": "a1193615af46628786c7aee50ba9659e",
+    "semantic_hash": "a1193615af46628786c7aee50ba9659e"
+  },
+  "/Users/ichlas/No-cloud/meridian/ml/inference.js": {
+    "mtime": 1783369657.0606115,
+    "ast_hash": "58cc3aae951ca4125a49d590dd1ffc5c",
+    "semantic_hash": "58cc3aae951ca4125a49d590dd1ffc5c"
+  },
+  "/Users/ichlas/No-cloud/meridian/ml/emotions.js": {
+    "mtime": 1780959231.802869,
+    "ast_hash": "32d4ebf006b183f53c65b92917937237",
+    "semantic_hash": "32d4ebf006b183f53c65b92917937237"
+  },
+  "/Users/ichlas/No-cloud/meridian/scripts/watchdog.mjs": {
+    "mtime": 1783369949.590542,
+    "ast_hash": "b0d53d8030fd17fc9e5fbe09ccce858d",
+    "semantic_hash": "b0d53d8030fd17fc9e5fbe09ccce858d"
+  },
+  "/Users/ichlas/No-cloud/meridian/scripts/test-docker.sh": {
+    "mtime": 1783598833.60089,
+    "ast_hash": "5c13ca7667a0c771928ff7ba8f5b50f5",
+    "semantic_hash": "5c13ca7667a0c771928ff7ba8f5b50f5"
+  },
+  "/Users/ichlas/No-cloud/meridian/scripts/healthcheck.mjs": {
+    "mtime": 1783370318.0449958,
+    "ast_hash": "359bdeb7efd3d1b63d6a6b5e7646465d",
+    "semantic_hash": "359bdeb7efd3d1b63d6a6b5e7646465d"
+  },
+  "/Users/ichlas/No-cloud/meridian/scripts/patch-anchor.js": {
+    "mtime": 1780729978.2608216,
+    "ast_hash": "7e22836f32247d8c403e1f52d68ca45c",
+    "semantic_hash": "7e22836f32247d8c403e1f52d68ca45c"
+  },
+  "/Users/ichlas/No-cloud/meridian/scripts/replay-exits.mjs": {
+    "mtime": 1783370016.0022857,
+    "ast_hash": "fb8582c322d7fdd02cfe1b45d336d3f8",
+    "semantic_hash": "fb8582c322d7fdd02cfe1b45d336d3f8"
+  },
+  "/Users/ichlas/No-cloud/meridian/scripts/envrypt.js": {
+    "mtime": 1780729978.2606878,
+    "ast_hash": "b05b6324b1847a82a8e31abb021f5966",
+    "semantic_hash": "b05b6324b1847a82a8e31abb021f5966"
+  },
+  "/Users/ichlas/No-cloud/meridian/data/lessons.json": {
+    "mtime": 1783794825.934483,
+    "ast_hash": "28d9f40d9708084f1e8b49bced7302bc",
+    "semantic_hash": "28d9f40d9708084f1e8b49bced7302bc"
+  },
+  "/Users/ichlas/No-cloud/meridian/data/user-config.json": {
+    "mtime": 1783741908.4587789,
+    "ast_hash": "4a1b09b07f3d3962eac9cf977bffed19",
+    "semantic_hash": "4a1b09b07f3d3962eac9cf977bffed19"
+  },
+  "/Users/ichlas/No-cloud/meridian/data/state.json": {
+    "mtime": 1783794434.3889778,
+    "ast_hash": "efb38c5d825ae0ed05f01bc7ac1957ed",
+    "semantic_hash": "efb38c5d825ae0ed05f01bc7ac1957ed"
+  },
+  "/Users/ichlas/No-cloud/meridian/data/signal-weights.json": {
+    "mtime": 1783576318.0557566,
+    "ast_hash": "9332f46045585876290b4bb32991864d",
+    "semantic_hash": "9332f46045585876290b4bb32991864d"
+  },
+  "/Users/ichlas/No-cloud/meridian/data/decision-log.json": {
+    "mtime": 1780758085.4178016,
+    "ast_hash": "05314136754d3ac117d585443c051503",
+    "semantic_hash": "05314136754d3ac117d585443c051503"
+  },
+  "/Users/ichlas/No-cloud/meridian/data/smart-wallets.json": {
+    "mtime": 1780852015.2263188,
+    "ast_hash": "96d29a1a06c4af1a33ae90808ac2a4ff",
+    "semantic_hash": "96d29a1a06c4af1a33ae90808ac2a4ff"
+  },
+  "/Users/ichlas/No-cloud/meridian/data/strategy-library.json": {
+    "mtime": 1780734289.802015,
+    "ast_hash": "51a4675712e544f61db56697fc9ed6ad",
+    "semantic_hash": "51a4675712e544f61db56697fc9ed6ad"
+  },
+  "/Users/ichlas/No-cloud/meridian/data/hivemind-cache.json": {
+    "mtime": 1780758230.8935313,
+    "ast_hash": "985ad2158b26a078d4a7ecde17255280",
+    "semantic_hash": "985ad2158b26a078d4a7ecde17255280"
+  },
+  "/Users/ichlas/No-cloud/meridian/data/pool-memory.json": {
+    "mtime": 1783794884.6290846,
+    "ast_hash": "08e033d0942d8d30033d6cc5c9c42fee",
+    "semantic_hash": "08e033d0942d8d30033d6cc5c9c42fee"
+  },
+  "/Users/ichlas/No-cloud/meridian/data/performance-rejects.json": {
+    "mtime": 1783794825.9333673,
+    "ast_hash": "53c19db0036ef94cc9f7d554e3cf45d9",
+    "semantic_hash": "53c19db0036ef94cc9f7d554e3cf45d9"
+  },
+  "/Users/ichlas/No-cloud/meridian/data/ml/personality.json": {
+    "mtime": 1783012828.6054604,
+    "ast_hash": "b2f7eca91947f594afa2d83ec5f6e62b",
+    "semantic_hash": "b2f7eca91947f594afa2d83ec5f6e62b"
+  },
+  "/Users/ichlas/No-cloud/meridian/data/ml/emotion-state.json": {
+    "mtime": 1783794825.9337928,
+    "ast_hash": "fef67817d082906c4ea8ece0abab6698",
+    "semantic_hash": "fef67817d082906c4ea8ece0abab6698"
+  },
+  "/Users/ichlas/No-cloud/meridian/README.md": {
+    "mtime": 1783010105.8268907,
+    "ast_hash": "ab5c0510a04218e88d4d8c26a255069f",
+    "semantic_hash": "ab5c0510a04218e88d4d8c26a255069f"
+  },
+  "/Users/ichlas/No-cloud/meridian/docker-compose.yml": {
+    "mtime": 1783599094.553228,
+    "ast_hash": "9b56e97bbfdc56dbc87393e2670cc060",
+    "semantic_hash": "9b56e97bbfdc56dbc87393e2670cc060"
+  },
+  "/Users/ichlas/No-cloud/meridian/AGENTS.md": {
+    "mtime": 1783183327.2220745,
+    "ast_hash": "11a9ec803b84db0fa92b3faae2d5fcaf",
+    "semantic_hash": "11a9ec803b84db0fa92b3faae2d5fcaf"
+  },
+  "/Users/ichlas/No-cloud/meridian/CLAUDE.md": {
+    "mtime": 1783800475.2101796,
+    "ast_hash": "f054d89341c43853594b253633326e73",
+    "semantic_hash": "f054d89341c43853594b253633326e73"
+  },
+  "/Users/ichlas/No-cloud/meridian/.claude/agents/manager.md": {
+    "mtime": 1780959231.795544,
+    "ast_hash": "6d6a38bb92ec30251c80a5d2ac5b569a",
+    "semantic_hash": "6d6a38bb92ec30251c80a5d2ac5b569a"
+  },
+  "/Users/ichlas/No-cloud/meridian/.claude/agents/screener.md": {
+    "mtime": 1780959231.7956555,
+    "ast_hash": "e08053e00ed06298d202eaad3d026729",
+    "semantic_hash": "e08053e00ed06298d202eaad3d026729"
+  },
+  "/Users/ichlas/No-cloud/meridian/.claude/commands/pool-ohlcv.md": {
+    "mtime": 1780959231.7971113,
+    "ast_hash": "a5f3cbbeae95011e4a7211166288e1a2",
+    "semantic_hash": "a5f3cbbeae95011e4a7211166288e1a2"
+  },
+  "/Users/ichlas/No-cloud/meridian/.claude/commands/balance.md": {
+    "mtime": 1780959231.7964413,
+    "ast_hash": "1bf6cf8a09514da39b5aeee61c373b46",
+    "semantic_hash": "1bf6cf8a09514da39b5aeee61c373b46"
+  },
+  "/Users/ichlas/No-cloud/meridian/.claude/commands/study-pool.md": {
+    "mtime": 1780959231.797364,
+    "ast_hash": "f801619f6daa82f6047c4884c45b8000",
+    "semantic_hash": "f801619f6daa82f6047c4884c45b8000"
+  },
+  "/Users/ichlas/No-cloud/meridian/.claude/commands/manage.md": {
+    "mtime": 1780959231.7967644,
+    "ast_hash": "469adea6013e52d4ac8b233522f256db",
+    "semantic_hash": "469adea6013e52d4ac8b233522f256db"
+  },
+  "/Users/ichlas/No-cloud/meridian/.claude/commands/candidates.md": {
+    "mtime": 1780959231.7965417,
+    "ast_hash": "0099acb579cde6bb7602b9820d515a34",
+    "semantic_hash": "0099acb579cde6bb7602b9820d515a34"
+  },
+  "/Users/ichlas/No-cloud/meridian/.claude/commands/wallet-snapshot.md": {
+    "mtime": 1783794306.5869172,
+    "ast_hash": "99805fec51e6387307b0dccb5e7deb59",
+    "semantic_hash": "99805fec51e6387307b0dccb5e7deb59"
+  },
+  "/Users/ichlas/No-cloud/meridian/.claude/commands/screen.md": {
+    "mtime": 1780959231.7972593,
+    "ast_hash": "f86a7e980c3822197758205a97fc3d3a",
+    "semantic_hash": "f86a7e980c3822197758205a97fc3d3a"
+  },
+  "/Users/ichlas/No-cloud/meridian/.claude/commands/pool-compare.md": {
+    "mtime": 1780959231.7970347,
+    "ast_hash": "1bc70ad15a107c989da6a235aabd646f",
+    "semantic_hash": "1bc70ad15a107c989da6a235aabd646f"
+  },
+  "/Users/ichlas/No-cloud/meridian/.claude/commands/pool-enrich.md": {
+    "mtime": 1783794306.5869167,
+    "ast_hash": "744baeb9c4a8929c3fcdd9bd470bdb77",
+    "semantic_hash": "744baeb9c4a8929c3fcdd9bd470bdb77"
+  },
+  "/Users/ichlas/No-cloud/meridian/.claude/commands/positions.md": {
+    "mtime": 1780959231.79718,
+    "ast_hash": "14d3f5c40a4071880844706b29c39343",
+    "semantic_hash": "14d3f5c40a4071880844706b29c39343"
+  },
+  "/Users/ichlas/No-cloud/meridian/notes/ml-status.md": {
+    "mtime": 1780959231.8048499,
+    "ast_hash": "3a5c07e450d78193bd49cb3f17cc0fcc",
+    "semantic_hash": "3a5c07e450d78193bd49cb3f17cc0fcc"
+  },
+  "/Users/ichlas/No-cloud/meridian/notes/agent-improvement-areas.md": {
+    "mtime": 1780959231.8046257,
+    "ast_hash": "6b81eaeb9befe64570918bdfabdfb367",
+    "semantic_hash": "6b81eaeb9befe64570918bdfabdfb367"
+  },
+  "/Users/ichlas/No-cloud/meridian/.github/workflows/docker-build.yml": {
+    "mtime": 1783597183.470383,
+    "ast_hash": "ef0ceb2e9b801227a5a0e89119690400",
+    "semantic_hash": "ef0ceb2e9b801227a5a0e89119690400"
+  },
+  "/Users/ichlas/No-cloud/meridian/.commandcode/taste/taste.md": {
+    "mtime": 1780760756.935182,
+    "ast_hash": "0f0ea13a48fd9dc655eeb20a6b8a9f27",
+    "semantic_hash": "0f0ea13a48fd9dc655eeb20a6b8a9f27"
+  }
+}

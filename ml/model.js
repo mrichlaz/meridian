@@ -94,6 +94,9 @@ class LogisticRegression {
     // (percentage points). Gates the ML blend lambda; null = never validated.
     this.cvEdge = null;
     this.cvLift = null;
+    // Optional linear calibration fitted only from walk-forward predictions.
+    // Without it, a classifier probability must not be presented as PnL.
+    this.pnlCalibration = null;
     // Dataset standardization stats (see setStandardization)
     this.featureMeans = null;
     this.featureStds = null;
@@ -146,8 +149,10 @@ class LogisticRegression {
   }
 
   predictPnl(features) {
+    if (!this.pnlCalibration) return null;
     const prob = this.score(features);
-    return -20 + prob * 50;
+    const estimate = this.pnlCalibration.intercept + this.pnlCalibration.slope * prob;
+    return Math.max(this.pnlCalibration.min, Math.min(this.pnlCalibration.max, estimate));
   }
 
   // ─── Loss computation ─────────────────────────────────────
@@ -387,6 +392,7 @@ class LogisticRegression {
       predictiveness: this.predictiveness,
       cvEdge: this.cvEdge,
       cvLift: this.cvLift ?? null,
+      pnlCalibration: this.pnlCalibration,
       featureMeans: this.featureMeans ? Array.from(this.featureMeans) : null,
       featureStds: this.featureStds ? Array.from(this.featureStds) : null,
       trainingLoss: this.trainingLoss.slice(-20),
@@ -410,6 +416,13 @@ class LogisticRegression {
       m.predictiveness = raw.predictiveness ?? 0;
       m.cvEdge = raw.cvEdge ?? null;
       m.cvLift = raw.cvLift ?? null;
+      m.pnlCalibration = raw.pnlCalibration &&
+        Number.isFinite(raw.pnlCalibration.intercept) &&
+        Number.isFinite(raw.pnlCalibration.slope) &&
+        Number.isFinite(raw.pnlCalibration.min) &&
+        Number.isFinite(raw.pnlCalibration.max)
+        ? raw.pnlCalibration
+        : null;
       if (Array.isArray(raw.featureMeans) && Array.isArray(raw.featureStds)) {
         m.setStandardization(raw.featureMeans, raw.featureStds);
       }

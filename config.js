@@ -133,6 +133,12 @@ export const config = {
     minTokenAgeHours:   u.minTokenAgeHours   ?? null, // null = no minimum
     maxTokenAgeHours:   u.maxTokenAgeHours   ?? null, // null = no maximum
     athFilterPct:       u.athFilterPct       ?? null, // e.g. -20 = only deploy if price is >= 20% below ATH
+    // Momentum veto (uses OKX 1h price change captured during enrichment).
+    // A single-sided-below ladder gets run over both by post-pump retraces
+    // (entering right after a vertical move) and by active dumps (price falls
+    // straight into the ladder). 0 = off.
+    maxEntryPriceRunup1hPct: u.maxEntryPriceRunup1hPct ?? 30, // skip if 1h change > +30%
+    maxEntryPriceDrop1hPct:  u.maxEntryPriceDrop1hPct  ?? 15, // skip if 1h change < -15%
   },
 
   // ─── Bot-tracker merge funnel ───────────
@@ -212,6 +218,9 @@ export const config = {
     maxDeploysPerToken24h: u.maxDeploysPerToken24h ?? 5,
     minVolumeToRebalance:  u.minVolumeToRebalance  ?? 1000,
     stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? -50,
+    // V-bottom guard: a shallow stop breach must hold this many minutes
+    // before closing (deep breaches — >4pp past the stop — close at once).
+    stopLossConfirmMinutes: u.stopLossConfirmMinutes ?? 3, // 0 = off
     takeProfitPct:         u.takeProfitPct         ?? u.takeProfitFeePct ?? 5,
     minFeePerTvl24h:       u.minFeePerTvl24h       ?? 7,
     minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 60, // minutes before low yield can trigger close
@@ -507,6 +516,19 @@ export function computeDeployAmount(walletSol) {
   const dynamic    = deployable * pct;
   const result     = Math.min(ceil, Math.max(floor, dynamic));
   return parseFloat(result.toFixed(2));
+}
+
+/**
+ * Apply dimensionless policy/profile multipliers to the current base amount.
+ * Kept pure so automated sizing always scales with runtime deployAmountSol
+ * changes instead of drifting toward a historical hardcoded amount.
+ */
+export function scaleDeployAmount(baseAmount, profileMultiplier = 1, scoreMultiplier = 1) {
+  const base = Number(baseAmount);
+  const profile = Number(profileMultiplier);
+  const score = Number(scoreMultiplier);
+  if (![base, profile, score].every(Number.isFinite)) return null;
+  return base * profile * score;
 }
 
 /**

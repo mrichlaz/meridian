@@ -820,12 +820,13 @@ export function formatPerformance(summary, history, options = {}) {
   lines.push("");
   if (summary) {
     const s = summary;
-    lines.push(`${b("Total positions:")} ${s.total ?? "—"}`);
+    lines.push(`${b("Total positions:")} ${s.total_positions_closed ?? s.total ?? "—"}`);
+    if (s.flat_positions > 0) lines.push(`${b("Flat/unpriced:")} ${s.flat_positions} (excluded from win rate)`);
     lines.push(`${b("Win rate:")} ${s.win_rate_pct?.toFixed(1) ?? "—"}%`);
     lines.push(`${b("Avg PnL:")} ${formatPct(s.avg_pnl_pct)}`);
     if (s.total_pnl_usd != null) lines.push(`${b("Total PnL:")} ${formatUsd(s.total_pnl_usd)}`);
     if (s.total_fees_usd != null) lines.push(`${b("Total fees:")} ${formatUsd(s.total_fees_usd, 4)}`);
-    if (s.avg_range_efficiency != null) lines.push(`${b("Avg range efficiency:")} ${s.avg_range_efficiency.toFixed(1)}%`);
+    if (s.avg_range_efficiency_pct != null) lines.push(`${b("Avg range efficiency:")} ${s.avg_range_efficiency_pct.toFixed(1)}%`);
   } else {
     lines.push("No performance data yet.");
   }
@@ -833,8 +834,9 @@ export function formatPerformance(summary, history, options = {}) {
     lines.push("");
     lines.push(b("Recent closes"));
     history.positions.slice(0, 5).forEach((p) => {
-      const sign = p.pnl_pct >= 0 ? "🟢" : "🔴";
-      lines.push(`  ${sign} ${esc(p.pool_name || p.pool?.slice(0, 8) || "?")} — ${formatPct(p.pnl_pct)} • ${formatUsd(p.pnl_usd)} • ${timeAgo(p.recorded_at || p.closed_at)}`);
+      const sign = Number(p.pnl_usd) > 0 ? "🟢" : Number(p.pnl_usd) < 0 ? "🔴" : "⚪";
+      const flatLabel = Number(p.pnl_usd) === 0 ? " • flat/unpriced" : "";
+      lines.push(`  ${sign} ${esc(p.pool_name || p.pool?.slice(0, 8) || "?")} — ${formatPct(p.pnl_pct)} • ${formatUsd(p.pnl_usd)}${flatLabel} • ${timeAgo(p.recorded_at || p.closed_at)}`);
     });
   }
   return { text: lines.join("\n").slice(0, 3900), buttons: ACTION_BUTTONS.status() };

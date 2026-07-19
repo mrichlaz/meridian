@@ -1,8 +1,8 @@
 /**
  * signal-tracker.js — Stages screening signals for later attribution.
  *
- * Deploy-time persistence is not currently wired, so staged signals are
- * short-lived context rather than durable performance data.
+ * Snapshots are staged briefly and transferred into persistent position
+ * state only after an on-chain deploy succeeds.
  */
 
 import { log } from "./logger.js";
@@ -24,6 +24,11 @@ function cleanupStale() {
       if (data.base_mint && _stagedByBaseMint.get(data.base_mint) === addr) {
         _stagedByBaseMint.delete(data.base_mint);
       }
+    }
+  }
+  for (const [addr, data] of _stagedMlFeatures) {
+    if (now - data.staged_at > STAGE_TTL_MS) {
+      _stagedMlFeatures.delete(addr);
     }
   }
 }
@@ -84,7 +89,7 @@ const _stagedMlFeatures = new Map();
 
 /**
  * Stage a full ML feature vector for a pool during screening.
- * Called alongside stageSignals to capture all 74 features at deploy time.
+ * Called alongside stageSignals to capture the full feature vector at deploy time.
  */
 export function stageMlFeatures(poolAddress, features) {
   const poolKey = normalizeKey(poolAddress);

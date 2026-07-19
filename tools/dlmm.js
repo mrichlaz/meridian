@@ -32,6 +32,30 @@ import { agentMeridianJson, getAgentIdForRequests, getAgentMeridianHeaders } fro
 import { getAndClearStagedSignals, getAndClearStagedMlFeatures } from "../signal-tracker.js";
 import { computePositions, fetchDlmmPnlForPool } from "./pnl.js";
 
+// 30d wallet export: single-down ranges beyond 45% were net negative, while
+// the heavily sampled 25-40% band remained profitable. Deep ladders also keep
+// converting into falling inventory before the below-range exit can arm.
+const MAX_SINGLE_SIDE_DOWNSIDE_COVERAGE_PCT = 45;
+
+export function assertSafeSingleSideCoverage(downsideCoveragePct) {
+  if (
+    !Number.isFinite(downsideCoveragePct) ||
+    downsideCoveragePct < 0 ||
+    downsideCoveragePct > MAX_SINGLE_SIDE_DOWNSIDE_COVERAGE_PCT
+  ) {
+    throw new Error(
+      `Unsafe single-side range: downside coverage ${Number(downsideCoveragePct).toFixed(1)}% exceeds the ${MAX_SINGLE_SIDE_DOWNSIDE_COVERAGE_PCT}% safety ceiling.`,
+    );
+  }
+}
+
+export function maxBinsForDownsideCoverage(binStepBp, maxCoveragePct = MAX_SINGLE_SIDE_DOWNSIDE_COVERAGE_PCT) {
+  const step = Number(binStepBp) / 10_000;
+  const coverage = Number(maxCoveragePct) / 100;
+  if (!(step > 0) || !(coverage > 0 && coverage < 1)) return null;
+  return Math.max(1, Math.floor(Math.log(1 / (1 - coverage)) / Math.log(1 + step)));
+}
+
 // ─── Lazy SDK loader ───────────────────────────────────────────
 // @meteora-ag/dlmm → @coral-xyz/anchor uses CJS directory imports
 // that break in ESM on Node 24. Dynamic import defers loading until
@@ -665,12 +689,33 @@ export async function deployPosition({
     throw new Error("Invalid bin range: bins_below and bins_above must be whole-bin integers.");
   }
   const minBinsBelow = Math.max(config.minSafeBinsBelow, Number(config.strategy.minBinsBelow ?? config.minSafeBinsBelow));
+  const requestedBinsBelow = activeBinsBelow;
+  if (isSingleSidedSol) {
+    const coverageBinCap = maxBinsForDownsideCoverage(actualBinStep);
+    if (coverageBinCap != null && activeBinsBelow > coverageBinCap) {
+      activeBinsBelow = Math.max(minBinsBelow, coverageBinCap);
+      log(
+        "deploy",
+        `Clamped single-side range ${requestedBinsBelow} → ${activeBinsBelow} bins for bin_step ${actualBinStep} (${MAX_SINGLE_SIDE_DOWNSIDE_COVERAGE_PCT}% downside ceiling)`,
+      );
+    }
+  }
   const totalBins = activeBinsBelow + activeBinsAbove;
   if (totalBins < minBinsBelow) {
     throw new Error(
       `Invalid deploy range: total bins ${totalBins} is below minimum ${minBinsBelow}. Refusing 1-bin/tiny-range deploy.`,
     );
   }
+
+  const isWideRange = totalBins > 69;
+  const minBinId = activeBin.binId - activeBinsBelow;
+  const maxBinId = isSingleSidedSol ? activeBin.binId : activeBin.binId + activeBinsAbove;
+  const minPrice = Number(getPriceOfBinByBinId(minBinId, actualBinStep).toString());
+  const maxPrice = Number(getPriceOfBinByBinId(maxBinId, actualBinStep).toString());
+  const downsideCoveragePct = activePrice > 0 ? ((activePrice - minPrice) / activePrice) * 100 : null;
+  const upsideCoveragePct = activePrice > 0 ? ((maxPrice - activePrice) / activePrice) * 100 : null;
+  const totalWidthPct = minPrice > 0 ? ((maxPrice - minPrice) / minPrice) * 100 : null;
+  if (isSingleSidedSol) assertSafeSingleSideCoverage(downsideCoveragePct);
 
   if (process.env.DRY_RUN === "true") {
     return {
@@ -684,20 +729,18 @@ export async function deployPosition({
         pool_address,
         strategy: activeStrategy,
         bins_below: activeBinsBelow,
+        requested_bins_below: requestedBinsBelow,
         bins_above: activeBinsAbove,
         downside_pct: downside_pct ?? null,
         upside_pct: upside_pct ?? null,
         amount_x: finalAmountX,
         amount_y: finalAmountY,
-        wide_range: totalBins > 69,
+        wide_range: isWideRange,
+        downside_coverage_pct: downsideCoveragePct,
       },
       message: "DRY RUN — no transaction sent",
     };
   }
-
-  const isWideRange = totalBins > 69;
-  const minBinId = activeBin.binId - activeBinsBelow;
-  const maxBinId = isSingleSidedSol ? activeBin.binId : activeBin.binId + activeBinsAbove;
 
   if (minBinId > maxBinId) {
     throw new Error(`Invalid bin range: ${minBinId} -> ${maxBinId}`);
@@ -709,12 +752,6 @@ export async function deployPosition({
   }
 
   await assertRangeDoesNotRequireBinArrayInitialization(pool, minBinId, maxBinId);
-
-  const minPrice = Number(getPriceOfBinByBinId(minBinId, actualBinStep).toString());
-  const maxPrice = Number(getPriceOfBinByBinId(maxBinId, actualBinStep).toString());
-  const downsideCoveragePct = activePrice > 0 ? ((activePrice - minPrice) / activePrice) * 100 : null;
-  const upsideCoveragePct = activePrice > 0 ? ((maxPrice - activePrice) / activePrice) * 100 : null;
-  const totalWidthPct = minPrice > 0 ? ((maxPrice - minPrice) / minPrice) * 100 : null;
 
   // Read base fee directly from pool — baseFactor * binStep / 10^6 gives fee in %
   const baseFactor = pool.lbPair.parameters?.baseFactor ?? 0;
@@ -801,6 +838,7 @@ export async function deployPosition({
           position: positionAddress,
           pool: pool_address,
           pool_name,
+          base_mint: baseMint,
           strategy: activeStrategy,
           bin_range: { min: minBinId, max: maxBinId, bins_below: activeBinsBelow, bins_above: activeBinsAbove },
           bin_step,
@@ -1005,6 +1043,7 @@ export async function deployPosition({
       position: newPosition.publicKey.toString(),
       pool: pool_address,
       pool_name,
+      base_mint: baseMint,
       strategy: activeStrategy,
       bin_range: { min: minBinId, max: maxBinId, bins_below: activeBinsBelow, bins_above: activeBinsAbove },
       bin_step,
@@ -1232,6 +1271,24 @@ function resolvePerformanceSignalSnapshot({ poolAddress, baseMint, tracked }) {
   return Object.values(snapshot).some((value) => value != null) ? snapshot : null;
 }
 
+export function deployLearningMetadata(tracked, signalSnapshot = null) {
+  if (!tracked) return {};
+  return {
+    deployed_at: tracked.deployed_at || null,
+    signal_snapshot: signalSnapshot || tracked.signal_snapshot || null,
+    ml_snapshot: tracked.ml_snapshot || null,
+    entry_mcap: tracked.entry_mcap ?? null,
+    entry_tvl: tracked.entry_tvl ?? null,
+    entry_volume: tracked.entry_volume ?? null,
+    entry_holders: tracked.entry_holders ?? null,
+    entry_score: tracked.entry_score ?? null,
+    entry_regime: tracked.entry_regime ?? null,
+    entry_fee_volatility_ratio: tracked.entry_fee_volatility_ratio ?? null,
+    entry_volume_persistence_ratio: tracked.entry_volume_persistence_ratio ?? null,
+    entry_toxic_flow: tracked.entry_toxic_flow ?? null,
+  };
+}
+
 function getClosedPnlValue(posEntry, solMode = false) {
   return solMode
     ? maybeNum(posEntry?.pnlSol) ?? maybeNum(posEntry?.pnl?.valueNative) ?? 0
@@ -1393,7 +1450,7 @@ async function backfillExternalClose(positionAddress, tracked) {
       minutes_in_range: minutesHeld, // unknown — assume fully in range as neutral default
       minutes_held: minutesHeld,
       close_reason: "external close via wallet",
-      deployed_at: tracked.deployed_at || null,
+      ...deployLearningMetadata(tracked),
     });
     log("close_warn", `Backfilled performance for externally-closed ${positionAddress.slice(0, 12)} (${tracked.pool_name || "?"})`);
   } catch (e) {
@@ -1937,7 +1994,7 @@ export async function closePosition({ position_address, reason }) {
             minutes_in_range: minutesHeld, // unknown — assume fully in range as neutral default
             minutes_held: minutesHeld,
             close_reason: externalCloseReason,
-            deployed_at: tracked.deployed_at || null,
+            ...deployLearningMetadata(tracked),
           });
           log("close_warn", `Backfilled recordPerformance for externally-closed position ${position_address.slice(0, 12)}`);
         } catch (e) {
@@ -2158,13 +2215,7 @@ export async function closePosition({ position_address, reason }) {
           minutes_in_range: minutesHeld - minutesOOR,
           minutes_held: minutesHeld,
           close_reason: reason || "agent decision",
-          deployed_at: tracked.deployed_at || null,
-          signal_snapshot: signalSnapshot,
-          ml_snapshot: tracked.ml_snapshot || null,
-          entry_mcap: tracked.entry_mcap ?? null,
-          entry_tvl: tracked.entry_tvl ?? null,
-          entry_volume: tracked.entry_volume ?? null,
-          entry_holders: tracked.entry_holders ?? null,
+          ...deployLearningMetadata(tracked, signalSnapshot),
           ...exitMarket,
         }).catch((e) => log("close_warn", `recordPerformance failed (close still succeeded): ${e.message}`));
 
@@ -2490,11 +2541,7 @@ export async function closePosition({ position_address, reason }) {
         minutes_in_range: minutesHeld - minutesOOR,
         minutes_held: minutesHeld,
         close_reason: reason || "agent decision",
-        signal_snapshot: signalSnapshot,
-        entry_mcap: tracked.entry_mcap ?? null,
-        entry_tvl: tracked.entry_tvl ?? null,
-        entry_volume: tracked.entry_volume ?? null,
-        entry_holders: tracked.entry_holders ?? null,
+        ...deployLearningMetadata(tracked, signalSnapshot),
         ...exitMarket,
       }).catch((e) => log("close_warn", `recordPerformance failed (close still succeeded): ${e.message}`));
 

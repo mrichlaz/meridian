@@ -9,9 +9,10 @@ import bs58 from "bs58";
 import { log } from "../logger.js";
 import { config } from "../config.js";
 
-import { getConnection } from "../utils/rpc-pool.js";
+import { getConnection, getConnections } from "../utils/rpc-pool.js";
 
 let _wallet = null;
+let _lastSolPrice = 0;
 
 function getWallet() {
   if (!_wallet) {
@@ -24,6 +25,7 @@ function getWallet() {
 const JUPITER_PRICE_API = "https://api.jup.ag/price/v3";
 const JUPITER_SWAP_V2_API = "https://api.jup.ag/swap/v2";
 const DEFAULT_JUPITER_API_KEY = "b15d42e9-e0e4-4f90-a424-ae41ceeaa382";
+const JUPITER_ASSET_SEARCH = "https://datapi.jup.ag/v1/assets/search";
 
 function getJupiterApiKey() {
   return config.jupiter.apiKey || process.env.JUPITER_API_KEY || DEFAULT_JUPITER_API_KEY;
@@ -52,7 +54,59 @@ function getJupiterReferralParams() {
  * Get current wallet balances: SOL, USDC, and all SPL tokens using Helius Wallet API.
  * Returns USD-denominated values provided by Helius.
  */
-export async function getWalletBalances() {
+export async function fetchHeliusWalletBalancesWithFailover({ walletAddress, keys, fetchFn = fetch, maxAttempts = 3 }) {
+  const candidates = [...new Set((keys || []).map((key) => String(key).trim()).filter(Boolean))];
+  const attempts = Math.min(candidates.length, Math.max(1, maxAttempts));
+  let lastError = null;
+  for (let index = 0; index < attempts; index++) {
+    const key = candidates[index];
+    try {
+      const url = `https://api.helius.xyz/v1/wallet/${walletAddress}/balances?api-key=${key}`;
+      const res = await fetchFn(url, { signal: AbortSignal.timeout(8_000) });
+      if (!res.ok) throw new Error(`Helius API error: ${res.status} ${res.statusText}`);
+      return { data: await res.json(), attempts: index + 1, error: null };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  return { data: null, attempts, error: lastError?.message || "Helius wallet API unavailable" };
+}
+
+async function fetchFallbackSolPrice(fetchFn = fetch) {
+  if (_lastSolPrice > 0) return _lastSolPrice;
+  try {
+    const res = await fetchFn(`${JUPITER_ASSET_SEARCH}?query=${config.tokens.SOL}`, { signal: AbortSignal.timeout(8_000) });
+    if (!res.ok) return 0;
+    const assets = await res.json();
+    const sol = (Array.isArray(assets) ? assets : [assets]).find((asset) => asset?.id === config.tokens.SOL) || assets?.[0];
+    const price = Number(sol?.usdPrice);
+    if (Number.isFinite(price) && price > 0) _lastSolPrice = price;
+    return _lastSolPrice;
+  } catch {
+    return 0;
+  }
+}
+
+async function fetchRpcSolBalance(publicKey, connections = null) {
+  let lastError = null;
+  let pool;
+  try {
+    pool = connections || getConnections();
+  } catch (error) {
+    return { sol: null, error: error.message };
+  }
+  for (const connection of pool) {
+    try {
+      const lamports = await connection.getBalance(publicKey, "confirmed");
+      return { sol: lamports / LAMPORTS_PER_SOL, error: null };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  return { sol: null, error: lastError?.message || "RPC balance lookup failed" };
+}
+
+export async function getWalletBalances({ fetchFn = fetch, connections = null } = {}) {
   let walletAddress;
   try {
     walletAddress = getWallet().publicKey.toString();
@@ -60,28 +114,15 @@ export async function getWalletBalances() {
     return { wallet: null, sol: 0, sol_price: 0, sol_usd: 0, usdc: 0, tokens: [], total_usd: 0, error: "Wallet not configured" };
   }
 
-  // Support HELIUS_API_KEYS or comma-separated HELIUS_API_KEY — pick the first one
+  // Support HELIUS_API_KEYS or comma-separated HELIUS_API_KEY. Try multiple
+  // keys before degrading because 429s can be key-specific.
   const rawKey = process.env.HELIUS_API_KEYS || process.env.HELIUS_API_KEY;
-  if (!rawKey) {
-    log("wallet_error", "HELIUS_API_KEYS not set in .env");
-    return { wallet: walletAddress, sol: 0, sol_price: 0, sol_usd: 0, usdc: 0, tokens: [], total_usd: 0, error: "Helius API keys missing" };
-  }
-  const keys = rawKey.split(",").map((s) => s.trim()).filter(Boolean);
-  const HELIUS_KEY = keys[Math.floor(Math.random() * keys.length)];
-  if (!HELIUS_KEY) {
-    log("wallet_error", "HELIUS_API_KEY not set in .env");
-    return { wallet: walletAddress, sol: 0, sol_price: 0, sol_usd: 0, usdc: 0, tokens: [], total_usd: 0, error: "Helius API key missing" };
-  }
+  const keys = rawKey ? rawKey.split(",").map((s) => s.trim()).filter(Boolean) : [];
 
   try {
-    const url = `https://api.helius.xyz/v1/wallet/${walletAddress}/balances?api-key=${HELIUS_KEY}`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
-    
-    if (!res.ok) {
-      throw new Error(`Helius API error: ${res.status} ${res.statusText}`);
-    }
-
-    const data = await res.json();
+    const helius = await fetchHeliusWalletBalancesWithFailover({ walletAddress, keys, fetchFn });
+    if (!helius.data) throw new Error(helius.error || "Helius wallet API unavailable");
+    const data = helius.data;
     const balances = data.balances || [];
 
     // ─── Find SOL and USDC ────────────────────────────────────
@@ -90,6 +131,7 @@ export async function getWalletBalances() {
 
     const solBalance = solEntry?.balance || 0;
     const solPrice = solEntry?.pricePerToken || 0;
+    if (solPrice > 0) _lastSolPrice = solPrice;
     const solUsd = solEntry?.usdValue || 0;
     const usdcBalance = usdcEntry?.balance || 0;
 
@@ -112,6 +154,27 @@ export async function getWalletBalances() {
     };
   } catch (error) {
     log("wallet_error", error.message);
+    // The Wallet API is an enrichment convenience, not the source of truth
+    // for native SOL. Fall back to JSON-RPC and a cached/public SOL price so a
+    // transient Helius gateway error does not cancel the whole screening cycle.
+    const rpc = await fetchRpcSolBalance(getWallet().publicKey, connections);
+    const solPrice = await fetchFallbackSolPrice(fetchFn);
+    if (Number.isFinite(rpc.sol) && rpc.sol >= 0 && solPrice > 0) {
+      const sol = Math.round(rpc.sol * 1e6) / 1e6;
+      const solUsd = Math.round(sol * solPrice * 100) / 100;
+      log("wallet_warn", `Helius wallet API unavailable; using RPC SOL balance fallback after: ${error.message}`);
+      return {
+        wallet: walletAddress,
+        sol,
+        sol_price: Math.round(solPrice * 100) / 100,
+        sol_usd: solUsd,
+        usdc: 0,
+        tokens: [],
+        total_usd: solUsd,
+        degraded: true,
+        source: "rpc+jupiter",
+      };
+    }
     return {
       wallet: walletAddress,
       sol: 0,
@@ -120,7 +183,7 @@ export async function getWalletBalances() {
       usdc: 0,
       tokens: [],
       total_usd: 0,
-      error: error.message,
+      error: `${error.message}; fallback failed: ${rpc.error || "SOL price unavailable"}`,
     };
   }
 }

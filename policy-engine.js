@@ -1,5 +1,8 @@
 import { config } from "./config.js";
 import { getPerformanceSummary, getPerformanceHistory } from "./lessons.js";
+import { applyLearnedRangePreference, buildAdaptivePreferenceProfile, candidatePreferenceAdjustment } from "./adaptive-preferences.js";
+
+const LOSS_PAUSE_MS = 6 * 60 * 60 * 1000;
 
 function n(value, fallback = 0) {
   const x = Number(value);
@@ -55,12 +58,23 @@ export function scoreCandidate(pool = {}, context = {}) {
   const volume = n(pool.volume_window ?? pool.volume_30m ?? pool.volume_1h ?? pool.volume_24h);
   const holders = n(pool.holders ?? pool.base?.holder_count);
   const volatility = n(pool.volatility);
+  const binStep = n(pool.bin_step ?? pool.dlmm_params?.bin_step);
   const age = n(pool.token_age_hours, 24);
   const top10 = n(pool.top10_pct ?? pool.holder_top10_pct ?? context.audit?.top_holders_pct);
   const bots = n(pool.bot_holders_pct ?? context.audit?.bot_holders_pct);
   const bundle = n(pool.bundle_pct ?? pool.gmgn_bundler_pct);
   const smart = pool.smart_money_buy || context.smartWallets?.smart_money_buy ? 8 : 0;
   const flow = getFlowQuality(pool, context);
+  const preferenceProfile = context.preferenceProfile
+    || buildAdaptivePreferenceProfile(getPerformanceHistory({ limit: 500 })?.records || []);
+  const learned = candidatePreferenceAdjustment(pool, preferenceProfile);
+  const rangeLo = n(config.strategy?.minBinsBelow, n(config.minSafeBinsBelow, 35));
+  const rangeHi = Math.max(rangeLo, n(config.strategy?.maxBinsBelow, rangeLo));
+  const rangeDefault = clamp(n(config.strategy?.defaultBinsBelow, Math.round((rangeLo + rangeHi) / 2)), rangeLo, rangeHi);
+  const baseBins = volatility > 0
+    ? Math.round(clamp(rangeLo + (volatility / 5) * (rangeHi - rangeLo), rangeLo, rangeHi))
+    : rangeDefault;
+  learned.recommendedBinsBelow = applyLearnedRangePreference(baseBins, binStep, learned.rangeTargetPct);
 
   let score = 0;
   score += clamp(fee / 0.08, 0, 2) * 20;
@@ -77,6 +91,12 @@ export function scoreCandidate(pool = {}, context = {}) {
   score -= clamp((bundle - 15) / 20, 0, 2) * 8;
   if (flow.toxic) score -= n(config.policy?.toxicFlowPenalty, 22);
   if (pool.is_pvp) score -= 15;
+  // Use a small conservative prior until this deployment has enough labeled
+  // examples. Once qualified, rolling long+recent signed expectancy replaces
+  // the prior, so a market-regime change can reverse the preference.
+  const binStepHasLearnedEvidence = learned.evidence.some((item) => item.name === "bin step");
+  if (binStep > 100 && !binStepHasLearnedEvidence) score -= 6;
+  score += learned.scoreAdjustment;
 
   const reasons = [...flow.toxicReasons];
   if (fee < 0.03) reasons.push("weak fee/active-TVL");
@@ -87,8 +107,12 @@ export function scoreCandidate(pool = {}, context = {}) {
   if (volatility <= 0) reasons.push("unusable volatility");
   if (top10 > 55) reasons.push("high top-10 concentration");
   if (bots > 35) reasons.push("high bot-holder concentration");
+  if (binStep > 100 && !binStepHasLearnedEvidence) reasons.push(`bin step ${binStep} uses a conservative prior pending enough recent outcomes`);
+  for (const item of learned.evidence.filter((evidence) => evidence.adjustment < 0)) {
+    reasons.push(`learned ${item.name} expectancy is weaker (${item.longLift}% long / ${item.recentLift}% recent lift)`);
+  }
 
-  return { score: Math.round(clamp(score, 0, 100)), reasons, flow };
+  return { score: Math.round(clamp(score, 0, 100)), reasons, flow, learned };
 }
 
 export function getMarketRegime({ performanceSummary = getPerformanceSummary(), recentPerformance = null } = {}) {
@@ -102,19 +126,58 @@ export function getMarketRegime({ performanceSummary = getPerformanceSummary(), 
   return { regime: "NEUTRAL", minScore: n(config.policy?.neutralMinScore, 66), sizeMultiplier: 1, reason: "normal operating regime" };
 }
 
-export function checkCircuitBreaker({ positions = null, balance = null, performanceSummary = getPerformanceSummary() } = {}) {
+function closeTimestamp(record) {
+  return Date.parse(record?.recorded_at || record?.closed_at || record?.deployed_at || "") || 0;
+}
+
+export function checkCircuitBreaker({
+  positions = null,
+  balance = null,
+  recentPerformance = null,
+  now = Date.now(),
+} = {}) {
   // A failed balance lookup (Helius/RPC down, rate-limited right after a
   // restart) returns { sol: 0, error: "..." } — that is NOT a real zero
   // balance, so it must not trip the emergency floor.
   if (balance && !balance.error && n(balance.sol) < 0.25) return { blocked: true, reason: `SOL balance ${balance.sol} below 0.25 emergency floor` };
   if (positions && positions.total_positions >= positions.maxPositions) return { blocked: true, reason: "max positions reached" };
-  const recent = getPerformanceHistory({ limit: 6 })?.records || [];
-  const last3 = recent.slice(-3);
-  if (last3.length === 3 && last3.every((p) => n(p.pnl_usd) < 0)) {
-    return { blocked: true, reason: "3 consecutive losing closes — pause deploys until reviewed" };
+  const recent = recentPerformance || getPerformanceHistory({ limit: 12 })?.records || [];
+  const latestCloseAt = closeTimestamp(recent.at(-1));
+  const lossPauseActive = latestCloseAt > 0 && now - latestCloseAt < LOSS_PAUSE_MS;
+  const remainingMinutes = Math.max(1, Math.ceil((LOSS_PAUSE_MS - (now - latestCloseAt)) / 60000));
+  const last6 = recent.slice(-6);
+  const recentPnlUsd = last6.reduce((sum, record) => sum + n(record.pnl_usd), 0);
+  const worstRecentPnlUsd = last6.reduce((worst, record) => Math.min(worst, n(record.pnl_usd)), 0);
+  const recentCapitalUsd = last6.reduce((sum, record) => {
+    const initialValue = Number(record.initial_value_usd);
+    return sum + (Number.isFinite(initialValue) && initialValue > 0 ? initialValue : 0);
+  }, 0);
+  const recentReturnPct = recentCapitalUsd > 0 ? (recentPnlUsd / recentCapitalUsd) * 100 : null;
+  const worstRecentPnlPct = last6.reduce((worst, record) => {
+    const pnlPct = Number(record.pnl_pct);
+    return Number.isFinite(pnlPct) ? Math.min(worst, pnlPct) : worst;
+  }, 0);
+  const normalizedTailLoss = worstRecentPnlPct <= -5 || (recentReturnPct != null && recentReturnPct <= -2);
+  const legacyTailLoss = recentCapitalUsd === 0 && (recentPnlUsd <= -25 || worstRecentPnlUsd <= -20);
+  // A single left-tail close can erase many normal fee wins. Pause before the
+  // next screening cycle compounds the drawdown; the pause recovers on its own.
+  if (lossPauseActive && last6.length > 0 && (normalizedTailLoss || legacyTailLoss)) {
+    return {
+      blocked: true,
+      reason: `recent tail loss ${recentReturnPct == null ? "" : `${recentReturnPct.toFixed(1)}% / `}$${recentPnlUsd.toFixed(2)} across ${last6.length} closes (worst ${worstRecentPnlPct.toFixed(1)}% / $${worstRecentPnlUsd.toFixed(2)}) — cooling down for ${remainingMinutes}m`,
+    };
   }
-  if (performanceSummary?.total_positions_closed >= 5 && n(performanceSummary.win_rate_pct) < 25) {
-    return { blocked: true, reason: `win rate ${performanceSummary.win_rate_pct}% below 25% circuit breaker` };
+  const last3 = recent.slice(-3);
+  if (lossPauseActive && last3.length === 3 && last3.every((p) => n(p.pnl_usd) < 0)) {
+    return { blocked: true, reason: `3 consecutive losing closes — cooling down for ${remainingMinutes}m` };
+  }
+  const recentWindow = recent.slice(-12);
+  if (lossPauseActive && recentWindow.length >= 5) {
+    const recentWins = recentWindow.filter((p) => n(p.pnl_usd) > 0).length;
+    const recentWinRate = (recentWins / recentWindow.length) * 100;
+    if (recentWinRate < 25) {
+      return { blocked: true, reason: `recent win rate ${recentWinRate.toFixed(1)}% below 25% — cooling down for ${remainingMinutes}m` };
+    }
   }
   return { blocked: false };
 }
@@ -124,9 +187,10 @@ export function rankCandidates(entries = [], { regime = getMarketRegime() } = {}
     return entries.map((entry) => ({ ...entry, policy: { score: 100, reasons: [], flow: getFlowQuality(entry.pool, { audit: entry.ti?.audit, smartWallets: entry.sw }), regime: regime.regime, minScore: 0, disabled: true } }));
   }
   const minFeeVol = n(config.policy?.minFeeVolatilityRatio, 0.01);
+  const preferenceProfile = buildAdaptivePreferenceProfile(getPerformanceHistory({ limit: 500 })?.records || []);
   return entries
     .map((entry) => {
-      const scored = scoreCandidate(entry.pool, { audit: entry.ti?.audit, smartWallets: entry.sw });
+      const scored = scoreCandidate(entry.pool, { audit: entry.ti?.audit, smartWallets: entry.sw, preferenceProfile });
       // Hard EV gate: fee revenue must compensate volatility (adverse-selection
       // proxy). A soft score penalty let high-volume-but-toxic pools through —
       // exactly the trades that produced the left tail. Zero the score so the
@@ -167,3 +231,5 @@ export function sizeMultiplierForScore(score, regime = getMarketRegime()) {
   const confidence = score >= 85 ? 1.25 : score >= 72 ? 1 : 0.65;
   return clamp(confidence * regime.sizeMultiplier, 0.4, 1.25) * getQuietHourAdjustment().multiplier;
 }
+
+export { LOSS_PAUSE_MS };
