@@ -198,7 +198,7 @@ The management cycle is **mostly deterministic in JS, LLM only for the hard case
 
 **Trailing TP two-phase confirmation** (15s recheck):
 - First poll: candidate drop queued in state.
-- 15s later: re-fetch positions, `resolvePendingTrailingDrop` — if the drop still holds (within 1% tolerance), fire `confirmed_trailing_exit` and trigger management cycle.
+- 15s later: re-fetch positions, `resolvePendingTrailingDrop` — if the drop still holds (within 1% tolerance), **close directly via `executeTool("close_position")`** (the recheck IS the confirmation; the old trigger-a-management-cycle path cost 30-60s of LLM round-trip and turned a +1.1% trailing exit into a -0.76% close). The management cycle is the fallback only when the direct close fails.
 - Mirror pattern for peak confirmation (`queuePeakConfirmation` / `resolvePendingPeak`).
 
 ### The screening cycle (multi-stage pipeline)

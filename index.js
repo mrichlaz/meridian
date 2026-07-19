@@ -367,7 +367,23 @@ function scheduleTrailingDropConfirmation(positionAddress) {
         TRAILING_DROP_CONFIRM_TOLERANCE_PCT,
       );
       if (resolved?.confirmed) {
-        log("state", `[Trailing recheck] Confirmed trailing exit for ${positionAddress} — triggering management`);
+        // Close directly instead of spinning up a management cycle: the 15s
+        // recheck IS the confirmation, and the cycle's position refetch + LLM
+        // round-trip costs 30-60s — on a fast dump that latency turned a
+        // +1.1% trailing exit into a -0.76% close (Jimothy, Jul 19).
+        // executeTool runs the same safety checks, notifications, and
+        // auto-swap as the management path.
+        log("state", `[Trailing recheck] Confirmed trailing exit for ${positionAddress} — closing directly`);
+        try {
+          const result = await executeTool("close_position", { position_address: positionAddress, reason: resolved.reason });
+          if (result?.success || result?.already_closed) {
+            log("cron", `[Trailing recheck] Direct trailing close succeeded for ${positionAddress}`);
+            return;
+          }
+          log("cron_error", `[Trailing recheck] Direct trailing close failed for ${positionAddress}: ${result?.error || "unknown error"} — falling back to management cycle`);
+        } catch (error) {
+          log("cron_error", `[Trailing recheck] Direct trailing close error for ${positionAddress}: ${error.message} — falling back to management cycle`);
+        }
         runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Trailing recheck management failed: ${e.message}`));
       }
     } catch (error) {
