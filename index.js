@@ -3586,18 +3586,25 @@ function buildGmgnFunnelReport(stageCounts, allFiltered = [], { fromStage = 1 } 
   if (!stageCounts) return null;
   const sc = stageCounts;
   const funnel = `GMGN funnel: ranked=${sc.ranked ?? "?"} → S1=${sc.s1 ?? "?"} → S2=${sc.s2 ?? "?"} → S3=${sc.s3 ?? "?"} → S4=${sc.s4 ?? "?"} → final=${sc.s5 ?? "?"}`;
+  // Entries without a numeric stage come from outside the GMGN funnel:
+  // discovery-level filters and the merge-layer hard filters in
+  // getTopCandidates (cooldowns, already-holding, persistence floor, …).
+  // Bucket them under their own label instead of the "s" + undefined key.
   const byStage = {};
   for (const f of allFiltered) {
-    if (f.stage < fromStage) continue;
-    const key = `s${f.stage}`;
+    const stage = Number.isFinite(Number(f.stage)) ? Number(f.stage) : null;
+    if (stage != null && stage < fromStage) continue;
+    const key = stage != null ? `s${stage}` : "hard";
     if (!byStage[key]) byStage[key] = [];
     byStage[key].push({ name: f.name, reason: f.reason });
   }
 
   // Per-stage: pick at most 2 examples and summarise the rest as a count
-  const stageLabels = { s2: "S2", s3: "S3", s4: "S4", s5: "S5" };
+  const stageLabels = { s1: "S1", s2: "S2", s3: "S3", s4: "S4", s5: "S5", hard: "Hard filters" };
+  const stageOrder = Object.keys(byStage).sort((a, b) => (a === "hard") - (b === "hard") || a.localeCompare(b));
   const lines = [];
-  for (const [key, items] of Object.entries(byStage)) {
+  for (const key of stageOrder) {
+    const items = byStage[key];
     const label = stageLabels[key] || key;
     if (items.length === 0) continue;
     // Pick 2 representative examples
