@@ -155,6 +155,11 @@ function isThinkingModeToolChoiceError(error) {
   return /thinking mode does not support/i.test(message) && /tool_choice/i.test(message);
 }
 
+function isMissingStreamRoleError(error) {
+  const message = String(error?.message || error?.error?.message || error || "");
+  return /missing role for choice\s+\d+/i.test(message);
+}
+
 // Detect Claude models by name. Used to apply Claude-specific request quirks:
 //   - Anthropic deprecated `temperature` on Sonnet 4.5+, so we must omit it
 //   - Anthropic does not accept tool_choice: "required", so we must stay on "auto"
@@ -268,6 +273,10 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
   let lastUsefulToolSummary = null;
   let forcedModel = null;
   let disableToolsForRetry = false;
+  // Some OpenAI-compatible proxies emit streaming chunks without the required
+  // assistant role. Once detected, keep the rest of this run non-streaming so
+  // tool-result follow-up turns remain compatible too.
+  let useNonStreamingCompletions = false;
   for (let step = 0; step < maxSteps; step++) {
     log("agent", `Step ${step + 1}/${maxSteps}`);
 
@@ -331,11 +340,23 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           // object with the same shape as a non-streamed response — so all
           // downstream logic (tool-call parsing, JSON repair, reasoning_content
           // mapping, empty-response handling) is unchanged.
-          const stream = client.beta.chat.completions.stream(reqParams);
-          // finalChatCompletion() resolves to a full ChatCompletion, or rejects
-          // if the stream ended without producing one (surfaced as a normal
-          // error to the catch block below).
-          response = await stream.finalChatCompletion();
+          if (useNonStreamingCompletions) {
+            response = await client.chat.completions.create(reqParams);
+          } else {
+            try {
+              const stream = client.beta.chat.completions.stream(reqParams);
+              // finalChatCompletion() resolves to a full ChatCompletion, or rejects
+              // if the stream ended without producing one (surfaced as a normal
+              // error to the catch block below).
+              response = await stream.finalChatCompletion();
+            } catch (streamError) {
+              if (!isMissingStreamRoleError(streamError)) throw streamError;
+
+              useNonStreamingCompletions = true;
+              log("agent_warn", "Provider stream omitted assistant role — switching to non-streaming completions for this agent run");
+              response = await client.chat.completions.create(reqParams);
+            }
+          }
         } catch (error) {
           if (providerMode === "system" && isSystemRoleError(error)) {
             providerMode = "user_embedded";
